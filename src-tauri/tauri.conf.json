@@ -1,0 +1,37 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Dhaulagiri Business Suite",
+  "version": "0.1.0",
+  "identifier": "com.dhaulagiri.businesssuite",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Dhaulagiri Business Suite",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1024,
+        "minHeight": 700
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.ico"]
+  },
+  "plugins": {
+    "sql": {
+      "preload": ["sqlite:import-purchases.db", "sqlite:accounts.db"]
+    }
+  }
+}

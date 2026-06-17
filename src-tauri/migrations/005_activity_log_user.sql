@@ -1,0 +1,1 @@
+ALTER TABLE activity_logs ADD COLUMN userName TEXT NOT NULL DEFAULT '';

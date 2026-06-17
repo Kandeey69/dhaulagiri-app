@@ -1,0 +1,147 @@
+.merged-login-page,
+.module-picker-page {
+  min-height: 100vh;
+  background:
+    linear-gradient(135deg, rgba(36, 84, 119, 0.12), transparent 42%),
+    linear-gradient(315deg, rgba(20, 122, 98, 0.12), transparent 38%),
+    #f5f7fb;
+}
+
+.merged-login-page {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 440px);
+  gap: 40px;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+.merged-login-brand {
+  max-width: 600px;
+}
+
+.merged-login-brand h1,
+.module-picker-header h1 {
+  margin: 8px 0 16px;
+  color: #0f172a;
+  font-size: 64px;
+  line-height: 0.95;
+}
+
+.merged-login-brand p,
+.module-picker-header p {
+  max-width: 520px;
+  margin: 0;
+  color: #475569;
+  font-size: 17px;
+  line-height: 1.7;
+}
+
+.merged-login-card {
+  width: min(440px, 100%);
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  padding: 28px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 22px 70px rgba(15, 23, 42, 0.14);
+}
+
+.merged-login-card h2 {
+  margin: 4px 0 8px;
+  color: #0f172a;
+  font-size: 28px;
+  line-height: 1.15;
+}
+
+.module-picker-page {
+  padding: 40px;
+}
+
+.module-picker-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  max-width: 1120px;
+  margin: 0 auto 28px;
+}
+
+.module-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  gap: 18px;
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.module-card {
+  min-height: 260px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  padding: 26px;
+  color: #334155;
+  background: #ffffff;
+  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.12);
+  text-align: left;
+}
+
+.module-card:hover {
+  background: #f8fafc;
+}
+
+.module-card span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.module-card strong {
+  color: #0f172a;
+  font-size: 30px;
+  line-height: 1.1;
+}
+
+.module-card small {
+  max-width: 420px;
+  color: #475569;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+  .merged-login-page,
+  .module-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .merged-login-brand,
+  .merged-login-card {
+    width: 100%;
+    max-width: 560px;
+    justify-self: center;
+  }
+
+  .merged-login-brand h1,
+  .module-picker-header h1 {
+    font-size: 44px;
+  }
+
+  .module-picker-header {
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 640px) {
+  .merged-login-page,
+  .module-picker-page {
+    padding: 24px;
+  }
+
+  .merged-login-card {
+    padding: 22px;
+  }
+}
