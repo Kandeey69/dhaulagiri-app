@@ -175,28 +175,48 @@ async function initDb(db: Database) {
 
 function normalizeWholeNumber(value: string, fieldName: string) {
   const raw = String(value ?? "").trim();
+  const numericValue = Number(raw.replace(/,/g, ""));
 
-  if (!/^\d+$/.test(raw)) {
+  if (!Number.isInteger(numericValue)) {
     throw new Error(`${fieldName} must be a whole number only.`);
   }
 
-  const normalized = String(Number(raw));
+  const normalized = String(numericValue);
 
-  if (Number(normalized) <= 0) {
+  if (numericValue <= 0) {
     throw new Error(`${fieldName} must be greater than zero.`);
   }
 
   return normalized;
 }
 
-function normalizeDateInput(value: string, fieldName = "Date BS") {
+function normalizeDateParts(value: string) {
   const raw = String(value ?? "").trim();
+  const match = raw.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
 
-  if (!/^\d{4}\/\d{2}\/\d{2}$/.test(raw)) {
-    throw new Error(`${fieldName} must be in YYYY/MM/DD format.`);
+  if (!match) {
+    return "";
   }
 
-  return raw;
+  const [, year, monthText, dayText] = match;
+  const month = Number(monthText);
+  const day = Number(dayText);
+
+  if (month < 1 || month > 12 || day < 1 || day > 32) {
+    return "";
+  }
+
+  return `${year}/${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}`;
+}
+
+function normalizeDateInput(value: string, fieldName = "Date BS") {
+  const normalized = normalizeDateParts(value);
+
+  if (!normalized) {
+    throw new Error(`${fieldName} must be in YYYY/MM/DD or YYYY-MM-DD format.`);
+  }
+
+  return normalized;
 }
 
 type PartyRow = {
@@ -505,6 +525,11 @@ export async function updateParty(input: Omit<Party, "createdAt">): Promise<Part
 function normalizeDateDisplay(value: string) {
   const raw = String(value ?? "").trim();
   const serial = Number(raw);
+  const normalized = normalizeDateParts(raw);
+
+  if (normalized) {
+    return normalized;
+  }
 
   if (/^\d+(\.\d+)?$/.test(raw) && serial >= 20000 && serial <= 100000) {
     const excelEpoch = Date.UTC(1899, 11, 30);
@@ -512,7 +537,7 @@ function normalizeDateDisplay(value: string) {
     const year = date.getUTCFullYear();
     const month = String(date.getUTCMonth() + 1).padStart(2, "0");
     const day = String(date.getUTCDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
+    return `${year}/${month}/${day}`;
   }
 
   return raw;

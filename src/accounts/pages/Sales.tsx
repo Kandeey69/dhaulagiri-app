@@ -18,11 +18,27 @@ function normalizeWholeNumber(value: string) {
   return normalized === "0" ? "" : normalized;
 }
 
+function normalizeBsDate(value: string) {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+
+  if (!match) return raw;
+
+  const [, year, monthText, dayText] = match;
+  const month = Number(monthText);
+  const day = Number(dayText);
+
+  if (month < 1 || month > 12 || day < 1 || day > 32) return raw;
+
+  return `${year}/${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}`;
+}
+
 type SalesProps = {
   canManage: boolean;
+  canEdit?: boolean;
 };
 
-export default function Sales({ canManage }: SalesProps) {
+export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [editingSaleId, setEditingSaleId] = useState("");
@@ -32,6 +48,11 @@ export default function Sales({ canManage }: SalesProps) {
   const [salesAmount, setSalesAmount] = useState("");
   const [remarks, setRemarks] = useState("");
   const [message, setMessage] = useState("");
+  const [registerSearch, setRegisterSearch] = useState("");
+  const [billToCancel, setBillToCancel] = useState("");
+  const [cancelledBillNumbersText, setCancelledBillNumbersText] = useState(() =>
+    localStorage.getItem("accounts-cancelled-bill-numbers") ?? ""
+  );
 
   const numericSalesAmount = Number(salesAmount || 0);
   const vatAmount = Number((numericSalesAmount * 0.13).toFixed(2));
@@ -39,7 +60,18 @@ export default function Sales({ canManage }: SalesProps) {
   const totalSalesBeforeVat = sales.reduce((sum, sale) => sum + sale.salesAmount, 0);
   const totalVat = sales.reduce((sum, sale) => sum + sale.vatAmount, 0);
   const totalSales = sales.reduce((sum, sale) => sum + sale.totalAmount, 0);
-  const missingBillNumbers = findMissingNumbers(sales.map((sale) => sale.billNo));
+  const cancelledBillNumbers = parseNumberList(cancelledBillNumbersText);
+  const allMissingBillNumbers = findMissingNumbers(sales.map((sale) => sale.billNo));
+  const missingBillNumbers = allMissingBillNumbers.filter(
+    (billNumber) => !cancelledBillNumbers.includes(billNumber)
+  );
+  const registerSearchText = registerSearch.trim().toLowerCase();
+  const filteredSales = sales.filter((sale) => {
+    if (!registerSearchText) return true;
+
+    const party = parties.find((item) => item.id === sale.partyId);
+    return (party?.name ?? "").toLowerCase().includes(registerSearchText);
+  });
 
   async function loadData() {
     const [loadedParties, loadedSales] = await Promise.all([getParties(), getSales()]);
@@ -51,6 +83,10 @@ export default function Sales({ canManage }: SalesProps) {
     loadData();
   }, []);
 
+  useEffect(() => {
+    localStorage.setItem("accounts-cancelled-bill-numbers", cancelledBillNumbersText);
+  }, [cancelledBillNumbersText]);
+
   function clearForm() {
     setEditingSaleId("");
     setBillNo("");
@@ -60,9 +96,23 @@ export default function Sales({ canManage }: SalesProps) {
     setRemarks("");
   }
 
+  function markBillCancelled(billNumber: number) {
+    const nextNumbers = Array.from(new Set([...cancelledBillNumbers, billNumber])).sort(
+      (left, right) => left - right
+    );
+    setCancelledBillNumbersText(nextNumbers.join(", "));
+    setBillToCancel("");
+  }
+
+  function restoreBillNumber(billNumber: number) {
+    setCancelledBillNumbersText(
+      cancelledBillNumbers.filter((number) => number !== billNumber).join(", ")
+    );
+  }
+
   function handleEditSale(sale: Sale) {
-    if (!canManage) {
-      setMessage("Master access is required to edit sales.");
+    if (!canEdit) {
+      setMessage("Edit access is required to edit sales.");
       return;
     }
 
@@ -107,8 +157,8 @@ export default function Sales({ canManage }: SalesProps) {
 
     try {
       if (editingSaleId) {
-        if (!canManage) {
-          setMessage("Master access is required to update sales.");
+        if (!canEdit) {
+          setMessage("Edit access is required to update sales.");
           return;
         }
 
@@ -199,9 +249,10 @@ export default function Sales({ canManage }: SalesProps) {
             <label>
               Date BS <span className="required">*</span>
               <input
-                placeholder="YYYY/MM/DD"
+                placeholder="YYYY/MM/DD or YYYY-MM-DD"
                 value={dateBs}
                 onChange={(event) => setDateBs(event.target.value)}
+                onBlur={(event) => setDateBs(normalizeBsDate(event.target.value))}
               />
             </label>
 
@@ -266,10 +317,54 @@ export default function Sales({ canManage }: SalesProps) {
 
       <div className="card">
         <h3>Sales Register</h3>
+        <div className="toolbar">
+          <label className="search-field">
+            Search party
+            <input
+              placeholder="Party name"
+              value={registerSearch}
+              onChange={(event) => setRegisterSearch(event.target.value)}
+            />
+          </label>
+
+        </div>
         {missingBillNumbers.length > 0 && (
-          <p className="muted">
-            Missing bill numbers in sequence: {missingBillNumbers.join(", ")}
-          </p>
+          <div className="missing-number-list">
+            <p className="muted">
+              Missing bill numbers in sequence: {missingBillNumbers.join(", ")}
+            </p>
+            <select value={billToCancel} onChange={(event) => setBillToCancel(event.target.value)}>
+              <option value="">Select missing bill number</option>
+              {missingBillNumbers.map((billNumber) => (
+                <option key={billNumber} value={billNumber}>
+                  Bill {billNumber}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="ghost small"
+              disabled={!billToCancel}
+              onClick={() => markBillCancelled(Number(billToCancel))}
+            >
+              Mark selected bill cancelled
+            </button>
+          </div>
+        )}
+        {cancelledBillNumbers.length > 0 && (
+          <div className="missing-number-list">
+            <p className="muted">Cancelled bill numbers:</p>
+            {cancelledBillNumbers.map((billNumber) => (
+              <button
+                key={billNumber}
+                type="button"
+                className="ghost small"
+                onClick={() => restoreBillNumber(billNumber)}
+              >
+                Restore bill {billNumber}
+              </button>
+            ))}
+          </div>
         )}
 
         <div className="table-wrap">
@@ -283,12 +378,12 @@ export default function Sales({ canManage }: SalesProps) {
                 <th>VAT 13%</th>
                 <th>Total Amount</th>
                 <th>Remarks</th>
-                {canManage && <th>Actions</th>}
+                {(canEdit || canManage) && <th>Actions</th>}
               </tr>
             </thead>
 
             <tbody>
-              {sales.map((sale) => {
+              {filteredSales.map((sale) => {
                 const party = parties.find((item) => item.id === sale.partyId);
 
                 return (
@@ -302,31 +397,35 @@ export default function Sales({ canManage }: SalesProps) {
                       <strong>{formatMoney(sale.totalAmount)}</strong>
                     </td>
                     <td>{sale.remarks || "-"}</td>
-                    {canManage && (
+                    {(canEdit || canManage) && (
                       <td className="row-actions">
-                        <button
-                          className="small"
-                          type="button"
-                          onClick={() => handleEditSale(sale)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="danger small"
-                          type="button"
-                          onClick={() => handleDeleteSale(sale)}
-                        >
-                          Delete
-                        </button>
+                        {canEdit && (
+                          <button
+                            className="small"
+                            type="button"
+                            onClick={() => handleEditSale(sale)}
+                          >
+                            Edit
+                          </button>
+                        )}
+                        {canManage && (
+                          <button
+                            className="danger small"
+                            type="button"
+                            onClick={() => handleDeleteSale(sale)}
+                          >
+                            Delete
+                          </button>
+                        )}
                       </td>
                     )}
                   </tr>
                 );
               })}
-              {sales.length === 0 && (
+              {filteredSales.length === 0 && (
                 <tr>
-                  <td className="empty" colSpan={canManage ? 8 : 7}>
-                    No sales yet.
+                  <td className="empty" colSpan={canEdit || canManage ? 8 : 7}>
+                    {sales.length === 0 ? "No sales yet." : "No sales match the party search."}
                   </td>
                 </tr>
               )}
@@ -367,6 +466,17 @@ function findMissingNumbers(values: string[]) {
   }
 
   return missing;
+}
+
+function parseNumberList(value: string) {
+  return Array.from(
+    new Set(
+      value
+        .split(/[,\s]+/)
+        .map((item) => Number(item.trim()))
+        .filter((item) => Number.isInteger(item) && item > 0)
+    )
+  ).sort((a, b) => a - b);
 }
 
 function formatMoney(value: number) {

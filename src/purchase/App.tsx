@@ -206,8 +206,8 @@ const viewItems: View[] = [
   'Local Purchase / Expense',
   'Data Importation',
   'Reports',
-  'Settings',
   'Party Master',
+  'Activity Logs',
 ]
 
 const accountViewItems: View[] = [
@@ -217,6 +217,7 @@ const accountViewItems: View[] = [
   'Local Purchase / Expense',
   'Reports',
   'Party Master',
+  'Activity Logs',
 ]
 
 const reportItems: ReportView[] = [
@@ -246,7 +247,34 @@ const rateFmt = (value: number) =>
 
 const npr = (value: number) => `NPR ${fmt(value)}`
 const ic = (value: number) => `IC ${fmt(value)}`
+const formatCompact = (value: number) =>
+  Number(value || 0).toLocaleString('en-IN', {
+    maximumFractionDigits: 0,
+    notation: 'compact',
+  })
 const dateText = (value: string) => value || '-'
+const normalizeBsDate = (value: string, keepHyphen = false) => {
+  const raw = String(value ?? '').trim()
+  const match = raw.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/)
+
+  if (!match) {
+    return raw
+  }
+
+  const [, year, monthText, dayText] = match
+  const month = Number(monthText)
+  const day = Number(dayText)
+
+  if (month < 1 || month > 12 || day < 1 || day > 32) {
+    return raw
+  }
+
+  const separator = keepHyphen ? '-' : '/'
+  return `${year}${separator}${String(month).padStart(2, '0')}${separator}${String(day).padStart(2, '0')}`
+}
+const normalizeImportedDate = (value: string, keepHyphen = false) => {
+  return normalizeBsDate(value, keepHyphen)
+}
 const latestDateFirst = (left: string, right: string) =>
   (right || '0000/00/00').localeCompare(left || '0000/00/00')
 const oldestDateFirst = (left: string, right: string) =>
@@ -821,6 +849,13 @@ function App({
     () => [...data.payments].sort((left, right) => latestDateFirst(left.paymentDate, right.paymentDate)),
     [data.payments],
   )
+  const filteredPayments = useMemo(
+    () =>
+      sortedPayments.filter((payment) =>
+        paymentMode === 'Indian Supplier' ? isSupplierPayment(payment) : !isSupplierPayment(payment),
+      ),
+    [paymentMode, sortedPayments],
+  )
   const sortedLocalExpenses = useMemo(
     () => [...data.localExpenses].sort((left, right) => latestDateFirst(left.billDate, right.billDate)),
     [data.localExpenses],
@@ -936,6 +971,27 @@ function App({
       recentPayments: sortedPayments.slice(0, 5),
     }
   }, [data, sortedPayments, sortedPurchases])
+
+  const monthlyLandedCost = useMemo(
+    () =>
+      makeMonthlyRows(
+        data.purchases.map((purchase) => ({
+          date: purchase.agentServiceBillDate,
+          amount: purchase.landedCostNPR,
+        })),
+      ),
+    [data.purchases],
+  )
+  const purchaseBySupplier = useMemo(
+    () =>
+      makePartySlices(
+        data.purchases.map((purchase) => ({
+          name: partyName(purchase.vendorPartyId),
+          amount: purchase.supplierAmountNPR,
+        })),
+      ),
+    [data.purchases, partyName],
+  )
 
   const filteredPurchases = useMemo(() => {
     return sortedPurchases.filter((purchase) => {
@@ -1670,10 +1726,10 @@ function App({
       const vendorName = getCsvValue(row, 'vendorName')
       const customAgentName = getCsvValue(row, 'customAgentName')
       const vendorBillNumber = getCsvValue(row, 'vendorBillNumber')
-      const billDate = getCsvValue(row, 'billDate', 'billDateAD')
+      const billDate = normalizeImportedDate(getCsvValue(row, 'billDate', 'billDateAD'), true)
       const pragapanpatraNumber = getCsvValue(row, 'pragapanpatraNumber')
-      const pragapanpatraDate = getCsvValue(row, 'pragapanpatraDate', 'pragapanpatraDateBS')
-      const agentServiceBillDate = getCsvValue(row, 'agentServiceBillDate', 'agentServiceBillDateBS')
+      const pragapanpatraDate = normalizeImportedDate(getCsvValue(row, 'pragapanpatraDate', 'pragapanpatraDateBS'))
+      const agentServiceBillDate = normalizeImportedDate(getCsvValue(row, 'agentServiceBillDate', 'agentServiceBillDateBS'))
       const vendor = partiesByName.get(normalizeKey(vendorName))
       const customAgent = partiesByName.get(normalizeKey(customAgentName))
       const freightStatusValue = getCsvValue(row, 'freightIndiaStatus')
@@ -1848,7 +1904,7 @@ function App({
       const line = index + 2
       const partyNameValue = getCsvValue(row, 'partyName', 'party', 'name')
       const party = partiesByName.get(normalizeKey(partyNameValue))
-      const paymentDate = getCsvValue(row, 'paymentDate', 'paymentDateBS', 'date')
+      const paymentDate = normalizeImportedDate(getCsvValue(row, 'paymentDate', 'paymentDateBS', 'date'))
       const amount = n(getCsvValue(row, 'amountIC', 'amount', 'amountLC'))
       const paymentMethodText = getCsvValue(row, 'paymentMethod', 'bank', 'method')
       const paymentMethodValue = resolvePaymentMethod(paymentMethodText)
@@ -1994,7 +2050,7 @@ function App({
       const line = index + 2
       const partyNameValue = getCsvValue(row, 'partyName', 'party', 'name')
       const party = partiesByName.get(normalizeKey(partyNameValue))
-      const paymentDate = getCsvValue(row, 'paymentDate', 'paymentDateBS', 'date')
+      const paymentDate = normalizeImportedDate(getCsvValue(row, 'paymentDate', 'paymentDateBS', 'date'))
       const amount = n(getCsvValue(row, 'amountNPR', 'amount'))
       const paymentMethodText = getCsvValue(row, 'paymentMethod', 'bank', 'method')
       const paymentMethodValue = resolvePaymentMethod(paymentMethodText)
@@ -2226,6 +2282,8 @@ function App({
 
     const fixedRatePurchase = {
       ...purchaseForm,
+      debitNoteDate: normalizeBsDate(purchaseForm.debitNoteDate),
+      agentServiceBillDate: normalizeBsDate(purchaseForm.agentServiceBillDate),
       supplierExchangeRate: data.settings.defaultExchangeRate,
       freightIndiaExchangeRate: data.settings.defaultExchangeRate,
     }
@@ -2296,8 +2354,9 @@ function App({
     const paymentToSave =
       paymentMode === 'Indian Supplier'
         ? {
-            ...paymentForm,
-            paymentType: 'Indian Supplier Payment' as const,
+          ...paymentForm,
+          paymentDate: normalizeBsDate(paymentForm.paymentDate),
+          paymentType: 'Indian Supplier Payment' as const,
             currency: 'INR/IC' as const,
             amount: paymentForm.amount,
             exchangeRate: data.settings.defaultExchangeRate,
@@ -2310,6 +2369,7 @@ function App({
           }
         : {
             ...paymentForm,
+            paymentDate: normalizeBsDate(paymentForm.paymentDate),
             paymentType: otherPaymentTypeForParty(selectedParty),
             currency: 'NPR' as const,
             amount: paymentForm.amount,
@@ -2445,6 +2505,7 @@ function App({
 
     const localExpenseToSave = {
       ...localExpenseForm,
+      billDate: normalizeBsDate(localExpenseForm.billDate),
       vatNPR: localExpenseVatNPR,
       totalAmountNPR: localExpenseTotalNPR,
     }
@@ -2572,24 +2633,29 @@ function App({
       </Panel>
 
       <div className="metric-grid">
-        <Metric label="Total import purchases" value={data.purchases.length.toString()} />
         <Metric label="Total supplier payable" value={npr(dashboard.supplierPayable)} />
         <Metric label="Total custom agent payable" value={npr(dashboard.agentPayable)} />
-        <Metric label="Total Indian transport payable" value={npr(dashboard.transportPayable)} />
         <Metric label="Total input VAT" value={npr(dashboard.inputVat)} />
         <Metric label="Total landed cost" value={npr(dashboard.landedCost)} />
       </div>
 
+      <Panel title="Landed Cost by Month">
+        <BarChart rows={monthlyLandedCost} emptyText="No landed cost data by agent bill date yet." />
+      </Panel>
+
+      <Panel title="Purchase by Major Indian Supplier">
+        <PieChart slices={purchaseBySupplier} emptyText="No Indian supplier purchase data yet." />
+      </Panel>
+
       <div className="two-column">
         <Panel title="Recent Purchases">
           <Table
-            headers={['Custom bill date', 'Vendor', 'Bill', 'Supplier NPR', 'Agent Payable']}
+            headers={['Agent bill date', 'Indian vendor', 'Bill number', 'INR supplier amount']}
             rows={dashboard.recentPurchases.map((purchase) => [
-              dateText(importPurchaseSortDate(purchase)),
+              dateText(purchase.agentServiceBillDate || importPurchaseSortDate(purchase)),
               partyName(purchase.vendorPartyId),
               purchase.vendorBillNumber,
-              npr(purchase.supplierAmountNPR),
-              npr(purchase.totalAgentPayableNPR),
+              ic(purchase.amountIC),
             ])}
           />
         </Panel>
@@ -2979,7 +3045,7 @@ function App({
         </form>
       </Panel>
 
-      <Panel title="Saved Payments">
+      <Panel title={paymentMode === 'Indian Supplier' ? 'Saved Indian Supplier Payments' : 'Saved Custom Agent / Local Payments'}>
         <div className="table-wrap">
           <table>
             <thead>
@@ -2995,7 +3061,7 @@ function App({
               </tr>
             </thead>
             <tbody>
-              {sortedPayments.map((payment) => (
+              {filteredPayments.map((payment) => (
                 <tr key={payment.id}>
                   <td>{dateText(payment.paymentDate)}</td>
                   <td>{partyName(payment.partyId)}</td>
@@ -3020,7 +3086,7 @@ function App({
                   </td>
                 </tr>
               ))}
-              {!data.payments.length && <EmptyRow columns={8} />}
+              {!filteredPayments.length && <EmptyRow columns={8} />}
             </tbody>
           </table>
         </div>
@@ -3796,10 +3862,6 @@ function App({
             </p>
             <h2>{currentView}</h2>
           </div>
-          <div className="quick-total">
-            <span>Net payable</span>
-            <strong>{npr(dashboard.supplierPayable + dashboard.agentPayable + dashboard.transportPayable)}</strong>
-          </div>
           <button type="button" className="ghost" onClick={logout}>
             Logout
           </button>
@@ -3882,6 +3944,7 @@ function DateField({
         placeholder="YYYY/MM/DD in BS"
         inputMode="numeric"
         onChange={(event) => onChange(event.target.value)}
+        onBlur={(event) => onChange(normalizeBsDate(event.target.value))}
       />
     </Field>
   )
@@ -3953,6 +4016,114 @@ function Metric({ label, value }: { label: string; value: string }) {
   )
 }
 
+function BarChart({
+  emptyText,
+  rows,
+}: {
+  emptyText: string
+  rows: { label: string; amount: number }[]
+}) {
+  const maxAmount = Math.max(...rows.map((row) => row.amount), 0)
+
+  if (!rows.length || maxAmount <= 0) {
+    return <p className="muted">{emptyText}</p>
+  }
+
+  return (
+    <div className="vertical-bar-chart">
+      {rows.map((row) => (
+        <div key={row.label} className="vertical-bar-item">
+          <div className="vertical-bar-value">{npr(row.amount)}</div>
+          <div className="vertical-bar-track">
+            <div className="vertical-bar-fill" style={{ height: `${Math.max(4, (row.amount / maxAmount) * 100)}%` }} />
+          </div>
+          <span>{row.label}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function PieChart({
+  emptyText,
+  slices,
+}: {
+  emptyText: string
+  slices: { name: string; amount: number; color: string }[]
+}) {
+  const [activeSliceName, setActiveSliceName] = useState(slices[0]?.name ?? '')
+  const total = slices.reduce((sum, slice) => sum + slice.amount, 0)
+
+  if (!slices.length || total <= 0) {
+    return <p className="muted">{emptyText}</p>
+  }
+
+  const activeSlice =
+    slices.find((slice) => slice.name === activeSliceName) ?? slices[0]
+  const radius = 42
+  const circumference = 2 * Math.PI * radius
+  let offset = 0
+
+  return (
+    <div className="pie-layout">
+      <svg
+        className="pie-chart"
+        viewBox="0 0 100 100"
+        role="img"
+        aria-label="Purchase by major Indian supplier"
+        onMouseLeave={() => setActiveSliceName(slices[0]?.name ?? '')}
+      >
+        <circle className="pie-chart-base" cx="50" cy="50" r={radius} />
+        {slices.map((slice) => {
+          const length = (slice.amount / total) * circumference
+          const dashOffset = -offset
+          offset += length
+
+          return (
+            <circle
+              key={slice.name}
+              className={slice.name === activeSlice.name ? 'pie-chart-segment active' : 'pie-chart-segment'}
+              cx="50"
+              cy="50"
+              r={radius}
+              stroke={slice.color}
+              strokeDasharray={`${length} ${circumference - length}`}
+              strokeDashoffset={dashOffset}
+              onMouseEnter={() => setActiveSliceName(slice.name)}
+            />
+          )
+        })}
+        <text x="50" y="48" textAnchor="middle" className="pie-total-label">
+          Total
+        </text>
+        <text x="50" y="60" textAnchor="middle" className="pie-total-value">
+          {formatCompact(total)}
+        </text>
+      </svg>
+      <div className="pie-legend">
+        {slices.map((slice) => (
+          <button
+            key={slice.name}
+            type="button"
+            className={slice.name === activeSlice.name ? 'pie-legend-row active' : 'pie-legend-row'}
+            onMouseEnter={() => setActiveSliceName(slice.name)}
+            onFocus={() => setActiveSliceName(slice.name)}
+          >
+            <span style={{ background: slice.color }} />
+            <strong>{slice.name}</strong>
+            <em>{npr(slice.amount)}</em>
+          </button>
+        ))}
+        <div className="pie-detail">
+          <strong>{activeSlice.name}</strong>
+          <span>{npr(activeSlice.amount)}</span>
+          <em>{((activeSlice.amount / total) * 100).toFixed(1)}% of total</em>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function Table({ headers, rows }: { headers: string[]; rows: string[][] }) {
   return (
     <div className="table-wrap">
@@ -3987,6 +4158,92 @@ function EmptyRow({ columns }: { columns: number }) {
       </td>
     </tr>
   )
+}
+
+function makeMonthlyRows(items: { date: string; amount: number }[]) {
+  const buckets = new Map<string, { label: string; amount: number }>()
+
+  items.forEach((item) => {
+    const month = monthBucket(item.date)
+
+    if (!month) {
+      return
+    }
+
+    const existing = buckets.get(month.key)
+    buckets.set(month.key, {
+      label: month.label,
+      amount: (existing?.amount ?? 0) + item.amount,
+    })
+  })
+
+  return Array.from(buckets.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(-12)
+    .map(([, row]) => row)
+}
+
+function monthBucket(value: string) {
+  const match = String(value ?? '').trim().match(/^(\d{4})[/-](\d{1,2})/)
+
+  if (!match) {
+    return null
+  }
+
+  const year = match[1]
+  const month = Number(match[2])
+
+  if (month < 1 || month > 12) {
+    return null
+  }
+
+  return {
+    key: `${year}-${String(month).padStart(2, '0')}`,
+    label: `${bsMonthName(month)} ${year}`,
+  }
+}
+
+function bsMonthName(month: number) {
+  const names = [
+    'Baisakh',
+    'Jestha',
+    'Ashadh',
+    'Shrawan',
+    'Bhadra',
+    'Ashwin',
+    'Kartik',
+    'Mangsir',
+    'Poush',
+    'Magh',
+    'Falgun',
+    'Chaitra',
+  ]
+
+  return names[month - 1] ?? ''
+}
+
+function makePartySlices(items: { name: string; amount: number }[]) {
+  const colors = ['#245477', '#16a34a', '#f97316', '#7c3aed', '#0891b2', '#64748b']
+  const buckets = new Map<string, number>()
+
+  items.forEach((item) => {
+    if (item.amount <= 0) {
+      return
+    }
+
+    buckets.set(item.name, (buckets.get(item.name) ?? 0) + item.amount)
+  })
+
+  const sorted = Array.from(buckets.entries()).sort((left, right) => right[1] - left[1])
+  const top = sorted.slice(0, 5)
+  const otherAmount = sorted.slice(5).reduce((sum, [, amount]) => sum + amount, 0)
+  const rows = otherAmount > 0 ? [...top, ['Other', otherAmount] as [string, number]] : top
+
+  return rows.map(([name, amount], index) => ({
+    name,
+    amount,
+    color: colors[index % colors.length],
+  }))
 }
 
 export default App

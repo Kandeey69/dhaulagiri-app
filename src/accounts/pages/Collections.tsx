@@ -12,13 +12,8 @@ import {
 const bankSuggestions = [
   "Cash",
   "Nabil Bank",
-  "Global IME Bank",
-  "NIC Asia Bank",
+  "Kamana Sewa Bank",
   "Everest Bank",
-  "Siddhartha Bank",
-  "Sanima Bank",
-  "Nepal Bank",
-  "Rastriya Banijya Bank",
 ];
 
 function normalizeWholeNumber(value: string) {
@@ -30,11 +25,27 @@ function normalizeWholeNumber(value: string) {
   return normalized === "0" ? "" : normalized;
 }
 
+function normalizeBsDate(value: string) {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+
+  if (!match) return raw;
+
+  const [, year, monthText, dayText] = match;
+  const month = Number(monthText);
+  const day = Number(dayText);
+
+  if (month < 1 || month > 12 || day < 1 || day > 32) return raw;
+
+  return `${year}/${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}`;
+}
+
 type CollectionsProps = {
   canManage: boolean;
+  canEdit?: boolean;
 };
 
-export default function Collections({ canManage }: CollectionsProps) {
+export default function Collections({ canManage, canEdit = canManage }: CollectionsProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [editingCollectionId, setEditingCollectionId] = useState("");
@@ -45,6 +56,11 @@ export default function Collections({ canManage }: CollectionsProps) {
   const [receiptNo, setReceiptNo] = useState("");
   const [remarks, setRemarks] = useState("");
   const [message, setMessage] = useState("");
+  const [registerSearch, setRegisterSearch] = useState("");
+  const [receiptToCancel, setReceiptToCancel] = useState("");
+  const [cancelledReceiptNumbersText, setCancelledReceiptNumbersText] = useState(() =>
+    localStorage.getItem("accounts-cancelled-receipt-numbers") ?? ""
+  );
 
   const numericAmount = Number(amount || 0);
   const totalCollections = collections.reduce(
@@ -54,9 +70,20 @@ export default function Collections({ canManage }: CollectionsProps) {
   const bankCount = new Set(
     collections.map((collection) => collection.bankName).filter(Boolean)
   ).size;
-  const missingReceiptNumbers = findMissingNumbers(
+  const cancelledReceiptNumbers = parseNumberList(cancelledReceiptNumbersText);
+  const allMissingReceiptNumbers = findMissingNumbers(
     collections.map((collection) => collection.receiptNo ?? "")
   );
+  const missingReceiptNumbers = allMissingReceiptNumbers.filter(
+    (receiptNumber) => !cancelledReceiptNumbers.includes(receiptNumber)
+  );
+  const registerSearchText = registerSearch.trim().toLowerCase();
+  const filteredCollections = collections.filter((collection) => {
+    if (!registerSearchText) return true;
+
+    const party = parties.find((item) => item.id === collection.partyId);
+    return (party?.name ?? "").toLowerCase().includes(registerSearchText);
+  });
 
   async function loadData() {
     const [loadedParties, loadedCollections] = await Promise.all([
@@ -71,6 +98,10 @@ export default function Collections({ canManage }: CollectionsProps) {
     loadData();
   }, []);
 
+  useEffect(() => {
+    localStorage.setItem("accounts-cancelled-receipt-numbers", cancelledReceiptNumbersText);
+  }, [cancelledReceiptNumbersText]);
+
   function clearForm() {
     setEditingCollectionId("");
     setDateBs("");
@@ -81,9 +112,23 @@ export default function Collections({ canManage }: CollectionsProps) {
     setRemarks("");
   }
 
+  function markReceiptCancelled(receiptNumber: number) {
+    const nextNumbers = Array.from(new Set([...cancelledReceiptNumbers, receiptNumber])).sort(
+      (left, right) => left - right
+    );
+    setCancelledReceiptNumbersText(nextNumbers.join(", "));
+    setReceiptToCancel("");
+  }
+
+  function restoreReceiptNumber(receiptNumber: number) {
+    setCancelledReceiptNumbersText(
+      cancelledReceiptNumbers.filter((number) => number !== receiptNumber).join(", ")
+    );
+  }
+
   function handleEditCollection(collection: Collection) {
-    if (!canManage) {
-      setMessage("Master access is required to edit collections.");
+    if (!canEdit) {
+      setMessage("Edit access is required to edit collections.");
       return;
     }
 
@@ -134,8 +179,8 @@ export default function Collections({ canManage }: CollectionsProps) {
 
     try {
       if (editingCollectionId) {
-        if (!canManage) {
-          setMessage("Master access is required to update collections.");
+        if (!canEdit) {
+          setMessage("Edit access is required to update collections.");
           return;
         }
 
@@ -214,9 +259,10 @@ export default function Collections({ canManage }: CollectionsProps) {
             <label>
               Date BS <span className="required">*</span>
               <input
-                placeholder="YYYY/MM/DD"
+                placeholder="YYYY/MM/DD or YYYY-MM-DD"
                 value={dateBs}
                 onChange={(event) => setDateBs(event.target.value)}
+                onBlur={(event) => setDateBs(normalizeBsDate(event.target.value))}
               />
             </label>
 
@@ -234,17 +280,14 @@ export default function Collections({ canManage }: CollectionsProps) {
 
             <label>
               Bank / Cash <span className="required">*</span>
-              <input
-                list="bank-suggestions"
-                value={bankName}
-                onChange={(event) => setBankName(event.target.value)}
-                placeholder="Select or type bank name"
-              />
-              <datalist id="bank-suggestions">
+              <select value={bankName} onChange={(event) => setBankName(event.target.value)}>
+                <option value="">Select bank / cash</option>
                 {bankSuggestions.map((bank) => (
-                  <option key={bank} value={bank} />
+                  <option key={bank} value={bank}>
+                    {bank}
+                  </option>
                 ))}
-              </datalist>
+              </select>
             </label>
 
             <label>
@@ -300,10 +343,54 @@ export default function Collections({ canManage }: CollectionsProps) {
 
       <div className="card">
         <h3>Collection Register</h3>
+        <div className="toolbar">
+          <label className="search-field">
+            Search party
+            <input
+              placeholder="Party name"
+              value={registerSearch}
+              onChange={(event) => setRegisterSearch(event.target.value)}
+            />
+          </label>
+
+        </div>
         {missingReceiptNumbers.length > 0 && (
-          <p className="muted">
-            Missing receipt numbers in sequence: {missingReceiptNumbers.join(", ")}
-          </p>
+          <div className="missing-number-list">
+            <p className="muted">
+              Missing receipt numbers in sequence: {missingReceiptNumbers.join(", ")}
+            </p>
+            <select value={receiptToCancel} onChange={(event) => setReceiptToCancel(event.target.value)}>
+              <option value="">Select missing receipt number</option>
+              {missingReceiptNumbers.map((receiptNumber) => (
+                <option key={receiptNumber} value={receiptNumber}>
+                  Receipt {receiptNumber}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="ghost small"
+              disabled={!receiptToCancel}
+              onClick={() => markReceiptCancelled(Number(receiptToCancel))}
+            >
+              Mark selected receipt cancelled
+            </button>
+          </div>
+        )}
+        {cancelledReceiptNumbers.length > 0 && (
+          <div className="missing-number-list">
+            <p className="muted">Cancelled receipt numbers:</p>
+            {cancelledReceiptNumbers.map((receiptNumber) => (
+              <button
+                key={receiptNumber}
+                type="button"
+                className="ghost small"
+                onClick={() => restoreReceiptNumber(receiptNumber)}
+              >
+                Restore receipt {receiptNumber}
+              </button>
+            ))}
+          </div>
         )}
 
         <div className="table-wrap">
@@ -316,12 +403,12 @@ export default function Collections({ canManage }: CollectionsProps) {
                 <th>Receipt No.</th>
                 <th>Amount</th>
                 <th>Remarks</th>
-                {canManage && <th>Actions</th>}
+                {(canEdit || canManage) && <th>Actions</th>}
               </tr>
             </thead>
 
             <tbody>
-              {collections.map((collection) => {
+              {filteredCollections.map((collection) => {
                 const party = parties.find((item) => item.id === collection.partyId);
 
                 return (
@@ -334,31 +421,37 @@ export default function Collections({ canManage }: CollectionsProps) {
                       <strong>{formatMoney(collection.amount)}</strong>
                     </td>
                     <td>{collection.remarks || "-"}</td>
-                    {canManage && (
+                    {(canEdit || canManage) && (
                       <td className="row-actions">
-                        <button
-                          className="small"
-                          type="button"
-                          onClick={() => handleEditCollection(collection)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="danger small"
-                          type="button"
-                          onClick={() => handleDeleteCollection(collection)}
-                        >
-                          Delete
-                        </button>
+                        {canEdit && (
+                          <button
+                            className="small"
+                            type="button"
+                            onClick={() => handleEditCollection(collection)}
+                          >
+                            Edit
+                          </button>
+                        )}
+                        {canManage && (
+                          <button
+                            className="danger small"
+                            type="button"
+                            onClick={() => handleDeleteCollection(collection)}
+                          >
+                            Delete
+                          </button>
+                        )}
                       </td>
                     )}
                   </tr>
                 );
               })}
-              {collections.length === 0 && (
+              {filteredCollections.length === 0 && (
                 <tr>
-                  <td className="empty" colSpan={canManage ? 7 : 6}>
-                    No collections yet.
+                  <td className="empty" colSpan={canEdit || canManage ? 7 : 6}>
+                    {collections.length === 0
+                      ? "No collections yet."
+                      : "No collections match the party search."}
                   </td>
                 </tr>
               )}
@@ -399,6 +492,17 @@ function findMissingNumbers(values: string[]) {
   }
 
   return missing;
+}
+
+function parseNumberList(value: string) {
+  return Array.from(
+    new Set(
+      value
+        .split(/[,\s]+/)
+        .map((item) => Number(item.trim()))
+        .filter((item) => Number.isInteger(item) && item > 0)
+    )
+  ).sort((a, b) => a - b);
 }
 
 function formatMoney(value: number) {

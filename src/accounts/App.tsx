@@ -44,7 +44,6 @@ const masterPages: Page[] = [
   "reports",
   "parties",
   "imports",
-  "settings",
   "activityLogs",
 ];
 
@@ -184,8 +183,8 @@ export default function App({
       return <Dashboard onNavigate={(target) => setPage(target)} />;
     }
     if (currentPage === "parties") return <Parties canManage={canManage} />;
-    if (currentPage === "sales") return <Sales canManage={canManage} />;
-    if (currentPage === "collections") return <Collections canManage={canManage} />;
+    if (currentPage === "sales") return <Sales canManage={canManage} canEdit />;
+    if (currentPage === "collections") return <Collections canManage={canManage} canEdit />;
     if (currentPage === "creditNotes") return <CreditNotes canManage={canManage} />;
     if (currentPage === "imports") return <Imports canManage={canManage} />;
     if (currentPage === "reports") return <Reports />;

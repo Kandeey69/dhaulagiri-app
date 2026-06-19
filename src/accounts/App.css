@@ -512,10 +512,34 @@ textarea:disabled {
 
 .import-grid,
 .import-card,
+.import-panel,
 .rank-list,
 .mini-list,
 .permission-list,
 .activity-list {
+  display: grid;
+  gap: 10px;
+}
+
+.import-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
+.readonly {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.readonly strong {
+  color: var(--heading);
+}
+
+.import-result-card {
   display: grid;
   gap: 10px;
 }
@@ -604,6 +628,225 @@ textarea:disabled {
 
 .toolbar label {
   min-width: 230px;
+}
+
+.missing-number-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.missing-number-list .muted {
+  flex: 1 0 100%;
+  margin-bottom: 0;
+}
+
+.bar-chart {
+  display: grid;
+  gap: 10px;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: 76px minmax(140px, 1fr) minmax(118px, auto);
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.bar-row span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.bar-row strong {
+  color: var(--heading);
+  text-align: right;
+}
+
+.bar-track {
+  height: 18px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e5e7eb;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), #16a34a);
+}
+
+.vertical-bar-chart {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+  gap: 12px;
+  align-items: end;
+  min-height: 240px;
+  padding-top: 8px;
+}
+
+.vertical-bar-item {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 170px auto;
+  gap: 8px;
+  align-items: end;
+  justify-items: center;
+}
+
+.vertical-bar-value {
+  max-width: 100%;
+  color: var(--heading);
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.vertical-bar-track {
+  width: 34px;
+  height: 170px;
+  display: flex;
+  align-items: end;
+  overflow: hidden;
+  border-radius: 7px 7px 3px 3px;
+  background: #e5e7eb;
+}
+
+.vertical-bar-fill {
+  width: 100%;
+  border-radius: inherit;
+  background: linear-gradient(180deg, var(--brand), #16a34a);
+}
+
+.vertical-bar-item span {
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.pie-layout {
+  display: grid;
+  grid-template-columns: 156px minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
+}
+
+.pie-chart {
+  width: 156px;
+  aspect-ratio: 1;
+  overflow: visible;
+}
+
+.pie-chart-base {
+  fill: none;
+  stroke: #e5e7eb;
+  stroke-width: 14;
+}
+
+.pie-chart-segment {
+  fill: none;
+  stroke-linecap: butt;
+  stroke-width: 14;
+  transform: rotate(-90deg);
+  transform-origin: 50px 50px;
+  cursor: pointer;
+  opacity: 0.72;
+  transition: opacity 150ms ease, stroke-width 150ms ease;
+}
+
+.pie-chart-segment.active,
+.pie-chart-segment:hover {
+  stroke-width: 18;
+  opacity: 1;
+}
+
+.pie-total-label {
+  fill: var(--muted);
+  font-size: 8px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.pie-total-value {
+  fill: var(--heading);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.pie-legend {
+  display: grid;
+  gap: 8px;
+}
+
+.pie-legend-row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 5px 6px;
+  color: inherit;
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+}
+
+.pie-legend-row:hover,
+.pie-legend-row.active {
+  border-color: var(--border);
+  background: #f8fafc;
+}
+
+.pie-legend-row span {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+.pie-legend-row strong {
+  overflow: hidden;
+  color: var(--heading);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pie-legend-row em {
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 800;
+}
+
+.pie-detail {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.pie-detail strong {
+  color: var(--heading);
+}
+
+.pie-detail span {
+  color: var(--text);
+  font-weight: 900;
+}
+
+.pie-detail em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
 }
 
 .table-wrap {

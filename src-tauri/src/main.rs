@@ -3,4 +3,3 @@
 fn main() {
     import_purchase_app_lib::run()
 }
-

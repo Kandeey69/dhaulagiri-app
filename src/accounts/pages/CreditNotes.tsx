@@ -17,6 +17,21 @@ function normalizeWholeNumber(value: string) {
   return normalized === "0" ? "" : normalized;
 }
 
+function normalizeBsDate(value: string) {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+
+  if (!match) return raw;
+
+  const [, year, monthText, dayText] = match;
+  const month = Number(monthText);
+  const day = Number(dayText);
+
+  if (month < 1 || month > 12 || day < 1 || day > 32) return raw;
+
+  return `${year}/${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}`;
+}
+
 type CreditNotesProps = {
   canManage: boolean;
 };
@@ -29,12 +44,11 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
   const [dateBs, setDateBs] = useState("");
   const [partyId, setPartyId] = useState("");
   const [amount, setAmount] = useState("");
-  const [vatAmount, setVatAmount] = useState("");
   const [remarks, setRemarks] = useState("");
   const [message, setMessage] = useState("");
 
   const numericAmount = Number(amount || 0);
-  const numericVatAmount = Number(vatAmount || 0);
+  const numericVatAmount = Number((numericAmount * 0.13).toFixed(2));
   const totalAmount = Number((numericAmount + numericVatAmount).toFixed(2));
 
   async function loadData() {
@@ -52,7 +66,6 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
     setDateBs("");
     setPartyId("");
     setAmount("");
-    setVatAmount("");
     setRemarks("");
   }
 
@@ -68,7 +81,6 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
     setDateBs(creditNote.dateBs);
     setPartyId(creditNote.partyId);
     setAmount(String(creditNote.amount));
-    setVatAmount(String(creditNote.vatAmount));
     setRemarks(creditNote.remarks ?? "");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -204,9 +216,10 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
             <label>
               Date BS <span className="required">*</span>
               <input
-                placeholder="YYYY/MM/DD"
+                placeholder="YYYY/MM/DD or YYYY-MM-DD"
                 value={dateBs}
                 onChange={(e) => setDateBs(e.target.value)}
+                onBlur={(e) => setDateBs(normalizeBsDate(e.target.value))}
               />
             </label>
 
@@ -234,14 +247,8 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
             </label>
 
             <label>
-              VAT <span className="required">*</span>
-              <input
-                min="0"
-                step="0.01"
-                type="number"
-                value={vatAmount}
-                onChange={(e) => setVatAmount(e.target.value)}
-              />
+              VAT 13%
+              <input readOnly value={formatMoney(numericVatAmount)} />
             </label>
 
             <label>
