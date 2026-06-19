@@ -1,19 +1,13 @@
 export type PartyCategory =
-  | 'Indian Supplier'
   | 'Indian Suppliers'
   | 'Custom Agent'
-  | 'Freight Vendor'
   | 'Indian Transport'
-  | 'Local Supplier'
   | 'Local Suppliers'
   | 'Other'
 
 export type FreightIndiaStatus =
   | 'Paid by custom agent'
   | 'To be paid by us'
-  | 'Paid directly by us'
-  | 'Included in supplier bill'
-  | 'Not applicable'
 
 export type PaymentType =
   | 'Indian Supplier Payment'
@@ -21,7 +15,7 @@ export type PaymentType =
   | 'Freight Payment'
   | 'Other Supplier Payment'
 
-export type PaymentMethod = 'NABIL Bank' | 'Kamana Sewa Bank' | 'Everest Bank'
+export type PaymentMethod = 'Nabil Bank' | 'Kamana Sewa Bank' | 'Everest Bank'
 export type Currency = 'NPR' | 'INR/IC'
 export type LocalExpenseType = 'Fixed Asset' | 'Expense'
 
@@ -111,6 +105,8 @@ export type ActivityLog = {
   action: string
   details: string
   userName: string
+  oldValue: string
+  newValue: string
   createdAt: string
 }
 
@@ -164,7 +160,53 @@ export const paymentTypes: PaymentType[] = [
   'Other Supplier Payment',
 ]
 
-export const paymentMethods: PaymentMethod[] = ['NABIL Bank', 'Kamana Sewa Bank', 'Everest Bank']
+export const paymentMethods: PaymentMethod[] = ['Nabil Bank', 'Kamana Sewa Bank', 'Everest Bank']
 
 export const currencies: Currency[] = ['NPR', 'INR/IC']
 export const localExpenseTypes: LocalExpenseType[] = ['Fixed Asset', 'Expense']
+
+export function normalizePartyCategory(value: unknown): PartyCategory {
+  const category = String(value ?? '').trim()
+
+  if (category === 'Indian Supplier' || category === 'Indian Suppliers') {
+    return 'Indian Suppliers'
+  }
+
+  if (category === 'Local Supplier' || category === 'Local Suppliers') {
+    return 'Local Suppliers'
+  }
+
+  if (category === 'Custom Agent') {
+    return 'Custom Agent'
+  }
+
+  if (category === 'Freight Vendor' || category === 'Indian Transport') {
+    return 'Indian Transport'
+  }
+
+  return 'Other'
+}
+
+export function normalizeFreightIndiaStatus(value: unknown): FreightIndiaStatus {
+  const status = String(value ?? '').trim()
+
+  if (status === 'To be paid by us' || status === 'Paid directly by us') {
+    return 'To be paid by us'
+  }
+
+  return 'Paid by custom agent'
+}
+
+export function normalizePaymentMethod(value: unknown): PaymentMethod {
+  const method = String(value ?? '').trim()
+
+  if (method.toUpperCase() === 'NABIL BANK') {
+    return 'Nabil Bank'
+  }
+
+  if (method === 'Kamana Sewa Bank' || method === 'Everest Bank') {
+    return method
+  }
+
+  return 'Nabil Bank'
+}

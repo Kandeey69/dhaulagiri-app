@@ -1,6 +1,9 @@
 import schemaSql from './db/schema.sql?raw'
 import {
   defaultSettings,
+  normalizeFreightIndiaStatus,
+  normalizePartyCategory,
+  normalizePaymentMethod,
   type AppData,
   type AppSettings,
   type ImportPurchase,
@@ -48,7 +51,7 @@ const partyFromDb = (row: Record<string, unknown>): Party => ({
   phone: String(row.phone ?? ''),
   panVatNo: String(row.panVatNo ?? ''),
   country: String(row.country ?? ''),
-  category: row.category as Party['category'],
+  category: normalizePartyCategory(row.category),
   openingPayable: Number(row.openingPayable ?? 0),
   isActive: boolFromDb(row.isActive),
   createdAt: String(row.createdAt ?? ''),
@@ -72,7 +75,7 @@ const purchaseFromDb = (row: Record<string, unknown>): ImportPurchase => ({
   terminalChargeWithoutVatNPR: Number(row.terminalChargeWithoutVatNPR ?? 0),
   terminalVatNPR: Number(row.terminalVatNPR ?? 0),
   totalTerminalChargeNPR: Number(row.totalTerminalChargeNPR ?? 0),
-  freightIndiaStatus: row.freightIndiaStatus as ImportPurchase['freightIndiaStatus'],
+  freightIndiaStatus: normalizeFreightIndiaStatus(row.freightIndiaStatus),
   freightIndiaAmountIC: Number(row.freightIndiaAmountIC ?? 0),
   freightIndiaExchangeRate: Number(row.freightIndiaExchangeRate ?? 0),
   freightIndiaAmountNPR: Number(row.freightIndiaAmountNPR ?? 0),
@@ -100,7 +103,7 @@ const paymentFromDb = (row: Record<string, unknown>): Payment => ({
   amount: Number(row.amount ?? 0),
   exchangeRate: Number(row.exchangeRate ?? 1),
   amountNPR: Number(row.amountNPR ?? 0),
-  paymentMethod: row.paymentMethod as Payment['paymentMethod'],
+  paymentMethod: normalizePaymentMethod(row.paymentMethod),
   referenceNumber: String(row.referenceNumber ?? ''),
   remarks: String(row.remarks ?? ''),
   createdAt: String(row.createdAt ?? ''),
@@ -155,9 +158,17 @@ async function ensureActivityLogColumns(db: SqlDatabase) {
     'PRAGMA table_info(activity_logs)',
   )
   const hasUserName = columns.some((column) => String(column.name ?? '') === 'userName')
+  const hasOldValue = columns.some((column) => String(column.name ?? '') === 'oldValue')
+  const hasNewValue = columns.some((column) => String(column.name ?? '') === 'newValue')
 
   if (!hasUserName) {
     await db.execute("ALTER TABLE activity_logs ADD COLUMN userName TEXT NOT NULL DEFAULT ''")
+  }
+  if (!hasOldValue) {
+    await db.execute("ALTER TABLE activity_logs ADD COLUMN oldValue TEXT NOT NULL DEFAULT ''")
+  }
+  if (!hasNewValue) {
+    await db.execute("ALTER TABLE activity_logs ADD COLUMN newValue TEXT NOT NULL DEFAULT ''")
   }
 }
 
@@ -207,7 +218,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
           party.phone,
           party.panVatNo,
           party.country,
-          party.category,
+          normalizePartyCategory(party.category),
           party.openingPayable,
           party.isActive ? 1 : 0,
           party.createdAt,
@@ -251,7 +262,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
           purchase.terminalChargeWithoutVatNPR,
           purchase.terminalVatNPR,
           purchase.totalTerminalChargeNPR,
-          purchase.freightIndiaStatus,
+          normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
           purchase.freightIndiaAmountIC,
           purchase.freightIndiaExchangeRate,
           purchase.freightIndiaAmountNPR,
@@ -288,7 +299,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
           payment.amount,
           payment.exchangeRate,
           payment.amountNPR,
-          payment.paymentMethod,
+          normalizePaymentMethod(payment.paymentMethod),
           payment.referenceNumber,
           payment.remarks,
           payment.createdAt,
@@ -323,8 +334,16 @@ async function createSqliteRepository(): Promise<DataRepository> {
 
     for (const log of data.activityLogs) {
       await db.execute(
-        'INSERT INTO activity_logs (id, action, details, userName, createdAt) VALUES ($1, $2, $3, $4, $5)',
-        [log.id, log.action, log.details, log.userName ?? 'Unknown', log.createdAt],
+        'INSERT INTO activity_logs (id, action, details, userName, oldValue, newValue, createdAt) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [
+          log.id,
+          log.action,
+          log.details,
+          log.userName ?? 'Unknown',
+          log.oldValue ?? '',
+          log.newValue ?? '',
+          log.createdAt,
+        ],
       )
     }
   }

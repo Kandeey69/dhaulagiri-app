@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS import_purchases (
   terminalChargeWithoutVatNPR REAL NOT NULL DEFAULT 0,
   terminalVatNPR REAL NOT NULL DEFAULT 0,
   totalTerminalChargeNPR REAL NOT NULL DEFAULT 0,
-  freightIndiaStatus TEXT NOT NULL DEFAULT 'Not applicable',
+  freightIndiaStatus TEXT NOT NULL DEFAULT 'Paid by custom agent',
   freightIndiaAmountIC REAL NOT NULL DEFAULT 0,
   freightIndiaExchangeRate REAL NOT NULL DEFAULT 0,
   freightIndiaAmountNPR REAL NOT NULL DEFAULT 0,
@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS activity_logs (
   action TEXT NOT NULL,
   details TEXT NOT NULL,
   userName TEXT NOT NULL DEFAULT '',
+  oldValue TEXT NOT NULL DEFAULT '',
+  newValue TEXT NOT NULL DEFAULT '',
   createdAt TEXT NOT NULL
 );
 

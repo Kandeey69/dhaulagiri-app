@@ -7,6 +7,7 @@ import {
   saveCreditNote,
   updateCreditNote,
 } from "../data/storage";
+import { calculateVatAmount, getSuiteVatRatePercent } from "../utils/settings";
 
 function normalizeWholeNumber(value: string) {
   const onlyDigits = value.replace(/\D/g, "");
@@ -48,7 +49,8 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
   const [message, setMessage] = useState("");
 
   const numericAmount = Number(amount || 0);
-  const numericVatAmount = Number((numericAmount * 0.13).toFixed(2));
+  const vatRatePercent = getSuiteVatRatePercent();
+  const numericVatAmount = calculateVatAmount(numericAmount);
   const totalAmount = Number((numericAmount + numericVatAmount).toFixed(2));
 
   async function loadData() {
@@ -247,7 +249,7 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
             </label>
 
             <label>
-              VAT 13%
+              VAT {vatRatePercent}%
               <input readOnly value={formatMoney(numericVatAmount)} />
             </label>
 

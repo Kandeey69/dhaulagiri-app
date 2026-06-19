@@ -8,6 +8,7 @@ import {
   saveSale,
   updateSale,
 } from "../data/storage";
+import { calculateVatAmount, getSuiteVatRatePercent } from "../utils/settings";
 
 function normalizeWholeNumber(value: string) {
   const onlyDigits = value.replace(/\D/g, "");
@@ -55,7 +56,8 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
   );
 
   const numericSalesAmount = Number(salesAmount || 0);
-  const vatAmount = Number((numericSalesAmount * 0.13).toFixed(2));
+  const vatRatePercent = getSuiteVatRatePercent();
+  const vatAmount = calculateVatAmount(numericSalesAmount);
   const totalAmount = Number((numericSalesAmount + vatAmount).toFixed(2));
   const totalSalesBeforeVat = sales.reduce((sum, sale) => sum + sale.salesAmount, 0);
   const totalVat = sales.reduce((sum, sale) => sum + sale.vatAmount, 0);
@@ -280,7 +282,7 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
             </label>
 
             <label>
-              VAT 13%
+              VAT {vatRatePercent}%
               <input readOnly value={formatMoney(vatAmount)} />
             </label>
 
@@ -311,7 +313,7 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
       <div className="metric-grid">
         <MetricCard label="Sales count" value={String(sales.length)} />
         <MetricCard label="Sales before VAT" value={formatMoney(totalSalesBeforeVat)} />
-        <MetricCard label="VAT 13%" value={formatMoney(totalVat)} />
+        <MetricCard label={`VAT ${vatRatePercent}%`} value={formatMoney(totalVat)} />
         <MetricCard label="Total sales" value={formatMoney(totalSales)} />
       </div>
 
@@ -375,7 +377,7 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
                 <th>Date BS</th>
                 <th>Party</th>
                 <th>Sales Amount</th>
-                <th>VAT 13%</th>
+                <th>VAT {vatRatePercent}%</th>
                 <th>Total Amount</th>
                 <th>Remarks</th>
                 {(canEdit || canManage) && <th>Actions</th>}

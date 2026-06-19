@@ -32,18 +32,21 @@ export type PurchaseTotals = {
 
 const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100
 
-export function calculatePurchaseTotals(input: PurchaseCalculationInput): PurchaseTotals {
+export function calculatePurchaseTotals(
+  input: PurchaseCalculationInput,
+  vatRatePercent = 13,
+): PurchaseTotals {
+  const vatRate = Math.max(0, vatRatePercent) / 100
   const supplierAmountNPR = money(input.amountIC * input.supplierExchangeRate)
-  const terminalVatNPR = money(input.terminalChargeWithoutVatNPR * 0.13)
+  const terminalVatNPR = money(input.terminalChargeWithoutVatNPR * vatRate)
   const totalTerminalChargeNPR = money(input.terminalChargeWithoutVatNPR + terminalVatNPR)
   const freightIndiaAmountNPR = money(input.freightIndiaAmountIC * input.freightIndiaExchangeRate)
-  const agentServiceVatNPR = money(input.agentServiceAmountBeforeVatNPR * 0.13)
+  const agentServiceVatNPR = money(input.agentServiceAmountBeforeVatNPR * vatRate)
   const debitFreight =
     input.freightIndiaStatus === 'Paid by custom agent' ? freightIndiaAmountNPR : 0
   const landedFreight =
     input.freightIndiaStatus === 'Paid by custom agent' ||
-    input.freightIndiaStatus === 'To be paid by us' ||
-    input.freightIndiaStatus === 'Paid directly by us'
+    input.freightIndiaStatus === 'To be paid by us'
       ? freightIndiaAmountNPR
       : 0
 

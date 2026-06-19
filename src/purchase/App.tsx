@@ -12,6 +12,8 @@ import {
   defaultSettings,
   freightIndiaStatuses,
   localExpenseTypes,
+  normalizeFreightIndiaStatus,
+  normalizePartyCategory,
   partyCategories,
   paymentMethods,
   type AppData,
@@ -177,7 +179,7 @@ const createEmptyPayment = (): Payment => ({
   amount: 0,
   exchangeRate: 1,
   amountNPR: 0,
-  paymentMethod: 'NABIL Bank',
+  paymentMethod: 'Nabil Bank',
   referenceNumber: '',
   remarks: '',
   createdAt: '',
@@ -217,7 +219,6 @@ const accountViewItems: View[] = [
   'Local Purchase / Expense',
   'Reports',
   'Party Master',
-  'Activity Logs',
 ]
 
 const reportItems: ReportView[] = [
@@ -247,12 +248,21 @@ const rateFmt = (value: number) =>
 
 const npr = (value: number) => `NPR ${fmt(value)}`
 const ic = (value: number) => `IC ${fmt(value)}`
+const vatRateDecimal = (settings: AppSettings) => Math.max(0, n(settings.agentServiceVatRate)) / 100
+const vatRateLabel = (settings: AppSettings) =>
+  new Intl.NumberFormat('en-IN', {
+    maximumFractionDigits: 2,
+  }).format(n(settings.agentServiceVatRate))
 const formatCompact = (value: number) =>
   Number(value || 0).toLocaleString('en-IN', {
     maximumFractionDigits: 0,
     notation: 'compact',
   })
 const dateText = (value: string) => value || '-'
+const auditValue = (value: unknown) => {
+  const text = JSON.stringify(value ?? '', null, 0)
+  return text.length > 900 ? `${text.slice(0, 897)}...` : text
+}
 const normalizeBsDate = (value: string, keepHyphen = false) => {
   const raw = String(value ?? '').trim()
   const match = raw.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/)
@@ -309,7 +319,12 @@ const bsMonths = [
 ]
 
 const bsMonthFromDate = (date: string) => {
-  const month = date.split(/[/-]/)[1] ?? ''
+  const [year = '', month = ''] = String(date ?? '').split(/[/-]/)
+
+  if (Number(year) < 2070 || Number(year) > 2099) {
+    return ''
+  }
+
   return month.padStart(2, '0')
 }
 
@@ -322,7 +337,7 @@ const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error)
 
 const isIndianSupplierCategory = (party: Party) =>
-  party.category === 'Indian Suppliers' || party.category === 'Indian Supplier'
+  party.category === 'Indian Suppliers'
 
 const isCustomAgentCategory = (party: Party) => party.category === 'Custom Agent'
 const isIndianTransportCategory = (party: Party) => party.category === 'Indian Transport'
@@ -343,7 +358,7 @@ const paymentTypeForNonSupplierParty = (party: Party | undefined): Payment['paym
 }
 
 const shouldCreditIndianTransport = (status: FreightIndiaStatus) =>
-  status === 'To be paid by us' || status === 'Paid directly by us'
+  status === 'To be paid by us'
 
 const includeSelectedParty = (parties: Party[], selectedPartyId: string, partyById: Map<string, Party>) => {
   const selectedParty = partyById.get(selectedPartyId)
@@ -499,11 +514,29 @@ const normalizeCsvHeader = (value: string) => value.trim().toLowerCase().replace
 const paymentMethodLookup = new Map(
   paymentMethods.map((method) => [normalizeKey(method), method] as const),
 )
-const resolvePaymentMethod = (value: string) => paymentMethodLookup.get(normalizeKey(value))
+const resolvePaymentMethod = (value: string) => {
+  if (!value.trim()) {
+    return undefined
+  }
+
+  const directMatch = paymentMethodLookup.get(normalizeKey(value))
+
+  if (directMatch) {
+    return directMatch
+  }
+
+  return value.trim().toUpperCase() === 'NABIL BANK' ? 'Nabil Bank' : undefined
+}
 const freightStatusLookup = new Map(
   freightIndiaStatuses.map((status) => [normalizeKey(status), status] as const),
 )
-const resolveFreightStatus = (value: string) => freightStatusLookup.get(normalizeKey(value))
+const resolveFreightStatus = (value: string) => {
+  if (!value.trim()) {
+    return undefined
+  }
+
+  return freightStatusLookup.get(normalizeKey(value)) ?? normalizeFreightIndiaStatus(value)
+}
 
 const getCsvValue = (row: Record<string, string>, ...keys: string[]) => {
   for (const key of keys) {
@@ -695,6 +728,7 @@ function App({
   const [loginError, setLoginError] = useState('')
   const [view, setView] = useState<View>('Dashboard')
   const [reportView, setReportView] = useState<ReportView>('Party Ledger')
+  const [globalSearch, setGlobalSearch] = useState('')
   const [partyForm, setPartyForm] = useState<PartyForm>(emptyParty)
   const [partySearch, setPartySearch] = useState('')
   const [partyCategoryFilter, setPartyCategoryFilter] = useState<'All' | PartyCategory>('All')
@@ -774,7 +808,7 @@ function App({
   const customAgents = activeParties.filter(isCustomAgentCategory)
   const indianTransportParties = activeParties.filter(isIndianTransportCategory)
   const indianSupplierPaymentParties = [...indianSuppliers, ...indianTransportParties]
-  const localSuppliers = activeParties.filter((party) => party.category === 'Local Suppliers' || party.category === 'Local Supplier')
+  const localSuppliers = activeParties.filter((party) => party.category === 'Local Suppliers')
   const otherPaymentParties = activeParties.filter((party) => !isIndianSupplierCategory(party))
   const canEditOrDelete = userRole === 'Master'
   const effectivePurchaseForm = {
@@ -782,7 +816,11 @@ function App({
     supplierExchangeRate: data.settings.defaultExchangeRate,
     freightIndiaExchangeRate: data.settings.defaultExchangeRate,
   }
-  const purchaseTotals = calculatePurchaseTotals(effectivePurchaseForm)
+  const configuredVatRate = vatRateDecimal(data.settings)
+  const purchaseTotals = calculatePurchaseTotals(
+    effectivePurchaseForm,
+    data.settings.agentServiceVatRate,
+  )
   const currentYearSupplierPayments = data.payments.filter(
     (payment) => isSupplierPayment(payment) && payment.remarks.includes('Bill year: Current'),
   )
@@ -826,7 +864,7 @@ function App({
   const commissionExpenseNPR = Math.max(0, bankOutflowNPR - indianSupplierPaymentNPR)
   const reconciliationDifferenceNPR =
     (selectedReconciliationPayment?.amountNPR ?? 0) - selectedSupplierBillAmountNPR
-  const localExpenseVatNPR = n(localExpenseForm.amountBeforeVatNPR * 0.13)
+  const localExpenseVatNPR = n(localExpenseForm.amountBeforeVatNPR * configuredVatRate)
   const localExpenseTotalNPR = localExpenseForm.amountBeforeVatNPR + localExpenseVatNPR
 
   const partyById = useMemo(() => {
@@ -865,11 +903,93 @@ function App({
   const indianSupplierPaymentPartyOptions = includeSelectedParty(indianSupplierPaymentParties, paymentForm.partyId, partyById)
   const otherPaymentPartyOptions = includeSelectedParty(otherPaymentParties, paymentForm.partyId, partyById)
   const localSupplierOptions = includeSelectedParty(localSuppliers, localExpenseForm.partyId, partyById)
+  const globalSearchResults = useMemo(() => {
+    const query = globalSearch.trim().toLowerCase()
 
-  const setDataWithLog = (next: AppData, action: string, details: string) => {
+    if (!query) {
+      return []
+    }
+
+    const results: Array<{
+      id: string
+      type: 'Party' | 'Purchase' | 'Payment'
+      primary: string
+      secondary: string
+      amount: string
+    }> = []
+
+    data.parties.forEach((party) => {
+      const haystack = [party.name, party.panVatNo, party.phone, party.category, party.country]
+        .join(' ')
+        .toLowerCase()
+
+      if (haystack.includes(query)) {
+        results.push({
+          id: party.id,
+          type: 'Party',
+          primary: party.name,
+          secondary: [party.category, party.panVatNo ? `PAN/VAT ${party.panVatNo}` : ''].filter(Boolean).join(' - '),
+          amount: npr(party.openingPayable),
+        })
+      }
+    })
+
+    data.purchases.forEach((purchase) => {
+      const haystack = [
+        partyName(purchase.vendorPartyId),
+        partyName(purchase.customAgentPartyId),
+        purchase.vendorBillNumber,
+        purchase.debitNoteNumber,
+        purchase.agentServiceBillNumber,
+      ]
+        .join(' ')
+        .toLowerCase()
+
+      if (haystack.includes(query)) {
+        results.push({
+          id: purchase.id,
+          type: 'Purchase',
+          primary: purchase.vendorBillNumber || '-',
+          secondary: `${partyName(purchase.vendorPartyId)} / Debit note ${purchase.debitNoteNumber || '-'}`,
+          amount: npr(purchase.landedCostNPR),
+        })
+      }
+    })
+
+    data.payments.forEach((payment) => {
+      const haystack = [
+        partyName(payment.partyId),
+        payment.referenceNumber,
+        payment.paymentType,
+        payment.paymentMethod,
+      ]
+        .join(' ')
+        .toLowerCase()
+
+      if (haystack.includes(query)) {
+        results.push({
+          id: payment.id,
+          type: 'Payment',
+          primary: payment.referenceNumber || payment.paymentType,
+          secondary: `${partyName(payment.partyId)} / ${payment.paymentMethod}`,
+          amount: npr(payment.amountNPR),
+        })
+      }
+    })
+
+    return results.slice(0, 15)
+  }, [data.parties, data.payments, data.purchases, globalSearch, partyName])
+
+  const setDataWithLog = (
+    next: AppData,
+    action: string,
+    details: string,
+    oldValue = '',
+    newValue = '',
+  ) => {
     setData({
       ...next,
-      activityLogs: [createActivity(action, details, userRole ?? 'Unknown'), ...next.activityLogs],
+      activityLogs: [createActivity(action, details, userRole ?? 'Unknown', oldValue, newValue), ...next.activityLogs],
     })
   }
 
@@ -1159,7 +1279,7 @@ function App({
   const payableRows = useMemo(() => {
     const supplierRows = supplierPayables.map((row) => ({
       partyName: row.party.name,
-      category: 'Indian Supplier',
+      category: 'Indian Suppliers',
       openingPayable: row.party.openingPayable,
       purchaseOrBillTotal: row.totalBills,
       debitNoteTotal: 0,
@@ -1182,7 +1302,7 @@ function App({
     }))
 
     const localSupplierRows = data.parties
-      .filter((party) => party.category === 'Local Suppliers' || party.category === 'Local Supplier')
+      .filter((party) => party.category === 'Local Suppliers')
       .map((party) => {
         const totalBills = data.localExpenses
           .filter((localExpense) => localExpense.partyId === party.id)
@@ -1193,7 +1313,7 @@ function App({
 
         return {
           partyName: party.name,
-          category: 'Local Supplier',
+          category: 'Local Suppliers',
           openingPayable: party.openingPayable,
           purchaseOrBillTotal: totalBills,
           debitNoteTotal: 0,
@@ -1292,7 +1412,7 @@ function App({
         })
     }
 
-    if (selectedLedgerParty.category === 'Local Suppliers' || selectedLedgerParty.category === 'Local Supplier') {
+    if (selectedLedgerParty.category === 'Local Suppliers') {
       data.localExpenses
         .filter((localExpense) => localExpense.partyId === selectedLedgerParty.id)
         .forEach((localExpense) => {
@@ -1349,7 +1469,7 @@ function App({
     const importVatRows = sortedPurchases.flatMap((purchase) => {
       const pragapanpatraDate = purchase.debitNoteDate || purchase.billDate
       const terminalVat =
-        purchase.terminalVatNPR || n(purchase.terminalChargeWithoutVatNPR * 0.13)
+        purchase.terminalVatNPR || n(purchase.terminalChargeWithoutVatNPR * configuredVatRate)
       const base = {
         vendor: partyName(purchase.vendorPartyId),
         vendorBillNumber: purchase.vendorBillNumber,
@@ -1455,7 +1575,7 @@ function App({
 
     const savedSettings = {
       ...settingsForm,
-      agentServiceVatRate: 13,
+      agentServiceVatRate: n(settingsForm.agentServiceVatRate),
     }
 
     setDataWithLog(
@@ -1518,7 +1638,7 @@ function App({
       [
         'ANG Minerals',
         '2025-26-63',
-        '2025-04-14',
+        '2082/01/01',
         '412700',
         'Sunrise Custom Agent',
         'PP-001',
@@ -1560,7 +1680,7 @@ function App({
         'ANG Minerals',
         '2082/01/05',
         '100000',
-        'NABIL Bank',
+        'Nabil Bank',
         'Current',
         '160500',
         'BILL-001',
@@ -1570,7 +1690,7 @@ function App({
         'Indian Transport',
         '2082/01/05',
         '10000',
-        'NABIL Bank',
+        'Nabil Bank',
         'Current',
         '16000',
         'FREIGHT-001',
@@ -1599,7 +1719,7 @@ function App({
         'Sunrise Custom Agent',
         '2082/01/06',
         '25000',
-        'NABIL Bank',
+        'Nabil Bank',
         'DN-001',
         'Custom/local payment',
       ],
@@ -1607,7 +1727,7 @@ function App({
         'Dhaulagiri Local Supplier',
         '2082/01/06',
         '15000',
-        'NABIL Bank',
+        'Nabil Bank',
         'LP-001',
         'Local supplier payment',
       ],
@@ -1639,8 +1759,7 @@ function App({
         return
       }
 
-      const categoryValue = getCsvValue(row, 'category', 'partyCategory', 'party category') as PartyCategory
-      const category = partyCategories.includes(categoryValue) ? categoryValue : 'Other'
+      const category = normalizePartyCategory(getCsvValue(row, 'category', 'partyCategory', 'party category'))
       const countryValue = getCsvValue(row, 'country')
       const country = countries.includes(countryValue) ? countryValue : 'India'
       const openingPayable = n(getCsvValue(row, 'openingPayable', 'opening payable', 'openingBalance', 'opening balance', 'opening'))
@@ -1726,7 +1845,7 @@ function App({
       const vendorName = getCsvValue(row, 'vendorName')
       const customAgentName = getCsvValue(row, 'customAgentName')
       const vendorBillNumber = getCsvValue(row, 'vendorBillNumber')
-      const billDate = normalizeImportedDate(getCsvValue(row, 'billDate', 'billDateAD'), true)
+      const billDate = normalizeImportedDate(getCsvValue(row, 'billDate', 'billDateAD', 'billDateBS'), true)
       const pragapanpatraNumber = getCsvValue(row, 'pragapanpatraNumber')
       const pragapanpatraDate = normalizeImportedDate(getCsvValue(row, 'pragapanpatraDate', 'pragapanpatraDateBS'))
       const agentServiceBillDate = normalizeImportedDate(getCsvValue(row, 'agentServiceBillDate', 'agentServiceBillDateBS'))
@@ -1822,7 +1941,7 @@ function App({
         agentServiceAmountBeforeVatNPR: n(getCsvValue(row, 'agentServiceAmountBeforeVatNPR')),
         remarks: getCsvValue(row, 'remarks'),
       }
-      const totals = calculatePurchaseTotals(purchase)
+      const totals = calculatePurchaseTotals(purchase, data.settings.agentServiceVatRate)
 
       if (hasAgentValues(purchase) && !purchase.customAgentPartyId) {
         const reason = 'Custom agent is required for Pragapanpatra/service values.'
@@ -2166,6 +2285,7 @@ function App({
     }
 
     if (partyForm.id) {
+      const previous = data.parties.find((party) => party.id === partyForm.id)
       const updated = withUpdatedParty({
         ...(partyForm as Party),
         createdAt: partyForm.createdAt || new Date().toISOString(),
@@ -2175,7 +2295,7 @@ function App({
         ...data,
         parties: data.parties.map((party) => (party.id === updated.id ? updated : party)),
       }
-      setDataWithLog(next, 'Updated party', updated.name)
+      setDataWithLog(next, 'Updated party', updated.name, auditValue(previous), auditValue(updated))
     } else {
       const created = withNewParty({
         name: partyForm.name.trim(),
@@ -2238,6 +2358,13 @@ function App({
       next,
       'Hard deleted party',
       `${party.name} with ${linkedPurchases.length} import purchase(s), ${linkedLocalExpenses.length} local expense(s), ${linkedPayments.length} payment(s)`,
+      auditValue({
+        party,
+        linkedPurchases,
+        linkedLocalExpenses,
+        linkedPayments,
+      }),
+      'Deleted',
     )
 
     if (partyForm.id === party.id) {
@@ -2287,14 +2414,31 @@ function App({
       supplierExchangeRate: data.settings.defaultExchangeRate,
       freightIndiaExchangeRate: data.settings.defaultExchangeRate,
     }
-    const totalsForSave = calculatePurchaseTotals(fixedRatePurchase)
+    const totalsForSave = calculatePurchaseTotals(fixedRatePurchase, data.settings.agentServiceVatRate)
     const purchaseToSave = {
       ...fixedRatePurchase,
       ...totalsForSave,
       agentServiceVatNPR: totalsForSave.agentServiceVatNPR,
     }
+    const purchaseReview = [
+      purchaseForm.id ? 'Review purchase update before save:' : 'Review purchase before save:',
+      `Vendor: ${partyName(purchaseToSave.vendorPartyId)}`,
+      `Bill number: ${purchaseToSave.vendorBillNumber}`,
+      `Supplier payable: ${npr(purchaseToSave.supplierAmountNPR)}`,
+      `Agent payable: ${npr(purchaseToSave.totalAgentPayableNPR)}`,
+      `VAT: ${npr(purchaseToSave.totalInputVatNPR)}`,
+      `Landed cost: ${npr(purchaseToSave.landedCostNPR)}`,
+      `Remarks: ${purchaseToSave.remarks || '-'}`,
+      '',
+      'Save this purchase?',
+    ].join('\n')
+
+    if (!window.confirm(purchaseReview)) {
+      return
+    }
 
     if (purchaseForm.id) {
+      const previous = data.purchases.find((purchase) => purchase.id === purchaseForm.id)
       const updated = withUpdatedPurchase(purchaseToSave)
       const next = {
         ...data,
@@ -2302,7 +2446,7 @@ function App({
           purchase.id === updated.id ? updated : purchase,
         ),
       }
-      setDataWithLog(next, 'Updated import purchase', updated.vendorBillNumber)
+      setDataWithLog(next, 'Updated import purchase', updated.vendorBillNumber, auditValue(previous), auditValue(updated))
     } else {
       const created = withNewPurchase({
         ...purchaseToSave,
@@ -2334,7 +2478,7 @@ function App({
       ...data,
       purchases: data.purchases.filter((item) => item.id !== purchase.id),
     }
-    setDataWithLog(next, 'Deleted import purchase', purchase.vendorBillNumber)
+    setDataWithLog(next, 'Deleted import purchase', purchase.vendorBillNumber, auditValue(purchase), 'Deleted')
   }
 
   const otherPaymentTypeForParty = (party: Party | undefined): Payment['paymentType'] => {
@@ -2403,8 +2547,25 @@ function App({
       window.alert('Account user cannot edit existing payments.')
       return
     }
+    const paymentReview = [
+      paymentForm.id ? 'Review payment update before save:' : 'Review payment before save:',
+      `Party: ${partyName(paymentToSave.partyId)}`,
+      `Reference: ${paymentToSave.referenceNumber || '-'}`,
+      `Supplier payable impact: ${isSupplierPayment(paymentToSave) ? npr(-paymentToSave.amountNPR) : npr(0)}`,
+      `Agent payable impact: ${isAgentPayment(paymentToSave) ? npr(-paymentToSave.amountNPR) : npr(0)}`,
+      `VAT: ${npr(0)}`,
+      `Landed cost: ${npr(0)}`,
+      `Remarks: ${paymentToSave.remarks || '-'}`,
+      '',
+      'Save this payment?',
+    ].join('\n')
+
+    if (!window.confirm(paymentReview)) {
+      return
+    }
 
     if (paymentForm.id) {
+      const previous = data.payments.find((payment) => payment.id === paymentForm.id)
       const updated = withUpdatedPayment(paymentToSave)
       const next = {
         ...data,
@@ -2412,7 +2573,13 @@ function App({
           payment.id === updated.id ? updated : payment,
         ),
       }
-      setDataWithLog(next, 'Updated payment', `${partyName(updated.partyId)} - ${npr(updated.amountNPR)}`)
+      setDataWithLog(
+        next,
+        'Updated payment',
+        `${partyName(updated.partyId)} - ${npr(updated.amountNPR)}`,
+        auditValue(previous),
+        auditValue(updated),
+      )
     } else {
       const created = withNewPayment(paymentToSave)
       setDataWithLog(
@@ -2444,7 +2611,13 @@ function App({
       ...data,
       payments: data.payments.filter((item) => item.id !== payment.id),
     }
-    setDataWithLog(next, 'Deleted payment', `${partyName(payment.partyId)} - ${npr(payment.amountNPR)}`)
+    setDataWithLog(
+      next,
+      'Deleted payment',
+      `${partyName(payment.partyId)} - ${npr(payment.amountNPR)}`,
+      auditValue(payment),
+      'Deleted',
+    )
   }
 
   const reconcileSupplierPayment = () => {
@@ -2485,6 +2658,8 @@ function App({
       next,
       'Reconciled supplier payment',
       `${partyName(updated.partyId)} - ${billNumbers}`,
+      auditValue(selectedReconciliationPayment),
+      auditValue(updated),
     )
     setSelectedSupplierBillIds([])
     setReconciliationPaymentId('')
@@ -2511,6 +2686,7 @@ function App({
     }
 
     if (localExpenseForm.id) {
+      const previous = data.localExpenses.find((localExpense) => localExpense.id === localExpenseForm.id)
       const updated = withUpdatedLocalExpense(localExpenseToSave)
       const next = {
         ...data,
@@ -2518,7 +2694,13 @@ function App({
           localExpense.id === updated.id ? updated : localExpense,
         ),
       }
-      setDataWithLog(next, 'Updated local purchase/expense', updated.billNumber)
+      setDataWithLog(
+        next,
+        'Updated local purchase/expense',
+        updated.billNumber,
+        auditValue(previous),
+        auditValue(updated),
+      )
     } else {
       const created = withNewLocalExpense(localExpenseToSave)
       setDataWithLog(
@@ -2586,7 +2768,32 @@ function App({
       next,
       'Deleted local purchase/expense',
       `${partyName(localExpense.partyId)} - ${localExpense.billNumber}`,
+      auditValue(localExpense),
+      'Deleted',
     )
+  }
+
+  const openGlobalSearchResult = (result: (typeof globalSearchResults)[number]) => {
+    if (result.type === 'Party') {
+      const party = data.parties.find((item) => item.id === result.id)
+      if (party) {
+        editParty(party)
+      }
+      return
+    }
+
+    if (result.type === 'Purchase') {
+      const purchase = data.purchases.find((item) => item.id === result.id)
+      if (purchase) {
+        editPurchase(purchase)
+      }
+      return
+    }
+
+    const payment = data.payments.find((item) => item.id === result.id)
+    if (payment) {
+      editPayment(payment)
+    }
   }
 
   const exportPartyLedgerPdf = async () => {
@@ -2821,7 +3028,7 @@ function App({
                 onChange={(event) => updatePurchaseField('vendorBillNumber', event.target.value)}
               />
             </Field>
-            <CalendarDateField label="Bill date" value={purchaseForm.billDate} onChange={(value) => updatePurchaseField('billDate', value)} />
+            <CalendarDateField label="Bill date (AD)" value={purchaseForm.billDate} onChange={(value) => updatePurchaseField('billDate', value)} />
             <NumberField label="Amount IC/INR" value={purchaseForm.amountIC} onChange={(value) => updatePurchaseField('amountIC', value)} />
             <ReadOnly label="Fixed exchange rate" value={rateFmt(data.settings.defaultExchangeRate)} />
             <ReadOnly label="Amount NPR" value={npr(purchaseTotals.supplierAmountNPR)} />
@@ -2855,7 +3062,7 @@ function App({
             <NumberField label="Custom service NPR" value={purchaseForm.customServiceNPR} onChange={(value) => updatePurchaseField('customServiceNPR', value)} />
             <NumberField label="Import VAT NPR" value={purchaseForm.importVatNPR} onChange={(value) => updatePurchaseField('importVatNPR', value)} />
             <NumberField label="Terminal charge without VAT NPR" value={purchaseForm.terminalChargeWithoutVatNPR} onChange={(value) => updatePurchaseField('terminalChargeWithoutVatNPR', value)} />
-            <ReadOnly label="VAT on terminal NPR (13%)" value={npr(purchaseTotals.terminalVatNPR)} />
+            <ReadOnly label={`VAT on terminal NPR (${vatRateLabel(data.settings)}%)`} value={npr(purchaseTotals.terminalVatNPR)} />
             <ReadOnly label="Total terminal charge NPR" value={npr(purchaseTotals.totalTerminalChargeNPR)} />
             <Field label="Freight India status">
               <select
@@ -2880,7 +3087,7 @@ function App({
             <TextField label="Agent service bill number" value={purchaseForm.agentServiceBillNumber} onChange={(value) => updatePurchaseField('agentServiceBillNumber', value)} />
             <DateField label="Agent service bill date" value={purchaseForm.agentServiceBillDate} onChange={(value) => updatePurchaseField('agentServiceBillDate', value)} />
             <NumberField label="Service amount before VAT" value={purchaseForm.agentServiceAmountBeforeVatNPR} onChange={(value) => updatePurchaseField('agentServiceAmountBeforeVatNPR', value)} />
-            <ReadOnly label="Agent service VAT (13%)" value={npr(purchaseTotals.agentServiceVatNPR)} />
+            <ReadOnly label={`Agent service VAT (${vatRateLabel(data.settings)}%)`} value={npr(purchaseTotals.agentServiceVatNPR)} />
             <ReadOnly label="Service bill total" value={npr(purchaseTotals.agentServiceTotalNPR)} />
           </div>
         </Panel>
@@ -3250,7 +3457,7 @@ function App({
             value={localExpenseForm.amountBeforeVatNPR}
             onChange={(value) => updateLocalExpenseField('amountBeforeVatNPR', value)}
           />
-          <ReadOnly label="VAT NPR (13%)" value={npr(localExpenseVatNPR)} />
+          <ReadOnly label={`VAT NPR (${vatRateLabel(data.settings)}%)`} value={npr(localExpenseVatNPR)} />
           <ReadOnly label="Total amount NPR" value={npr(localExpenseTotalNPR)} />
           <TextField
             label="Remarks"
@@ -3755,8 +3962,7 @@ function App({
             step="0.0001"
             onChange={(value) => updateSettingsField('defaultExchangeRate', value)}
           />
-          <ReadOnly label="Agent service VAT rate" value="13.00%" />
-          <ReadOnly label="Terminal VAT rate" value="13.00%" />
+          <ReadOnly label="VAT rate" value={`${vatRateLabel(data.settings)}%`} />
         </div>
       </Panel>
       <div className="form-actions">
@@ -3769,14 +3975,16 @@ function App({
   )
 
   const renderActivityLogs = () => (
-    <Panel title="Activity Logs">
+    <Panel title="Edit History">
       <Table
-        headers={['Created at', 'User', 'Action', 'Details']}
+        headers={['Created at', 'User', 'Action', 'Details', 'Old value', 'New value']}
         rows={data.activityLogs.map((log) => [
           new Date(log.createdAt).toLocaleString(),
           log.userName || 'Unknown',
           log.action,
           log.details,
+          log.oldValue || '-',
+          log.newValue || '-',
         ])}
       />
     </Panel>
@@ -3862,6 +4070,13 @@ function App({
             </p>
             <h2>{currentView}</h2>
           </div>
+          <div className="global-search">
+            <input
+              value={globalSearch}
+              onChange={(event) => setGlobalSearch(event.target.value)}
+              placeholder="Search party, bill, debit note, payment ref, PAN/VAT"
+            />
+          </div>
           <button type="button" className="ghost" onClick={logout}>
             Logout
           </button>
@@ -3888,6 +4103,29 @@ function App({
         {currentView === 'Reports' && renderReports()}
         {userRole === 'Master' && currentView === 'Settings' && renderSettings()}
         {currentView === 'Activity Logs' && renderActivityLogs()}
+        {globalSearch.trim() && (
+          <section className="panel global-search-panel">
+            <h3>Search Results</h3>
+            <Table
+              headers={['Type', 'Primary', 'Details', 'Amount', 'Action']}
+              rows={globalSearchResults.map((result) => [
+                result.type,
+                result.primary,
+                result.secondary,
+                result.amount,
+                'Open',
+              ])}
+            />
+            <div className="global-search-actions">
+              {globalSearchResults.map((result) => (
+                <button key={`${result.type}-${result.id}`} type="button" className="small" onClick={() => openGlobalSearchResult(result)}>
+                  Open {result.type}: {result.primary}
+                </button>
+              ))}
+              {!globalSearchResults.length && <p className="muted">No matching records found.</p>}
+            </div>
+          </section>
+        )}
       </main>
     </div>
   )
@@ -3987,11 +4225,12 @@ function NumberField({
     <Field label={label}>
       <input
         type="number"
+        min="0"
         step={step}
         value={value === 0 ? '' : String(value)}
         placeholder="0"
         readOnly={readOnly}
-        onChange={(event) => onChange(n(event.target.value))}
+        onChange={(event) => onChange(Math.max(0, n(event.target.value)))}
         onWheel={(event) => event.currentTarget.blur()}
       />
     </Field>

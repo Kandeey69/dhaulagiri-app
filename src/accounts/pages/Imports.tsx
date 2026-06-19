@@ -7,6 +7,7 @@ import {
   saveSale,
 } from "../data/storage";
 import { saveBlob } from "../utils/fileSave";
+import { calculateVatAmount } from "../utils/settings";
 
 type ImportDetail = {
   status: "Imported" | "Skipped";
@@ -360,7 +361,7 @@ async function importSales(rows: string[][]): Promise<ImportResult> {
     }
 
     try {
-      const vatAmount = Number((salesAmount * 0.13).toFixed(2));
+      const vatAmount = calculateVatAmount(salesAmount);
       const totalAmount = Number((salesAmount + vatAmount).toFixed(2));
 
       await saveSale({

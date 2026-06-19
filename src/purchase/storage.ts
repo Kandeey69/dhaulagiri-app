@@ -1,4 +1,15 @@
-import { defaultSettings, type ActivityLog, type AppData, type ImportPurchase, type LocalPurchaseExpense, type Party, type Payment } from './domain'
+import {
+  defaultSettings,
+  normalizeFreightIndiaStatus,
+  normalizePartyCategory,
+  normalizePaymentMethod,
+  type ActivityLog,
+  type AppData,
+  type ImportPurchase,
+  type LocalPurchaseExpense,
+  type Party,
+  type Payment,
+} from './domain'
 
 const storageKey = 'dhaulagiri-import-purchase-app-v1'
 
@@ -33,6 +44,18 @@ export function loadData(): AppData {
       ...emptyData,
       ...parsed,
       settings: { ...defaultSettings, ...parsed.settings },
+      parties: (parsed.parties ?? []).map((party) => ({
+        ...party,
+        category: normalizePartyCategory(party.category),
+      })),
+      purchases: (parsed.purchases ?? []).map((purchase) => ({
+        ...purchase,
+        freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
+      })),
+      payments: (parsed.payments ?? []).map((payment) => ({
+        ...payment,
+        paymentMethod: normalizePaymentMethod(payment.paymentMethod),
+      })),
       localExpenses: (parsed.localExpenses ?? []).map((localExpense) => ({
         ...localExpense,
         expenseType: localExpense.expenseType ?? 'Expense',
@@ -40,6 +63,8 @@ export function loadData(): AppData {
       activityLogs: (parsed.activityLogs ?? []).map((log) => ({
         ...log,
         userName: log.userName ?? 'Unknown',
+        oldValue: log.oldValue ?? '',
+        newValue: log.newValue ?? '',
       })),
     }
   } catch {
@@ -51,12 +76,20 @@ export function saveData(data: AppData) {
   localStorage.setItem(storageKey, JSON.stringify(data))
 }
 
-export function createActivity(action: string, details: string, userName: string): ActivityLog {
+export function createActivity(
+  action: string,
+  details: string,
+  userName: string,
+  oldValue = '',
+  newValue = '',
+): ActivityLog {
   return {
     id: id(),
     action,
     details,
     userName,
+    oldValue,
+    newValue,
     createdAt: now(),
   }
 }
@@ -68,6 +101,7 @@ export function withNewParty(
 
   return {
     ...party,
+    category: normalizePartyCategory(party.category),
     id: id(),
     createdAt,
     updatedAt: createdAt,
@@ -77,6 +111,7 @@ export function withNewParty(
 export function withUpdatedParty(party: Party): Party {
   return {
     ...party,
+    category: normalizePartyCategory(party.category),
     updatedAt: now(),
   }
 }
@@ -88,6 +123,7 @@ export function withNewPurchase(
 
   return {
     ...purchase,
+    freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
     id: id(),
     createdAt,
     updatedAt: createdAt,
@@ -97,6 +133,7 @@ export function withNewPurchase(
 export function withUpdatedPurchase(purchase: ImportPurchase): ImportPurchase {
   return {
     ...purchase,
+    freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
     updatedAt: now(),
   }
 }
@@ -128,6 +165,7 @@ export function withNewPayment(
 
   return {
     ...payment,
+    paymentMethod: normalizePaymentMethod(payment.paymentMethod),
     id: id(),
     createdAt,
     updatedAt: createdAt,
@@ -137,6 +175,7 @@ export function withNewPayment(
 export function withUpdatedPayment(payment: Payment): Payment {
   return {
     ...payment,
+    paymentMethod: normalizePaymentMethod(payment.paymentMethod),
     updatedAt: now(),
   }
 }

@@ -507,6 +507,9 @@ function buildMaskebariSummary({
     (purchaseData?.parties ?? []).map((party) => [party.id, party.name]),
   );
   const accountPartyMap = new Map(accountParties.map((party) => [party.id, party.name]));
+  const purchaseVatRate = Math.max(0, Number(purchaseData?.settings.agentServiceVatRate ?? defaultSettings.agentServiceVatRate)) / 100;
+  const taxableValueFromVat = (vatAmount: number) =>
+    purchaseVatRate > 0 ? vatAmount / purchaseVatRate : 0;
   const monthSales = sales.filter((sale) => dateMonth(sale.dateBs) === month);
   const monthCreditNotes = creditNotes.filter((creditNote) => dateMonth(creditNote.dateBs) === month);
   const taxableSales = monthSales.reduce((sum, sale) => sum + sale.salesAmount, 0);
@@ -538,7 +541,7 @@ function buildMaskebariSummary({
 
   (purchaseData?.purchases ?? []).forEach((purchase) => {
     const pragapanpatraDate = purchase.debitNoteDate || purchase.billDate;
-    const terminalVat = purchase.terminalVatNPR || purchase.terminalChargeWithoutVatNPR * 0.13;
+    const terminalVat = purchase.terminalVatNPR || purchase.terminalChargeWithoutVatNPR * purchaseVatRate;
 
     if (dateMonth(pragapanpatraDate) === month) {
       if (terminalVat > 0 || purchase.terminalChargeWithoutVatNPR > 0) {
@@ -555,7 +558,7 @@ function buildMaskebariSummary({
       }
 
       if (purchase.importVatNPR > 0) {
-        const importTaxableValue = purchase.importVatNPR / 0.13;
+        const importTaxableValue = taxableValueFromVat(purchase.importVatNPR);
         taxableImport += importTaxableValue;
         importVatCredit += purchase.importVatNPR;
         inputVatRows.push([
@@ -653,8 +656,19 @@ function buildMaskebariSummary({
 }
 
 function dateMonth(value: string) {
-  const match = String(value ?? "").trim().match(/^\d{4}[/-](\d{1,2})/);
-  return match ? Number(match[1]) : 0;
+  const match = String(value ?? "").trim().match(/^(\d{4})[/-](\d{1,2})/);
+
+  if (!match) {
+    return 0;
+  }
+
+  const year = Number(match[1]);
+
+  if (year < 2070 || year > 2099) {
+    return 0;
+  }
+
+  return Number(match[2]);
 }
 
 async function downloadCombinedVatPdf(
@@ -728,11 +742,15 @@ function buildMultiTablePdf(
       y -= rowHeight;
 
       pageRows.forEach((row) => {
+        const isSummaryRow =
+          /^Total/i.test(row[0] ?? '') ||
+          /^Net payable/i.test(row[0] ?? '') ||
+          /^\d+\./.test(row[0] ?? '') === false && row.slice(1).every((value) => !value)
         section.headers.forEach((_, index) => {
           const x = margin + index * columnWidth;
           const value = row[index] ?? "";
           ops.push(pdfRect(x, y - rowHeight + 5, columnWidth, rowHeight));
-          ops.push(pdfText(fitPdfText(value, 24), x + 4, y - 9, 8));
+          ops.push(pdfText(fitPdfText(value, 24), x + 4, y - 9, 8, isSummaryRow ? "F2" : "F1"));
         });
         y -= rowHeight;
       });
@@ -1003,7 +1021,7 @@ function SuiteSettings({ onBack, onLogout }: SuiteSettingsProps) {
           </label>
 
           <label>
-            Agent Service VAT Rate %
+            VAT Rate %
             <input
               min="0"
               step="0.01"

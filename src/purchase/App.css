@@ -224,6 +224,26 @@ nav button.logout-button {
   font-size: 20px;
 }
 
+.global-search {
+  flex: 1 1 320px;
+  max-width: 520px;
+}
+
+.global-search input {
+  min-height: 42px;
+}
+
+.global-search-panel {
+  margin-top: 18px;
+}
+
+.global-search-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .stack {
   display: grid;
   gap: 18px;

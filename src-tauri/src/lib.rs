@@ -11,6 +11,8 @@ const APP_SETTINGS_SCHEMA: &str = include_str!("../migrations/002_app_settings.s
 const LOCAL_EXPENSES_SCHEMA: &str = include_str!("../migrations/003_local_expenses.sql");
 const LOCAL_EXPENSE_TYPE_SCHEMA: &str = include_str!("../migrations/004_local_expense_type.sql");
 const ACTIVITY_LOG_USER_SCHEMA: &str = include_str!("../migrations/005_activity_log_user.sql");
+const NORMALIZE_FREIGHT_STATUS_SCHEMA: &str =
+    include_str!("../migrations/006_normalize_freight_status.sql");
 const DATABASE_URL: &str = "sqlite:import-purchases.db";
 const DATABASE_FILES: [&str; 2] = ["accounts.db", "import-purchases.db"];
 
@@ -115,6 +117,12 @@ pub fn run() {
             version: 5,
             description: "add_activity_log_user",
             sql: ACTIVITY_LOG_USER_SCHEMA,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 6,
+            description: "normalize_freight_status",
+            sql: NORMALIZE_FREIGHT_STATUS_SCHEMA,
             kind: MigrationKind::Up,
         },
     ];

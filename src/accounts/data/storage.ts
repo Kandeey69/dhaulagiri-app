@@ -8,6 +8,7 @@ import type {
   Party,
   Sale,
 } from "./types";
+import { calculateVatAmount } from "../utils/settings";
 
 let dbPromise: Promise<Database> | null = null;
 
@@ -628,7 +629,7 @@ export async function saveSale(
     throw new Error("Sales amount must be greater than zero.");
   }
 
-  const vatAmount = Number((salesAmount * 0.13).toFixed(2));
+  const vatAmount = calculateVatAmount(salesAmount);
   const totalAmount = Number((salesAmount + vatAmount).toFixed(2));
 
   const sale: Sale = {
@@ -726,7 +727,7 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
     throw new Error("Sales amount must be greater than zero.");
   }
 
-  const vatAmount = Number((salesAmount * 0.13).toFixed(2));
+  const vatAmount = calculateVatAmount(salesAmount);
   const totalAmount = Number((salesAmount + vatAmount).toFixed(2));
 
   await db.execute(
