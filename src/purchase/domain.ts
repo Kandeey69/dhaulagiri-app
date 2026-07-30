@@ -16,7 +16,8 @@ export type PaymentType =
   | 'Other Supplier Payment'
 
 export type PaymentMethod = 'Nabil Bank' | 'Kamana Sewa Bank' | 'Everest Bank'
-export type Currency = 'NPR' | 'INR/IC'
+export type SupplierCurrency = 'INR' | 'USD'
+export type Currency = 'NPR' | 'INR' | 'USD' | 'INR/IC'
 export type LocalExpenseType = 'Fixed Asset' | 'Expense'
 
 export type Party = {
@@ -38,6 +39,7 @@ export type ImportPurchase = {
   vendorPartyId: string
   vendorBillNumber: string
   billDate: string
+  supplierCurrency: SupplierCurrency
   amountIC: number
   supplierExchangeRate: number
   supplierAmountNPR: number
@@ -51,6 +53,7 @@ export type ImportPurchase = {
   terminalVatNPR: number
   totalTerminalChargeNPR: number
   freightIndiaStatus: FreightIndiaStatus
+  freightIndiaPartyId: string
   freightIndiaAmountIC: number
   freightIndiaExchangeRate: number
   freightIndiaAmountNPR: number
@@ -114,6 +117,7 @@ export type AppSettings = {
   companyName: string
   fiscalYear: string
   defaultExchangeRate: number
+  supplierPurchaseCurrency: SupplierCurrency
   panVatNo: string
   address: string
   phone: string
@@ -130,9 +134,10 @@ export type AppData = {
 }
 
 export const defaultSettings: AppSettings = {
-  companyName: 'Dhaulagiri',
+  companyName: '',
   fiscalYear: '2082/83',
-  defaultExchangeRate: 1.6,
+  defaultExchangeRate: 1.6015,
+  supplierPurchaseCurrency: 'INR',
   panVatNo: '',
   address: '',
   phone: '',
@@ -161,6 +166,7 @@ export const paymentTypes: PaymentType[] = [
 ]
 
 export const paymentMethods: PaymentMethod[] = ['Nabil Bank', 'Kamana Sewa Bank', 'Everest Bank']
+export const supplierCurrencies: SupplierCurrency[] = ['INR', 'USD']
 
 export const currencies: Currency[] = ['NPR', 'INR/IC']
 export const localExpenseTypes: LocalExpenseType[] = ['Fixed Asset', 'Expense']
@@ -209,4 +215,8 @@ export function normalizePaymentMethod(value: unknown): PaymentMethod {
   }
 
   return 'Nabil Bank'
+}
+
+export function normalizeSupplierCurrency(value: unknown): SupplierCurrency {
+  return String(value ?? '').trim().toUpperCase() === 'USD' ? 'USD' : 'INR'
 }

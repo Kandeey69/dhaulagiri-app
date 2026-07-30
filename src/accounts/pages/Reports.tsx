@@ -3,6 +3,7 @@ import type { LedgerRow, OutstandingRow, Party } from "../data/types";
 import { getOutstanding, getParties, getPartyLedger } from "../data/storage";
 import { saveLedgerPdf } from "../utils/pdf";
 import OutputVatReport from "./Maskebari";
+import { companyStorageKey } from "../../companyContext";
 
 type ReportView = "Party Ledger" | "Outstanding Balance" | "Output VAT";
 
@@ -11,12 +12,32 @@ export default function Reports() {
   const [parties, setParties] = useState<Party[]>([]);
   const [selectedPartyId, setSelectedPartyId] = useState("");
   const [ledgerRows, setLedgerRows] = useState<LedgerRow[]>([]);
-  const [reportView, setReportView] = useState<ReportView>("Party Ledger");
+  const [reportView, setReportView] = useState<ReportView>(() => {
+    const saved = localStorage.getItem(companyStorageKey("accounts-report-view")) as ReportView | null;
+    return saved === "Output VAT" || saved === "Outstanding Balance" || saved === "Party Ledger"
+      ? saved
+      : "Party Ledger";
+  });
+  const [outputVatMonth, setOutputVatMonth] = useState(
+    () => localStorage.getItem(companyStorageKey("accounts-output-vat-month")) || "1"
+  );
   const [message, setMessage] = useState("");
 
   async function loadReport() {
-    setRows(await getOutstanding());
-    setParties(await getParties());
+    const [loadedRows, loadedParties] = await Promise.all([getOutstanding(), getParties()]);
+    setRows(loadedRows);
+    setParties(loadedParties);
+
+    const dashboardPartyId = localStorage.getItem(companyStorageKey("accounts-report-party-id")) || "";
+    if (dashboardPartyId) {
+      await loadLedger(dashboardPartyId);
+      localStorage.removeItem(companyStorageKey("accounts-report-party-id"));
+    }
+
+    const dashboardMonth = localStorage.getItem(companyStorageKey("accounts-output-vat-month"));
+    if (dashboardMonth) {
+      setOutputVatMonth(dashboardMonth);
+    }
   }
 
   async function loadLedger(partyId: string) {
@@ -68,7 +89,10 @@ export default function Reports() {
             key={item}
             className={reportView === item ? "active" : ""}
             type="button"
-            onClick={() => setReportView(item)}
+            onClick={() => {
+              setReportView(item);
+              localStorage.setItem(companyStorageKey("accounts-report-view"), item);
+            }}
           >
             {item}
           </button>
@@ -194,7 +218,7 @@ export default function Reports() {
         </div>
       )}
 
-      {reportView === "Output VAT" && <OutputVatReport />}
+      {reportView === "Output VAT" && <OutputVatReport initialMonth={outputVatMonth} />}
     </>
   );
 }

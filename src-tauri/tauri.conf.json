@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Dhaulagiri Business Suite",
-  "version": "0.1.0",
-  "identifier": "com.dhaulagiri.businesssuite",
+  "productName": "Easysolution",
+  "version": "0.1.1",
+  "identifier": "com.easysolution.businesssuite",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Dhaulagiri Business Suite",
+        "title": "Easysolution",
         "width": 1280,
         "height": 820,
         "minWidth": 1024,
@@ -26,8 +26,19 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": ["icons/icon.ico"]
+    "targets": ["msi", "nsis"],
+    "icon": ["icons/icon.ico"],
+    "publisher": "Easysolution",
+    "windows": {
+      "wix": {
+        "upgradeCode": "31c72a3a-90d5-5bb4-acce-cb6f3852d20e"
+      },
+      "nsis": {
+        "installMode": "both",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    }
   },
   "plugins": {
     "sql": {

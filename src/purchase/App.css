@@ -130,6 +130,22 @@
   text-transform: uppercase;
 }
 
+.company-name-display {
+  margin: 0;
+  color: var(--heading);
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 1.15;
+}
+
+.company-name-display.compact {
+  font-size: 20px;
+}
+
+.company-name-display.inverse {
+  color: #ffffff;
+}
+
 .sidebar .eyebrow {
   color: #93c5fd;
 }
@@ -438,8 +454,8 @@ input[type='number']::-webkit-outer-spin-button {
 
 .vertical-bar-chart {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: clamp(5px, 1vw, 12px);
   align-items: end;
   min-height: 240px;
   padding-top: 8px;
@@ -449,9 +465,13 @@ input[type='number']::-webkit-outer-spin-button {
   min-width: 0;
   display: grid;
   grid-template-rows: auto 170px auto;
-  gap: 8px;
+  gap: 7px;
   align-items: end;
   justify-items: center;
+}
+
+.vertical-bar-item[role="button"] {
+  cursor: pointer;
 }
 
 .vertical-bar-value {
@@ -464,7 +484,7 @@ input[type='number']::-webkit-outer-spin-button {
 }
 
 .vertical-bar-track {
-  width: 34px;
+  width: clamp(18px, 52%, 34px);
   height: 170px;
   display: flex;
   align-items: end;
@@ -482,7 +502,7 @@ input[type='number']::-webkit-outer-spin-button {
 .vertical-bar-item span {
   max-width: 100%;
   color: var(--muted);
-  font-size: 12px;
+  font-size: clamp(9px, 0.85vw, 12px);
   font-weight: 800;
   text-align: center;
   overflow-wrap: anywhere;

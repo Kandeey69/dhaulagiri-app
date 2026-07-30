@@ -1,5 +1,6 @@
 import type { LedgerRow, Party } from "../data/types";
 import { saveBlob } from "./fileSave";
+import { getCompanySetting } from "../../companyContext";
 
 type LedgerPdfRow = {
   balance: string;
@@ -35,8 +36,8 @@ export async function saveLedgerPdf(party: Party, ledgerRows: LedgerRow[]) {
   const reportDate = todayForFileName();
   const filename = `${safeFilename(party.name)}_${reportDate}.pdf`;
   const companyName =
-    localStorage.getItem("accounts-company-name") || "Dhaulagiri Accounts";
-  const fiscalYear = localStorage.getItem("accounts-fiscal-year") || "-";
+    getCompanySetting("accounts-company-name", "Company");
+  const fiscalYear = getCompanySetting("accounts-fiscal-year", "-");
   const blob = new Blob(
     [
       buildLedgerPdf({

@@ -3,6 +3,7 @@ import {
   normalizeFreightIndiaStatus,
   normalizePartyCategory,
   normalizePaymentMethod,
+  normalizeSupplierCurrency,
   type ActivityLog,
   type AppData,
   type ImportPurchase,
@@ -10,8 +11,10 @@ import {
   type Party,
   type Payment,
 } from './domain'
+import { companyStorageKey } from '../companyContext'
 
-const storageKey = 'dhaulagiri-import-purchase-app-v1'
+const storageKey = 'easysolution-import-purchase-app-v1'
+const activeStorageKey = () => companyStorageKey(storageKey)
 
 const emptyData: AppData = {
   settings: defaultSettings,
@@ -32,7 +35,7 @@ export function createId() {
 }
 
 export function loadData(): AppData {
-  const saved = localStorage.getItem(storageKey)
+    const saved = localStorage.getItem(activeStorageKey())
 
   if (!saved) {
     return emptyData
@@ -43,14 +46,22 @@ export function loadData(): AppData {
     return {
       ...emptyData,
       ...parsed,
-      settings: { ...defaultSettings, ...parsed.settings },
+      settings: {
+        ...defaultSettings,
+        ...parsed.settings,
+        supplierPurchaseCurrency: normalizeSupplierCurrency(
+          parsed.settings?.supplierPurchaseCurrency,
+        ),
+      },
       parties: (parsed.parties ?? []).map((party) => ({
         ...party,
         category: normalizePartyCategory(party.category),
       })),
       purchases: (parsed.purchases ?? []).map((purchase) => ({
         ...purchase,
+        supplierCurrency: normalizeSupplierCurrency(purchase.supplierCurrency),
         freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
+        freightIndiaPartyId: purchase.freightIndiaPartyId ?? '',
       })),
       payments: (parsed.payments ?? []).map((payment) => ({
         ...payment,
@@ -73,7 +84,7 @@ export function loadData(): AppData {
 }
 
 export function saveData(data: AppData) {
-  localStorage.setItem(storageKey, JSON.stringify(data))
+  localStorage.setItem(activeStorageKey(), JSON.stringify(data))
 }
 
 export function createActivity(
@@ -123,7 +134,9 @@ export function withNewPurchase(
 
   return {
     ...purchase,
+    supplierCurrency: normalizeSupplierCurrency(purchase.supplierCurrency),
     freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
+    freightIndiaPartyId: purchase.freightIndiaPartyId ?? '',
     id: id(),
     createdAt,
     updatedAt: createdAt,
@@ -133,7 +146,9 @@ export function withNewPurchase(
 export function withUpdatedPurchase(purchase: ImportPurchase): ImportPurchase {
   return {
     ...purchase,
+    supplierCurrency: normalizeSupplierCurrency(purchase.supplierCurrency),
     freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
+    freightIndiaPartyId: purchase.freightIndiaPartyId ?? '',
     updatedAt: now(),
   }
 }

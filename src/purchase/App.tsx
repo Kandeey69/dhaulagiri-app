@@ -14,8 +14,10 @@ import {
   localExpenseTypes,
   normalizeFreightIndiaStatus,
   normalizePartyCategory,
+  normalizeSupplierCurrency,
   partyCategories,
   paymentMethods,
+  supplierCurrencies,
   type AppData,
   type AppSettings,
   type FreightIndiaStatus,
@@ -25,6 +27,7 @@ import {
   type PartyCategory,
   type Payment,
   type PaymentMethod,
+  type SupplierCurrency,
 } from './domain'
 import {
   createDataRepository,
@@ -85,6 +88,7 @@ type PurchaseImportResult = {
   billDate: string
   supplierAmountNPR: number
   customAgent: string
+  indianTransport: string
   pragapanpatraNumber: string
   debitNoteTotalNPR: number
   agentServiceTotalNPR: number
@@ -139,8 +143,10 @@ const createEmptyPurchase = (settings: AppSettings = defaultSettings): ImportPur
   vendorPartyId: '',
   vendorBillNumber: '',
   billDate: '',
+  supplierCurrency: settings.supplierPurchaseCurrency,
   amountIC: 0,
-  supplierExchangeRate: settings.defaultExchangeRate,
+  supplierExchangeRate:
+    settings.supplierPurchaseCurrency === 'USD' ? 0 : settings.defaultExchangeRate,
   supplierAmountNPR: 0,
   customAgentPartyId: '',
   debitNoteNumber: '',
@@ -152,6 +158,7 @@ const createEmptyPurchase = (settings: AppSettings = defaultSettings): ImportPur
   terminalVatNPR: 0,
   totalTerminalChargeNPR: 0,
   freightIndiaStatus: 'Paid by custom agent',
+  freightIndiaPartyId: '',
   freightIndiaAmountIC: 0,
   freightIndiaExchangeRate: settings.defaultExchangeRate,
   freightIndiaAmountNPR: 0,
@@ -248,6 +255,7 @@ const rateFmt = (value: number) =>
 
 const npr = (value: number) => `NPR ${fmt(value)}`
 const ic = (value: number) => `IC ${fmt(value)}`
+const supplierMoney = (value: number, currency: SupplierCurrency) => `${currency} ${fmt(value)}`
 const vatRateDecimal = (settings: AppSettings) => Math.max(0, n(settings.agentServiceVatRate)) / 100
 const vatRateLabel = (settings: AppSettings) =>
   new Intl.NumberFormat('en-IN', {
@@ -711,12 +719,14 @@ const columns = [
 
 type PurchaseAppProps = {
   initialUserRole?: UserRole;
+  isReadOnly?: boolean;
   onBackToModules?: () => void;
   onLogout?: () => void;
 };
 
 function App({
   initialUserRole,
+  isReadOnly = false,
   onBackToModules,
   onLogout,
 }: PurchaseAppProps = {}) {
@@ -729,6 +739,7 @@ function App({
   const [view, setView] = useState<View>('Dashboard')
   const [reportView, setReportView] = useState<ReportView>('Party Ledger')
   const [globalSearch, setGlobalSearch] = useState('')
+  const [dashboardEntryMessage, setDashboardEntryMessage] = useState('')
   const [partyForm, setPartyForm] = useState<PartyForm>(emptyParty)
   const [partySearch, setPartySearch] = useState('')
   const [partyCategoryFilter, setPartyCategoryFilter] = useState<'All' | PartyCategory>('All')
@@ -736,6 +747,8 @@ function App({
   const [paymentForm, setPaymentForm] = useState<Payment>(() => createEmptyPayment())
   const [paymentMode, setPaymentMode] = useState<'Indian Supplier' | 'Other Party'>('Indian Supplier')
   const [paymentBillYear, setPaymentBillYear] = useState<'Current' | 'Last year'>('Current')
+  const [supplierPaymentCurrency, setSupplierPaymentCurrency] = useState<SupplierCurrency>('INR')
+  const [supplierPaymentExchangeRate, setSupplierPaymentExchangeRate] = useState(defaultSettings.defaultExchangeRate)
   const [selectedSupplierBillIds, setSelectedSupplierBillIds] = useState<string[]>([])
   const [reconciliationPaymentId, setReconciliationPaymentId] = useState('')
   const [bankOutflowNPR, setBankOutflowNPR] = useState(0)
@@ -810,10 +823,19 @@ function App({
   const indianSupplierPaymentParties = [...indianSuppliers, ...indianTransportParties]
   const localSuppliers = activeParties.filter((party) => party.category === 'Local Suppliers')
   const otherPaymentParties = activeParties.filter((party) => !isIndianSupplierCategory(party))
-  const canEditOrDelete = userRole === 'Master'
+  const canEditOrDelete = userRole === 'Master' && !isReadOnly
+  const canEditPurchase = !isReadOnly && (userRole === 'Master' || userRole === 'Account')
+  const isUsdSupplierMode = data.settings.supplierPurchaseCurrency === 'USD'
+  const selectedSupplierCurrency: SupplierCurrency = isUsdSupplierMode
+    ? normalizeSupplierCurrency(purchaseForm.supplierCurrency)
+    : 'INR'
+  const supplierExchangeRate = selectedSupplierCurrency === 'USD'
+    ? purchaseForm.supplierExchangeRate
+    : data.settings.defaultExchangeRate
   const effectivePurchaseForm = {
     ...purchaseForm,
-    supplierExchangeRate: data.settings.defaultExchangeRate,
+    supplierCurrency: selectedSupplierCurrency,
+    supplierExchangeRate,
     freightIndiaExchangeRate: data.settings.defaultExchangeRate,
   }
   const configuredVatRate = vatRateDecimal(data.settings)
@@ -860,7 +882,14 @@ function App({
     (sum, purchase) => sum + purchase.supplierAmountNPR,
     0,
   )
-  const indianSupplierPaymentNPR = paymentForm.amount * data.settings.defaultExchangeRate
+  const isUsdSupplierPaymentMode = data.settings.supplierPurchaseCurrency === 'USD'
+  const selectedSupplierPaymentCurrency: SupplierCurrency = isUsdSupplierPaymentMode
+    ? supplierPaymentCurrency
+    : 'INR'
+  const selectedSupplierPaymentExchangeRate = selectedSupplierPaymentCurrency === 'USD'
+    ? supplierPaymentExchangeRate
+    : data.settings.defaultExchangeRate
+  const indianSupplierPaymentNPR = paymentForm.amount * selectedSupplierPaymentExchangeRate
   const commissionExpenseNPR = Math.max(0, bankOutflowNPR - indianSupplierPaymentNPR)
   const reconciliationDifferenceNPR =
     (selectedReconciliationPayment?.amountNPR ?? 0) - selectedSupplierBillAmountNPR
@@ -900,6 +929,7 @@ function App({
   )
   const vendorOptions = includeSelectedParty(indianSuppliers, purchaseForm.vendorPartyId, partyById)
   const agentOptions = includeSelectedParty(customAgents, purchaseForm.customAgentPartyId, partyById)
+  const transportOptions = includeSelectedParty(indianTransportParties, purchaseForm.freightIndiaPartyId, partyById)
   const indianSupplierPaymentPartyOptions = includeSelectedParty(indianSupplierPaymentParties, paymentForm.partyId, partyById)
   const otherPaymentPartyOptions = includeSelectedParty(otherPaymentParties, paymentForm.partyId, partyById)
   const localSupplierOptions = includeSelectedParty(localSuppliers, localExpenseForm.partyId, partyById)
@@ -1026,20 +1056,39 @@ function App({
   }
 
   const openNewPurchaseEntry = () => {
+    if (isReadOnly) {
+      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} ${data.settings.fiscalYear ? `FY ${data.settings.fiscalYear}` : ''} is closed. Entries cannot be added in a closed fiscal year.`)
+      return
+    }
+
+    setDashboardEntryMessage('')
     setPurchaseForm(createEmptyPurchase(data.settings))
     setView('Import Purchase Entry')
   }
 
   const openNewPaymentEntry = () => {
+    if (isReadOnly) {
+      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} ${data.settings.fiscalYear ? `FY ${data.settings.fiscalYear}` : ''} is closed. Entries cannot be added in a closed fiscal year.`)
+      return
+    }
+
+    setDashboardEntryMessage('')
     setPaymentForm(createEmptyPayment())
     setPaymentMode('Indian Supplier')
     setPaymentBillYear('Current')
+    resetSupplierPaymentCurrency()
     setSelectedSupplierBillIds([])
     setBankOutflowNPR(0)
     setView('Payment Entry')
   }
 
   const openNewLocalExpenseEntry = () => {
+    if (isReadOnly) {
+      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} ${data.settings.fiscalYear ? `FY ${data.settings.fiscalYear}` : ''} is closed. Entries cannot be added in a closed fiscal year.`)
+      return
+    }
+
+    setDashboardEntryMessage('')
     setLocalExpenseForm(createEmptyLocalExpense())
     setView('Local Purchase / Expense')
   }
@@ -1106,6 +1155,7 @@ function App({
     () =>
       makePartySlices(
         data.purchases.map((purchase) => ({
+          id: purchase.vendorPartyId,
           name: partyName(purchase.vendorPartyId),
           amount: purchase.supplierAmountNPR,
         })),
@@ -1200,7 +1250,8 @@ function App({
     const creditedPurchases = data.purchases.filter(
       (purchase) =>
         shouldCreditIndianTransport(purchase.freightIndiaStatus) &&
-        purchase.freightIndiaAmountNPR > 0,
+        purchase.freightIndiaAmountNPR > 0 &&
+        !purchase.freightIndiaPartyId,
     )
     const freightCredits = creditedPurchases.reduce(
       (sum, purchase) => sum + purchase.freightIndiaAmountNPR,
@@ -1324,19 +1375,50 @@ function App({
         }
       })
 
-    const transportRow = {
-      partyName: 'Indian Transport',
+    const transportRows = data.parties
+      .filter(isIndianTransportCategory)
+      .map((party) => {
+        const freightTotal = data.purchases
+          .filter(
+            (purchase) =>
+              purchase.freightIndiaPartyId === party.id &&
+              shouldCreditIndianTransport(purchase.freightIndiaStatus),
+          )
+          .reduce((sum, purchase) => sum + purchase.freightIndiaAmountNPR, 0)
+        const payments = data.payments
+          .filter(
+            (payment) =>
+              payment.partyId === party.id &&
+              (payment.paymentType === 'Freight Payment' || isSupplierPayment(payment)),
+          )
+          .reduce((sum, payment) => sum + payment.amountNPR, 0)
+
+        return {
+          partyName: party.name,
+          category: 'Indian Transport',
+          openingPayable: party.openingPayable,
+          purchaseOrBillTotal: 0,
+          debitNoteTotal: 0,
+          serviceBillTotal: 0,
+          freightTotal,
+          payments,
+          outstanding: party.openingPayable + freightTotal - payments,
+        }
+      })
+
+    const unassignedTransportRow = {
+      partyName: 'Indian Transport (unassigned)',
       category: 'Indian Transport',
-      openingPayable: indianTransportReport.openingPayable,
+      openingPayable: 0,
       purchaseOrBillTotal: 0,
       debitNoteTotal: 0,
       serviceBillTotal: 0,
       freightTotal: indianTransportReport.freightCredits,
-      payments: indianTransportReport.totalPayments,
-      outstanding: indianTransportReport.outstanding,
+      payments: 0,
+      outstanding: indianTransportReport.freightCredits,
     }
 
-    return [...supplierRows, ...agentRows, transportRow, ...localSupplierRows].filter(
+    return [...supplierRows, ...agentRows, ...transportRows, unassignedTransportRow, ...localSupplierRows].filter(
       (row) =>
         row.openingPayable ||
         row.purchaseOrBillTotal ||
@@ -1346,7 +1428,7 @@ function App({
         row.payments ||
         row.outstanding,
     )
-  }, [agentPayables, data.localExpenses, data.parties, data.payments, indianTransportReport, supplierPayables])
+  }, [agentPayables, data.localExpenses, data.parties, data.payments, data.purchases, indianTransportReport, supplierPayables])
 
   const selectedLedgerParty = partyById.get(ledgerPartyId)
   const ledgerRows = useMemo(() => {
@@ -1424,6 +1506,26 @@ function App({
             increase: localExpense.totalAmountNPR,
             payment: 0,
             remarks: localExpense.remarks,
+          })
+        })
+    }
+
+    if (isIndianTransportCategory(selectedLedgerParty)) {
+      data.purchases
+        .filter(
+          (purchase) =>
+            purchase.freightIndiaPartyId === selectedLedgerParty.id &&
+            shouldCreditIndianTransport(purchase.freightIndiaStatus),
+        )
+        .forEach((purchase) => {
+          rows.push({
+            date: purchase.debitNoteDate || purchase.billDate,
+            type: 'Freight Bill',
+            reference: purchase.debitNoteNumber || purchase.vendorBillNumber,
+            description: `${partyName(purchase.vendorPartyId)} - bill ${purchase.vendorBillNumber}`,
+            increase: purchase.freightIndiaAmountNPR,
+            payment: 0,
+            remarks: purchase.remarks,
           })
         })
     }
@@ -1542,6 +1644,24 @@ function App({
     setPurchaseForm((current) => ({ ...current, [key]: value }))
   }
 
+  const updateSupplierCurrency = (value: SupplierCurrency) => {
+    setPurchaseForm((current) => ({
+      ...current,
+      supplierCurrency: value,
+      supplierExchangeRate:
+        value === 'INR'
+          ? data.settings.defaultExchangeRate
+          : current.supplierCurrency === 'USD'
+            ? current.supplierExchangeRate
+            : 0,
+    }))
+  }
+
+  function resetSupplierPaymentCurrency() {
+    setSupplierPaymentCurrency('INR')
+    setSupplierPaymentExchangeRate(data.settings.defaultExchangeRate)
+  }
+
   const updatePaymentField = <K extends keyof Payment>(key: K, value: Payment[K]) => {
     setPaymentForm((current) => ({ ...current, [key]: value }))
   }
@@ -1576,6 +1696,7 @@ function App({
     const savedSettings = {
       ...settingsForm,
       agentServiceVatRate: n(settingsForm.agentServiceVatRate),
+      supplierPurchaseCurrency: normalizeSupplierCurrency(settingsForm.supplierPurchaseCurrency),
     }
 
     setDataWithLog(
@@ -1587,7 +1708,13 @@ function App({
 
     setPurchaseForm((current) => ({
       ...current,
-      supplierExchangeRate: savedSettings.defaultExchangeRate,
+      supplierCurrency: savedSettings.supplierPurchaseCurrency,
+      supplierExchangeRate:
+        savedSettings.supplierPurchaseCurrency === 'INR'
+          ? savedSettings.defaultExchangeRate
+          : current.supplierCurrency === 'USD'
+            ? current.supplierExchangeRate
+            : 0,
       freightIndiaExchangeRate: savedSettings.defaultExchangeRate,
     }))
     setPaymentForm((current) =>
@@ -1603,7 +1730,7 @@ function App({
       ['ANG Minerals', 'India', '', '', 'India', 'Indian Suppliers', '0', 'yes'],
       ['Sunrise Custom Agent', 'Nepal', '', '', 'Nepal', 'Custom Agent', '0', 'yes'],
       ['Indian Transport', 'India', '', '', 'India', 'Indian Transport', '0', 'yes'],
-      ['Dhaulagiri Local Supplier', 'Nepal', '', '', 'Nepal', 'Local Suppliers', '0', 'yes'],
+      ['Sample Local Supplier', 'Nepal', '', '', 'Nepal', 'Local Suppliers', '0', 'yes'],
     ]
 
     await saveBlobWithPicker(
@@ -1619,6 +1746,8 @@ function App({
         'vendorName',
         'vendorBillNumber',
         'billDateAD',
+        'supplierCurrency',
+        'supplierExchangeRate',
         'amountIC',
         'customAgentName',
         'pragapanpatraNumber',
@@ -1628,6 +1757,7 @@ function App({
         'importVatNPR',
         'terminalChargeWithoutVatNPR',
         'freightIndiaStatus',
+        'freightIndiaPartyName',
         'freightIndiaAmountIC',
         'otherChargesNPR',
         'agentServiceBillNumber',
@@ -1639,6 +1769,8 @@ function App({
         'ANG Minerals',
         '2025-26-63',
         '2082/01/01',
+        'INR',
+        '1.6015',
         '412700',
         'Sunrise Custom Agent',
         'PP-001',
@@ -1648,6 +1780,7 @@ function App({
         '119974',
         '3424',
         'Paid by custom agent',
+        '',
         '102900',
         '0',
         'ASB-001',
@@ -1724,7 +1857,7 @@ function App({
         'Custom/local payment',
       ],
       [
-        'Dhaulagiri Local Supplier',
+        'Sample Local Supplier',
         '2082/01/06',
         '15000',
         'Nabil Bank',
@@ -1853,6 +1986,14 @@ function App({
       const customAgent = partiesByName.get(normalizeKey(customAgentName))
       const freightStatusValue = getCsvValue(row, 'freightIndiaStatus')
       const freightIndiaStatus = resolveFreightStatus(freightStatusValue) ?? 'Paid by custom agent'
+      const indianTransportName = getCsvValue(
+        row,
+        'freightIndiaPartyName',
+        'indianTransportName',
+        'transportName',
+        'freightPartyName',
+      )
+      const indianTransportParty = partiesByName.get(normalizeKey(indianTransportName))
 
       if (!vendor) {
         const reason = `Vendor not found (${vendorName || 'blank'}).`
@@ -1865,6 +2006,7 @@ function App({
           billDate,
           supplierAmountNPR: 0,
           customAgent: customAgentName || '-',
+          indianTransport: indianTransportName || '-',
           pragapanpatraNumber,
           debitNoteTotalNPR: 0,
           agentServiceTotalNPR: 0,
@@ -1886,6 +2028,7 @@ function App({
           billDate,
           supplierAmountNPR: 0,
           customAgent: customAgentName || '-',
+          indianTransport: indianTransportName || '-',
           pragapanpatraNumber,
           debitNoteTotalNPR: 0,
           agentServiceTotalNPR: 0,
@@ -1907,6 +2050,7 @@ function App({
           billDate,
           supplierAmountNPR: 0,
           customAgent: customAgentName,
+          indianTransport: indianTransportName || '-',
           pragapanpatraNumber,
           debitNoteTotalNPR: 0,
           agentServiceTotalNPR: 0,
@@ -1917,14 +2061,94 @@ function App({
         return
       }
 
+      if (shouldCreditIndianTransport(freightIndiaStatus)) {
+        if (!indianTransportParty) {
+          const reason = `Indian transport party not found (${indianTransportName || 'blank'}).`
+          errors.push(`Line ${line}: ${reason}`)
+          importedDetails.push({
+            status: 'Skipped',
+            line,
+            vendor: vendorName,
+            billNumber: vendorBillNumber,
+            billDate,
+            supplierAmountNPR: 0,
+            customAgent: customAgentName || '-',
+            indianTransport: indianTransportName || '-',
+            pragapanpatraNumber,
+            debitNoteTotalNPR: 0,
+            agentServiceTotalNPR: 0,
+            totalInputVatNPR: 0,
+            landedCostNPR: 0,
+            remarks: reason,
+          })
+          return
+        }
+
+        if (!isIndianTransportCategory(indianTransportParty)) {
+          const reason = 'Freight party must be in Indian Transport category.'
+          errors.push(`Line ${line}: ${reason}`)
+          importedDetails.push({
+            status: 'Skipped',
+            line,
+            vendor: vendorName,
+            billNumber: vendorBillNumber,
+            billDate,
+            supplierAmountNPR: 0,
+            customAgent: customAgentName || '-',
+            indianTransport: indianTransportParty.name,
+            pragapanpatraNumber,
+            debitNoteTotalNPR: 0,
+            agentServiceTotalNPR: 0,
+            totalInputVatNPR: 0,
+            landedCostNPR: 0,
+            remarks: reason,
+          })
+          return
+        }
+      }
+
       const draft = createEmptyPurchase(data.settings)
+      const importedSupplierCurrency = normalizeSupplierCurrency(
+        getCsvValue(row, 'supplierCurrency', 'currency') || data.settings.supplierPurchaseCurrency,
+      )
+      const supplierCurrency = data.settings.supplierPurchaseCurrency === 'USD'
+        ? importedSupplierCurrency
+        : 'INR'
+      const importedSupplierRate = n(getCsvValue(row, 'supplierExchangeRate', 'exchangeRate', 'rate'))
+      const importSupplierExchangeRate = supplierCurrency === 'USD'
+        ? importedSupplierRate
+        : data.settings.defaultExchangeRate
+
+      if (supplierCurrency === 'USD' && importSupplierExchangeRate <= 0) {
+        const reason = 'USD supplier exchange rate is required and must be greater than zero.'
+        errors.push(`Line ${line}: ${reason}`)
+        importedDetails.push({
+          status: 'Skipped',
+          line,
+          vendor: vendorName,
+          billNumber: vendorBillNumber,
+          billDate,
+          supplierAmountNPR: 0,
+          customAgent: customAgentName || '-',
+          indianTransport: indianTransportName || '-',
+          pragapanpatraNumber,
+          debitNoteTotalNPR: 0,
+          agentServiceTotalNPR: 0,
+          totalInputVatNPR: 0,
+          landedCostNPR: 0,
+          remarks: reason,
+        })
+        return
+      }
+
       const purchase = {
         ...draft,
         vendorPartyId: vendor.id,
         vendorBillNumber,
         billDate,
+        supplierCurrency,
         amountIC: n(getCsvValue(row, 'amountIC')),
-        supplierExchangeRate: data.settings.defaultExchangeRate,
+        supplierExchangeRate: importSupplierExchangeRate,
         customAgentPartyId: customAgent?.id ?? '',
         debitNoteNumber: pragapanpatraNumber,
         debitNoteDate: pragapanpatraDate,
@@ -1933,6 +2157,9 @@ function App({
         importVatNPR: n(getCsvValue(row, 'importVatNPR')),
         terminalChargeWithoutVatNPR: n(getCsvValue(row, 'terminalChargeWithoutVatNPR')),
         freightIndiaStatus,
+        freightIndiaPartyId: shouldCreditIndianTransport(freightIndiaStatus)
+          ? indianTransportParty?.id ?? ''
+          : '',
         freightIndiaAmountIC: n(getCsvValue(row, 'freightIndiaAmountIC')),
         freightIndiaExchangeRate: data.settings.defaultExchangeRate,
         otherChargesNPR: n(getCsvValue(row, 'otherChargesNPR')),
@@ -1954,6 +2181,7 @@ function App({
           billDate: purchase.billDate,
           supplierAmountNPR: totals.supplierAmountNPR,
           customAgent: '-',
+          indianTransport: indianTransportParty?.name ?? '-',
           pragapanpatraNumber: purchase.debitNoteNumber,
           debitNoteTotalNPR: totals.debitNoteTotalNPR,
           agentServiceTotalNPR: totals.agentServiceTotalNPR,
@@ -1973,6 +2201,7 @@ function App({
         billDate: purchase.billDate,
         supplierAmountNPR: totals.supplierAmountNPR,
         customAgent: customAgent?.name ?? '-',
+        indianTransport: indianTransportParty?.name ?? '-',
         pragapanpatraNumber: purchase.debitNoteNumber,
         debitNoteTotalNPR: totals.debitNoteTotalNPR,
         agentServiceTotalNPR: totals.agentServiceTotalNPR,
@@ -2325,7 +2554,9 @@ function App({
   const hardDeleteParty = (party: Party) => {
     const linkedPurchases = data.purchases.filter(
       (purchase) =>
-        purchase.vendorPartyId === party.id || purchase.customAgentPartyId === party.id,
+        purchase.vendorPartyId === party.id ||
+        purchase.customAgentPartyId === party.id ||
+        purchase.freightIndiaPartyId === party.id,
     )
     const linkedPayments = data.payments.filter((payment) => payment.partyId === party.id)
     const linkedLocalExpenses = data.localExpenses.filter(
@@ -2346,7 +2577,9 @@ function App({
       parties: data.parties.filter((item) => item.id !== party.id),
       purchases: data.purchases.filter(
         (purchase) =>
-          purchase.vendorPartyId !== party.id && purchase.customAgentPartyId !== party.id,
+          purchase.vendorPartyId !== party.id &&
+          purchase.customAgentPartyId !== party.id &&
+          purchase.freightIndiaPartyId !== party.id,
       ),
       localExpenses: data.localExpenses.filter(
         (localExpense) => localExpense.partyId !== party.id,
@@ -2370,7 +2603,11 @@ function App({
     if (partyForm.id === party.id) {
       setPartyForm(emptyParty)
     }
-    if (purchaseForm.vendorPartyId === party.id || purchaseForm.customAgentPartyId === party.id) {
+    if (
+      purchaseForm.vendorPartyId === party.id ||
+      purchaseForm.customAgentPartyId === party.id ||
+      purchaseForm.freightIndiaPartyId === party.id
+    ) {
       setPurchaseForm(createEmptyPurchase(data.settings))
     }
     if (paymentForm.partyId === party.id) {
@@ -2402,7 +2639,20 @@ function App({
       return
     }
 
-    if (purchaseForm.id && !canEditOrDelete) {
+    if (
+      shouldCreditIndianTransport(purchaseForm.freightIndiaStatus) &&
+      !purchaseForm.freightIndiaPartyId
+    ) {
+      window.alert('Select the Indian transport company when freight is to be paid by us.')
+      return
+    }
+
+    if (supplierExchangeRate <= 0) {
+      window.alert(`${selectedSupplierCurrency} exchange rate must be greater than zero.`)
+      return
+    }
+
+    if (purchaseForm.id && !canEditPurchase) {
       window.alert('Account user cannot edit existing purchases.')
       return
     }
@@ -2411,7 +2661,11 @@ function App({
       ...purchaseForm,
       debitNoteDate: normalizeBsDate(purchaseForm.debitNoteDate),
       agentServiceBillDate: normalizeBsDate(purchaseForm.agentServiceBillDate),
-      supplierExchangeRate: data.settings.defaultExchangeRate,
+      supplierCurrency: selectedSupplierCurrency,
+      supplierExchangeRate,
+      freightIndiaPartyId: shouldCreditIndianTransport(purchaseForm.freightIndiaStatus)
+        ? purchaseForm.freightIndiaPartyId
+        : '',
       freightIndiaExchangeRate: data.settings.defaultExchangeRate,
     }
     const totalsForSave = calculatePurchaseTotals(fixedRatePurchase, data.settings.agentServiceVatRate)
@@ -2424,7 +2678,11 @@ function App({
       purchaseForm.id ? 'Review purchase update before save:' : 'Review purchase before save:',
       `Vendor: ${partyName(purchaseToSave.vendorPartyId)}`,
       `Bill number: ${purchaseToSave.vendorBillNumber}`,
+      `Supplier currency: ${purchaseToSave.supplierCurrency}`,
+      `Supplier amount: ${supplierMoney(purchaseToSave.amountIC, purchaseToSave.supplierCurrency)}`,
+      `Supplier exchange rate: ${rateFmt(purchaseToSave.supplierExchangeRate)}`,
       `Supplier payable: ${npr(purchaseToSave.supplierAmountNPR)}`,
+      `Indian transport: ${purchaseToSave.freightIndiaPartyId ? partyName(purchaseToSave.freightIndiaPartyId) : '-'}`,
       `Agent payable: ${npr(purchaseToSave.totalAgentPayableNPR)}`,
       `VAT: ${npr(purchaseToSave.totalInputVatNPR)}`,
       `Landed cost: ${npr(purchaseToSave.landedCostNPR)}`,
@@ -2501,9 +2759,9 @@ function App({
           ...paymentForm,
           paymentDate: normalizeBsDate(paymentForm.paymentDate),
           paymentType: 'Indian Supplier Payment' as const,
-            currency: 'INR/IC' as const,
+            currency: selectedSupplierPaymentCurrency,
             amount: paymentForm.amount,
-            exchangeRate: data.settings.defaultExchangeRate,
+            exchangeRate: selectedSupplierPaymentExchangeRate,
             amountNPR: indianSupplierPaymentNPR,
             remarks: [
               `Bill year: ${paymentBillYear}`,
@@ -2525,6 +2783,11 @@ function App({
 
     if (paymentMode === 'Indian Supplier' && paymentForm.amount <= 0) {
       window.alert('Amount in IC/LC is required.')
+      return
+    }
+
+    if (paymentMode === 'Indian Supplier' && selectedSupplierPaymentExchangeRate <= 0) {
+      window.alert(`${selectedSupplierPaymentCurrency} exchange rate must be greater than zero.`)
       return
     }
 
@@ -2591,6 +2854,7 @@ function App({
 
     setPaymentForm(createEmptyPayment())
     setPaymentBillYear('Current')
+    resetSupplierPaymentCurrency()
     setBankOutflowNPR(0)
   }
 
@@ -2598,6 +2862,8 @@ function App({
     setPaymentForm(payment)
     setPaymentMode(isSupplierPayment(payment) ? 'Indian Supplier' : 'Other Party')
     setPaymentBillYear(payment.remarks.includes('Last year') ? 'Last year' : 'Current')
+    setSupplierPaymentCurrency(normalizeSupplierCurrency(payment.currency))
+    setSupplierPaymentExchangeRate(payment.exchangeRate || data.settings.defaultExchangeRate)
     setBankOutflowNPR(payment.amountNPR)
     setView('Payment Entry')
   }
@@ -2826,6 +3092,7 @@ function App({
   const renderDashboard = () => (
     <div className="stack">
       <Panel title="New Entry">
+        {dashboardEntryMessage && <p className="status-message">{dashboardEntryMessage}</p>}
         <div className="quick-actions">
           <button type="button" onClick={openNewPurchaseEntry}>
             New import purchase
@@ -2847,11 +3114,34 @@ function App({
       </div>
 
       <Panel title="Landed Cost by Month">
-        <BarChart rows={monthlyLandedCost} emptyText="No landed cost data by agent bill date yet." />
+        <BarChart
+          rows={monthlyLandedCost}
+          emptyText="No landed cost data by agent bill date yet."
+          onSelect={(row) => {
+            setVatFilters({ month: row.month })
+            setReportView('Input VAT')
+            setView('Reports')
+            window.requestAnimationFrame(() => {
+              window.scrollTo({ top: 0, behavior: 'smooth' })
+            })
+          }}
+        />
       </Panel>
 
       <Panel title="Purchase by Major Indian Supplier">
-        <PieChart slices={purchaseBySupplier} emptyText="No Indian supplier purchase data yet." />
+        <PieChart
+          slices={purchaseBySupplier}
+          emptyText="No Indian supplier purchase data yet."
+          onSelect={(slice) => {
+            if (!slice.id) return
+            setLedgerPartyId(slice.id)
+            setReportView('Party Ledger')
+            setView('Reports')
+            window.requestAnimationFrame(() => {
+              window.scrollTo({ top: 0, behavior: 'smooth' })
+            })
+          }}
+        />
       </Panel>
 
       <div className="two-column">
@@ -2862,7 +3152,7 @@ function App({
               dateText(purchase.agentServiceBillDate || importPurchaseSortDate(purchase)),
               partyName(purchase.vendorPartyId),
               purchase.vendorBillNumber,
-              ic(purchase.amountIC),
+              supplierMoney(purchase.amountIC, purchase.supplierCurrency),
             ])}
           />
         </Panel>
@@ -3029,8 +3319,31 @@ function App({
               />
             </Field>
             <CalendarDateField label="Bill date (AD)" value={purchaseForm.billDate} onChange={(value) => updatePurchaseField('billDate', value)} />
-            <NumberField label="Amount IC/INR" value={purchaseForm.amountIC} onChange={(value) => updatePurchaseField('amountIC', value)} />
-            <ReadOnly label="Fixed exchange rate" value={rateFmt(data.settings.defaultExchangeRate)} />
+            {isUsdSupplierMode && (
+              <Field label="Supplier currency">
+                <select
+                  value={selectedSupplierCurrency}
+                  onChange={(event) => updateSupplierCurrency(event.target.value as SupplierCurrency)}
+                >
+                  {supplierCurrencies.map((currency) => (
+                    <option key={currency} value={currency}>
+                      {currency}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            <NumberField label={`Amount ${selectedSupplierCurrency}`} value={purchaseForm.amountIC} onChange={(value) => updatePurchaseField('amountIC', value)} />
+            {selectedSupplierCurrency === 'USD' ? (
+              <NumberField
+                label="USD exchange rate"
+                value={purchaseForm.supplierExchangeRate}
+                step="0.0001"
+                onChange={(value) => updatePurchaseField('supplierExchangeRate', value)}
+              />
+            ) : (
+              <ReadOnly label="Fixed INR exchange rate" value={rateFmt(data.settings.defaultExchangeRate)} />
+            )}
             <ReadOnly label="Amount NPR" value={npr(purchaseTotals.supplierAmountNPR)} />
             <Field label="Remarks">
               <input
@@ -3067,13 +3380,37 @@ function App({
             <Field label="Freight India status">
               <select
                 value={purchaseForm.freightIndiaStatus}
-                onChange={(event) => updatePurchaseField('freightIndiaStatus', event.target.value as FreightIndiaStatus)}
+                onChange={(event) => {
+                  const nextStatus = event.target.value as FreightIndiaStatus
+                  setPurchaseForm((current) => ({
+                    ...current,
+                    freightIndiaStatus: nextStatus,
+                    freightIndiaPartyId: shouldCreditIndianTransport(nextStatus)
+                      ? current.freightIndiaPartyId
+                      : '',
+                  }))
+                }}
               >
                 {freightIndiaStatuses.map((status) => (
                   <option key={status}>{status}</option>
                 ))}
               </select>
             </Field>
+            {shouldCreditIndianTransport(purchaseForm.freightIndiaStatus) && (
+              <Field label="Indian transport company">
+                <select
+                  value={purchaseForm.freightIndiaPartyId}
+                  onChange={(event) => updatePurchaseField('freightIndiaPartyId', event.target.value)}
+                >
+                  <option value="">Select Indian transport company</option>
+                  {transportOptions.map((party) => (
+                    <option key={party.id} value={party.id}>
+                      {party.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <NumberField label="Freight India amount IC" value={purchaseForm.freightIndiaAmountIC} onChange={(value) => updatePurchaseField('freightIndiaAmountIC', value)} />
             <ReadOnly label="Fixed freight exchange rate" value={rateFmt(data.settings.defaultExchangeRate)} />
             <ReadOnly label="Freight India amount NPR" value={npr(purchaseTotals.freightIndiaAmountNPR)} />
@@ -3129,19 +3466,23 @@ function App({
                 <tr key={purchase.id}>
                   <td>{partyName(purchase.vendorPartyId)}</td>
                   <td>{purchase.vendorBillNumber}</td>
-                  <td>{ic(purchase.amountIC)}</td>
+                  <td>{supplierMoney(purchase.amountIC, purchase.supplierCurrency)}</td>
                   <td>{purchase.debitNoteNumber || '-'}</td>
                   <td>{npr(purchase.totalInputVatNPR)}</td>
                   <td>{npr(purchase.landedCostNPR)}</td>
                   <td className="row-actions">
-                    {canEditOrDelete ? (
+                    {canEditPurchase || canEditOrDelete ? (
                       <>
-                        <button type="button" className="small" onClick={() => editPurchase(purchase)}>
-                          Edit
-                        </button>
-                        <button type="button" className="small danger" onClick={() => deletePurchase(purchase)}>
-                          Delete
-                        </button>
+                        {canEditPurchase && (
+                          <button type="button" className="small" onClick={() => editPurchase(purchase)}>
+                            Edit
+                          </button>
+                        )}
+                        {canEditOrDelete && (
+                          <button type="button" className="small danger" onClick={() => deletePurchase(purchase)}>
+                            Delete
+                          </button>
+                        )}
                       </>
                     ) : (
                       '-'
@@ -3166,6 +3507,7 @@ function App({
           onClick={() => {
             setPaymentMode('Indian Supplier')
             setPaymentForm(createEmptyPayment())
+            resetSupplierPaymentCurrency()
             setSelectedSupplierBillIds([])
             setReconciliationPaymentId('')
             setBankOutflowNPR(0)
@@ -3179,6 +3521,7 @@ function App({
           onClick={() => {
             setPaymentMode('Other Party')
             setPaymentForm({ ...createEmptyPayment(), paymentType: 'Custom Agent Payment' })
+            resetSupplierPaymentCurrency()
             setSelectedSupplierBillIds([])
             setReconciliationPaymentId('')
             setBankOutflowNPR(0)
@@ -3216,7 +3559,35 @@ function App({
                   <option>Last year</option>
                 </select>
               </Field>
-              <NumberField label="Amount IC/LC" value={paymentForm.amount} onChange={(value) => updatePaymentField('amount', value)} />
+              {isUsdSupplierPaymentMode && (
+                <Field label="Payment currency">
+                  <select
+                    value={selectedSupplierPaymentCurrency}
+                    onChange={(event) => {
+                      const currency = event.target.value as SupplierCurrency
+                      setSupplierPaymentCurrency(currency)
+                      setSupplierPaymentExchangeRate(currency === 'INR' ? data.settings.defaultExchangeRate : 0)
+                    }}
+                  >
+                    {supplierCurrencies.map((currency) => (
+                      <option key={currency} value={currency}>
+                        {currency}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              <NumberField label={`Amount ${selectedSupplierPaymentCurrency}`} value={paymentForm.amount} onChange={(value) => updatePaymentField('amount', value)} />
+              {selectedSupplierPaymentCurrency === 'USD' ? (
+                <NumberField
+                  label="USD exchange rate"
+                  value={supplierPaymentExchangeRate}
+                  step="0.0001"
+                  onChange={setSupplierPaymentExchangeRate}
+                />
+              ) : (
+                <ReadOnly label="Fixed INR exchange rate" value={rateFmt(data.settings.defaultExchangeRate)} />
+              )}
               <ReadOnly label="Converted supplier debit NPR" value={npr(indianSupplierPaymentNPR)} />
               <NumberField label="Amount in NC with commission" value={bankOutflowNPR} onChange={setBankOutflowNPR} />
               <ReadOnly label="Commission expense" value={npr(commissionExpenseNPR)} />
@@ -3241,6 +3612,7 @@ function App({
               onClick={() => {
                 setPaymentForm(createEmptyPayment())
                 setPaymentBillYear('Current')
+                resetSupplierPaymentCurrency()
                 setSelectedSupplierBillIds([])
                 setReconciliationPaymentId('')
                 setBankOutflowNPR(0)
@@ -3273,7 +3645,7 @@ function App({
                   <td>{dateText(payment.paymentDate)}</td>
                   <td>{partyName(payment.partyId)}</td>
                   <td>{payment.currency}</td>
-                  <td>{payment.currency === 'NPR' ? npr(payment.amount) : ic(payment.amount)}</td>
+                  <td>{payment.currency === 'NPR' ? npr(payment.amount) : supplierMoney(payment.amount, normalizeSupplierCurrency(payment.currency))}</td>
                   <td>{npr(payment.amountNPR)}</td>
                   <td>{payment.paymentMethod}</td>
                   <td>{payment.referenceNumber || '-'}</td>
@@ -3345,12 +3717,12 @@ function App({
               >
                 {supplierBillOptions.map((purchase) => (
                   <option key={purchase.id} value={purchase.id}>
-                    {purchase.vendorBillNumber} - {ic(purchase.amountIC)} / {npr(purchase.supplierAmountNPR)}
+                    {purchase.vendorBillNumber} - {supplierMoney(purchase.amountIC, purchase.supplierCurrency)} / {npr(purchase.supplierAmountNPR)}
                   </option>
                 ))}
               </select>
             </Field>
-            <ReadOnly label="Selected bills IC" value={ic(selectedSupplierBillAmountIC)} />
+            <ReadOnly label="Selected bills foreign total" value={fmt(selectedSupplierBillAmountIC)} />
             <ReadOnly label="Selected bills NPR" value={npr(selectedSupplierBillAmountNPR)} />
             <ReadOnly label="Payment NPR" value={npr(selectedReconciliationPayment?.amountNPR ?? 0)} />
             <ReadOnly label="Difference" value={npr(reconciliationDifferenceNPR)} />
@@ -3644,6 +4016,7 @@ function App({
                 'Bill date',
                 'Supplier NPR',
                 'Custom agent',
+                'Indian transport',
                 'Pragapanpatra',
                 'Debit note total',
                 'Service total',
@@ -3659,6 +4032,7 @@ function App({
                 row.billDate || '-',
                 npr(row.supplierAmountNPR),
                 row.customAgent,
+                row.indianTransport,
                 row.pragapanpatraNumber || '-',
                 npr(row.debitNoteTotalNPR),
                 npr(row.agentServiceTotalNPR),
@@ -3754,7 +4128,7 @@ function App({
               <th>Custom bill date</th>
               <th>Vendor</th>
               <th>Bill number</th>
-              <th>Amount IC</th>
+              <th>Supplier amount</th>
               <th>Supplier NPR</th>
               <th>Custom agent</th>
               <th>Pragapanpatra</th>
@@ -3776,7 +4150,7 @@ function App({
                 <td>{dateText(importPurchaseSortDate(purchase))}</td>
                 <td>{partyName(purchase.vendorPartyId)}</td>
                 <td>{purchase.vendorBillNumber}</td>
-                <td>{ic(purchase.amountIC)}</td>
+                <td>{supplierMoney(purchase.amountIC, purchase.supplierCurrency)}</td>
                 <td>{npr(purchase.supplierAmountNPR)}</td>
                 <td>{partyName(purchase.customAgentPartyId)}</td>
                 <td>{purchase.debitNoteNumber || '-'}</td>
@@ -3957,11 +4331,20 @@ function App({
       <Panel title="Transaction Defaults">
         <div className="form-grid">
           <NumberField
-            label="Fixed IC/INR exchange rate"
+            label="Fixed INR exchange rate"
             value={settingsForm.defaultExchangeRate}
             step="0.0001"
             onChange={(value) => updateSettingsField('defaultExchangeRate', value)}
           />
+          <Field label="Supplier purchase currency mode">
+            <select
+              value={settingsForm.supplierPurchaseCurrency}
+              onChange={(event) => updateSettingsField('supplierPurchaseCurrency', event.target.value as SupplierCurrency)}
+            >
+              <option value="INR">INR only</option>
+              <option value="USD">INR and USD</option>
+            </select>
+          </Field>
           <ReadOnly label="VAT rate" value={`${vatRateLabel(data.settings)}%`} />
         </div>
       </Panel>
@@ -3993,7 +4376,7 @@ function App({
   const renderLogin = () => (
     <main className="login-page" onKeyDown={moveEnterToNextField}>
       <section className="login-brand">
-        <p className="eyebrow">Dhaulagiri</p>
+        <p className="company-name-display">{data.settings.companyName || 'Company'}</p>
         <h1>Import Purchase</h1>
         <p>Supplier bills, Pragapanpatra charges, VAT, landed cost, payables, and payments in one workspace.</p>
         <p className="login-credit">Vibecoded by Kanchan Dahal</p>
@@ -4028,17 +4411,24 @@ function App({
     return renderLogin()
   }
 
-  const allowedViewItems = userRole === 'Master' ? viewItems : accountViewItems
+  const allowedViewItems = isReadOnly
+    ? userRole === 'Master'
+      ? (['Dashboard', 'Reports', 'Party Master', 'Activity Logs'] as View[])
+      : (['Dashboard', 'Reports', 'Party Master'] as View[])
+    : userRole === 'Master'
+      ? viewItems
+      : accountViewItems
   const currentView = allowedViewItems.includes(view) ? view : 'Dashboard'
 
   return (
     <div className="app-shell" onKeyDown={moveEnterToNextField}>
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">Dhaulagiri</p>
+          <p className="company-name-display compact inverse">{data.settings.companyName || 'Company'}</p>
           <h1>Import Purchase</h1>
           <p className="sidebar-note">Supplier bills, Pragapanpatra charges, VAT, landed cost, payables, and payments.</p>
           <p className="sidebar-note">User: {userRole}</p>
+          {isReadOnly && <p className="sidebar-note">Locked fiscal year: view only</p>}
         </div>
         <nav>
           {allowedViewItems.map((item) => (
@@ -4065,7 +4455,7 @@ function App({
       <main className="main">
         <header className="page-header">
           <div>
-            <p className="eyebrow">
+            <p className="company-name-display compact">
               {data.settings.companyName} {data.settings.fiscalYear ? `- FY ${data.settings.fiscalYear}` : ''}
             </p>
             <h2>{currentView}</h2>
@@ -4257,10 +4647,12 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function BarChart({
   emptyText,
+  onSelect,
   rows,
 }: {
   emptyText: string
-  rows: { label: string; amount: number }[]
+  onSelect?: (row: { label: string; amount: number; month: string }) => void
+  rows: { label: string; amount: number; month: string }[]
 }) {
   const maxAmount = Math.max(...rows.map((row) => row.amount), 0)
 
@@ -4269,9 +4661,23 @@ function BarChart({
   }
 
   return (
-    <div className="vertical-bar-chart">
+    <div
+      className="vertical-bar-chart"
+      style={{ gridTemplateColumns: `repeat(${rows.length}, minmax(0, 1fr))` }}
+    >
       {rows.map((row) => (
-        <div key={row.label} className="vertical-bar-item">
+        <div
+          key={row.label}
+          className="vertical-bar-item"
+          role={onSelect ? 'button' : undefined}
+          tabIndex={onSelect ? 0 : undefined}
+          onClick={() => onSelect?.(row)}
+          onKeyDown={(event) => {
+            if (!onSelect || (event.key !== 'Enter' && event.key !== ' ')) return
+            event.preventDefault()
+            onSelect(row)
+          }}
+        >
           <div className="vertical-bar-value">{npr(row.amount)}</div>
           <div className="vertical-bar-track">
             <div className="vertical-bar-fill" style={{ height: `${Math.max(4, (row.amount / maxAmount) * 100)}%` }} />
@@ -4285,10 +4691,12 @@ function BarChart({
 
 function PieChart({
   emptyText,
+  onSelect,
   slices,
 }: {
   emptyText: string
-  slices: { name: string; amount: number; color: string }[]
+  onSelect?: (slice: { id?: string; name: string; amount: number; color: string }) => void
+  slices: { id?: string; name: string; amount: number; color: string }[]
 }) {
   const [activeSliceName, setActiveSliceName] = useState(slices[0]?.name ?? '')
   const total = slices.reduce((sum, slice) => sum + slice.amount, 0)
@@ -4329,6 +4737,7 @@ function PieChart({
               strokeDasharray={`${length} ${circumference - length}`}
               strokeDashoffset={dashOffset}
               onMouseEnter={() => setActiveSliceName(slice.name)}
+              onClick={() => onSelect?.(slice)}
             />
           )
         })}
@@ -4347,6 +4756,7 @@ function PieChart({
             className={slice.name === activeSlice.name ? 'pie-legend-row active' : 'pie-legend-row'}
             onMouseEnter={() => setActiveSliceName(slice.name)}
             onFocus={() => setActiveSliceName(slice.name)}
+            onClick={() => onSelect?.(slice)}
           >
             <span style={{ background: slice.color }} />
             <strong>{slice.name}</strong>
@@ -4400,7 +4810,7 @@ function EmptyRow({ columns }: { columns: number }) {
 }
 
 function makeMonthlyRows(items: { date: string; amount: number }[]) {
-  const buckets = new Map<string, { label: string; amount: number }>()
+  const buckets = new Map<string, { label: string; amount: number; month: string }>()
 
   items.forEach((item) => {
     const month = monthBucket(item.date)
@@ -4413,6 +4823,7 @@ function makeMonthlyRows(items: { date: string; amount: number }[]) {
     buckets.set(month.key, {
       label: month.label,
       amount: (existing?.amount ?? 0) + item.amount,
+      month: month.month,
     })
   })
 
@@ -4439,6 +4850,7 @@ function monthBucket(value: string) {
   return {
     key: `${year}-${String(month).padStart(2, '0')}`,
     label: `${bsMonthName(month)} ${year}`,
+    month: String(month).padStart(2, '0'),
   }
 }
 
@@ -4461,26 +4873,33 @@ function bsMonthName(month: number) {
   return names[month - 1] ?? ''
 }
 
-function makePartySlices(items: { name: string; amount: number }[]) {
+function makePartySlices(items: { id?: string; name: string; amount: number }[]) {
   const colors = ['#245477', '#16a34a', '#f97316', '#7c3aed', '#0891b2', '#64748b']
-  const buckets = new Map<string, number>()
+  const buckets = new Map<string, { id?: string; amount: number }>()
 
   items.forEach((item) => {
     if (item.amount <= 0) {
       return
     }
 
-    buckets.set(item.name, (buckets.get(item.name) ?? 0) + item.amount)
+    const existing = buckets.get(item.name)
+    buckets.set(item.name, {
+      id: existing?.id ?? item.id,
+      amount: (existing?.amount ?? 0) + item.amount,
+    })
   })
 
-  const sorted = Array.from(buckets.entries()).sort((left, right) => right[1] - left[1])
+  const sorted = Array.from(buckets.entries()).sort((left, right) => right[1].amount - left[1].amount)
   const top = sorted.slice(0, 5)
-  const otherAmount = sorted.slice(5).reduce((sum, [, amount]) => sum + amount, 0)
-  const rows = otherAmount > 0 ? [...top, ['Other', otherAmount] as [string, number]] : top
+  const otherAmount = sorted.slice(5).reduce((sum, [, row]) => sum + row.amount, 0)
+  const rows = otherAmount > 0
+    ? [...top, ['Other', { amount: otherAmount }] as [string, { id?: string; amount: number }]]
+    : top
 
-  return rows.map(([name, amount], index) => ({
+  return rows.map(([name, row], index) => ({
+    id: row.id,
     name,
-    amount,
+    amount: row.amount,
     color: colors[index % colors.length],
   }))
 }

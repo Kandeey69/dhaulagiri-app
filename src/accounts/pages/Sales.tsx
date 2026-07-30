@@ -8,6 +8,7 @@ import {
   saveSale,
   updateSale,
 } from "../data/storage";
+import { companyStorageKey } from "../../companyContext";
 import { calculateVatAmount, getSuiteVatRatePercent } from "../utils/settings";
 
 function normalizeWholeNumber(value: string) {
@@ -52,7 +53,7 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
   const [registerSearch, setRegisterSearch] = useState("");
   const [billToCancel, setBillToCancel] = useState("");
   const [cancelledBillNumbersText, setCancelledBillNumbersText] = useState(() =>
-    localStorage.getItem("accounts-cancelled-bill-numbers") ?? ""
+    localStorage.getItem(companyStorageKey("accounts-cancelled-bill-numbers")) ?? ""
   );
 
   const numericSalesAmount = Number(salesAmount || 0);
@@ -86,7 +87,7 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("accounts-cancelled-bill-numbers", cancelledBillNumbersText);
+    localStorage.setItem(companyStorageKey("accounts-cancelled-bill-numbers"), cancelledBillNumbersText);
   }, [cancelledBillNumbersText]);
 
   function clearForm() {

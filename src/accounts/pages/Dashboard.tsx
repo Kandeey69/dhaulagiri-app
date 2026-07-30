@@ -7,14 +7,18 @@ import {
   getParties,
   getSales,
 } from "../data/storage";
+import { companyStorageKey } from "../../companyContext";
 
 type DashboardTarget = "sales" | "collections" | "creditNotes" | "reports";
 
 type DashboardProps = {
+  isReadOnly?: boolean;
+  lockedMessage?: string;
   onNavigate: (page: DashboardTarget) => void;
 };
 
-export default function Dashboard({ onNavigate }: DashboardProps) {
+export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNavigate }: DashboardProps) {
+  const [entryMessage, setEntryMessage] = useState("");
   const [parties, setParties] = useState<Party[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
@@ -79,23 +83,34 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
   );
   const salesByParty = makePartySlices(
     sales.map((sale) => ({
+      id: sale.partyId,
       name: partyName(parties, sale.partyId),
       amount: sale.totalAmount,
     }))
   );
+  const openEntry = (target: Exclude<DashboardTarget, "reports">) => {
+    if (isReadOnly) {
+      setEntryMessage(lockedMessage || "This company fiscal year is closed. Entries cannot be added.");
+      return;
+    }
+
+    setEntryMessage("");
+    onNavigate(target);
+  };
 
   return (
     <div className="stack">
       <div className="card">
         <h3>New Entry</h3>
+        {entryMessage && <p className="status-message">{entryMessage}</p>}
         <div className="quick-actions">
-          <button type="button" onClick={() => onNavigate("sales")}>
+          <button type="button" onClick={() => openEntry("sales")}>
             New sale
           </button>
-          <button type="button" onClick={() => onNavigate("collections")}>
+          <button type="button" onClick={() => openEntry("collections")}>
             New collection
           </button>
-          <button type="button" onClick={() => onNavigate("creditNotes")}>
+          <button type="button" onClick={() => openEntry("creditNotes")}>
             New credit note / adjustment
           </button>
           <button type="button" className="ghost" onClick={() => onNavigate("reports")}>
@@ -143,12 +158,35 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
 
       <div className="card">
         <h3>Sales by Month</h3>
-        <BarChart rows={monthlySales} emptyText="No sales data for monthly chart." />
+        <BarChart
+          rows={monthlySales}
+          emptyText="No sales data for monthly chart."
+          onSelect={(row) => {
+            localStorage.setItem(companyStorageKey("accounts-report-view"), "Output VAT");
+            localStorage.setItem(companyStorageKey("accounts-output-vat-month"), String(Number(row.month)));
+            onNavigate("reports");
+            window.requestAnimationFrame(() => {
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            });
+          }}
+        />
       </div>
 
       <div className="card">
         <h3>Sales by Major Party</h3>
-        <PieChart slices={salesByParty} emptyText="No party sales data yet." />
+        <PieChart
+          slices={salesByParty}
+          emptyText="No party sales data yet."
+          onSelect={(slice) => {
+            if (!slice.id) return;
+            localStorage.setItem(companyStorageKey("accounts-report-view"), "Party Ledger");
+            localStorage.setItem(companyStorageKey("accounts-report-party-id"), slice.id);
+            onNavigate("reports");
+            window.requestAnimationFrame(() => {
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            });
+          }}
+        />
       </div>
 
       <div className="two-column">
@@ -235,10 +273,12 @@ function SimpleTable({
 
 function BarChart({
   emptyText,
+  onSelect,
   rows,
 }: {
   emptyText: string;
-  rows: { label: string; amount: number }[];
+  onSelect?: (row: { label: string; amount: number; month: string }) => void;
+  rows: { label: string; amount: number; month: string }[];
 }) {
   const maxAmount = Math.max(...rows.map((row) => row.amount), 0);
 
@@ -247,9 +287,23 @@ function BarChart({
   }
 
   return (
-    <div className="vertical-bar-chart">
+    <div
+      className="vertical-bar-chart"
+      style={{ gridTemplateColumns: `repeat(${rows.length}, minmax(0, 1fr))` }}
+    >
       {rows.map((row) => (
-        <div key={row.label} className="vertical-bar-item">
+        <div
+          key={row.label}
+          className="vertical-bar-item"
+          role={onSelect ? "button" : undefined}
+          tabIndex={onSelect ? 0 : undefined}
+          onClick={() => onSelect?.(row)}
+          onKeyDown={(event) => {
+            if (!onSelect || (event.key !== "Enter" && event.key !== " ")) return;
+            event.preventDefault();
+            onSelect(row);
+          }}
+        >
           <div className="vertical-bar-value">{formatMoney(row.amount)}</div>
           <div className="vertical-bar-track">
             <div className="vertical-bar-fill" style={{ height: `${Math.max(4, (row.amount / maxAmount) * 100)}%` }} />
@@ -263,10 +317,12 @@ function BarChart({
 
 function PieChart({
   emptyText,
+  onSelect,
   slices,
 }: {
   emptyText: string;
-  slices: { name: string; amount: number; color: string }[];
+  onSelect?: (slice: { id?: string; name: string; amount: number; color: string }) => void;
+  slices: { id?: string; name: string; amount: number; color: string }[];
 }) {
   const [activeSliceName, setActiveSliceName] = useState(slices[0]?.name ?? "");
   const total = slices.reduce((sum, slice) => sum + slice.amount, 0);
@@ -307,6 +363,7 @@ function PieChart({
               strokeDasharray={`${length} ${circumference - length}`}
               strokeDashoffset={dashOffset}
               onMouseEnter={() => setActiveSliceName(slice.name)}
+              onClick={() => onSelect?.(slice)}
             />
           );
         })}
@@ -325,6 +382,7 @@ function PieChart({
             className={slice.name === activeSlice.name ? "pie-legend-row active" : "pie-legend-row"}
             onMouseEnter={() => setActiveSliceName(slice.name)}
             onFocus={() => setActiveSliceName(slice.name)}
+            onClick={() => onSelect?.(slice)}
           >
             <span style={{ background: slice.color }} />
             <strong>{slice.name}</strong>
@@ -360,7 +418,7 @@ function partyName(parties: Party[], partyId: string) {
 }
 
 function makeMonthlyRows(items: { date: string; amount: number }[]) {
-  const buckets = new Map<string, { label: string; amount: number }>();
+  const buckets = new Map<string, { label: string; amount: number; month: string }>();
 
   for (const item of items) {
     const month = monthBucket(item.date);
@@ -373,6 +431,7 @@ function makeMonthlyRows(items: { date: string; amount: number }[]) {
     buckets.set(month.key, {
       label: month.label,
       amount: (existing?.amount ?? 0) + item.amount,
+      month: month.month,
     });
   }
 
@@ -399,6 +458,7 @@ function monthBucket(value: string) {
   return {
     key: `${year}-${String(month).padStart(2, "0")}`,
     label: `${bsMonthName(month)} ${year}`,
+    month: String(month).padStart(2, "0"),
   };
 }
 
@@ -421,26 +481,33 @@ function bsMonthName(month: number) {
   return names[month - 1] ?? "";
 }
 
-function makePartySlices(items: { name: string; amount: number }[]) {
+function makePartySlices(items: { id?: string; name: string; amount: number }[]) {
   const colors = ["#245477", "#16a34a", "#f97316", "#7c3aed", "#0891b2", "#64748b"];
-  const buckets = new Map<string, number>();
+  const buckets = new Map<string, { id?: string; amount: number }>();
 
   for (const item of items) {
     if (item.amount <= 0) {
       continue;
     }
 
-    buckets.set(item.name, (buckets.get(item.name) ?? 0) + item.amount);
+    const existing = buckets.get(item.name);
+    buckets.set(item.name, {
+      id: existing?.id ?? item.id,
+      amount: (existing?.amount ?? 0) + item.amount,
+    });
   }
 
-  const sorted = Array.from(buckets.entries()).sort((left, right) => right[1] - left[1]);
+  const sorted = Array.from(buckets.entries()).sort((left, right) => right[1].amount - left[1].amount);
   const top = sorted.slice(0, 5);
-  const otherAmount = sorted.slice(5).reduce((sum, [, amount]) => sum + amount, 0);
-  const rows = otherAmount > 0 ? [...top, ["Other", otherAmount] as [string, number]] : top;
+  const otherAmount = sorted.slice(5).reduce((sum, [, row]) => sum + row.amount, 0);
+  const rows = otherAmount > 0
+    ? [...top, ["Other", { amount: otherAmount }] as [string, { id?: string; amount: number }]]
+    : top;
 
-  return rows.map(([name, amount], index) => ({
+  return rows.map(([name, row], index) => ({
+    id: row.id,
     name,
-    amount,
+    amount: row.amount,
     color: colors[index % colors.length],
   }));
 }

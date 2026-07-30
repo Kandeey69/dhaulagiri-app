@@ -11,6 +11,7 @@ import Settings from "./pages/Settings";
 import ActivityLogs from "./pages/ActivityLogs";
 import { MASTER_PASSWORD, type UserRole } from "./auth";
 import { getOutstanding } from "./data/storage";
+import { getActiveCompanyProfile, getCompanySetting } from "../companyContext";
 import "./App.css";
 
 type Page =
@@ -93,12 +94,14 @@ const moveEnterToNextField = (event: KeyboardEvent<HTMLElement>) => {
 
 type AccountsAppProps = {
   initialUserRole?: UserRole;
+  isReadOnly?: boolean;
   onBackToModules?: () => void;
   onLogout?: () => void;
 };
 
 export default function App({
   initialUserRole,
+  isReadOnly = false,
   onBackToModules,
   onLogout,
 }: AccountsAppProps = {}) {
@@ -108,15 +111,23 @@ export default function App({
   const [loginMessage, setLoginMessage] = useState("");
   const [netReceivable, setNetReceivable] = useState(0);
   const [companyName, setCompanyName] = useState(
-    () => localStorage.getItem("accounts-company-name") || "Dhaulagiri Accounts"
+    () => getCompanySetting("accounts-company-name", getActiveCompanyProfile()?.name || "Company")
   );
   const [fiscalYear, setFiscalYear] = useState(
-    () => localStorage.getItem("accounts-fiscal-year") || ""
+    () => getCompanySetting("accounts-fiscal-year", getActiveCompanyProfile()?.fiscalYear || "")
   );
 
   const allowedPages = useMemo(
-    () => (userRole === "master" ? masterPages : accountPages),
-    [userRole]
+    () => {
+      if (isReadOnly) {
+        return userRole === "master"
+          ? (["dashboard", "reports", "parties", "activityLogs"] as Page[])
+          : (["dashboard", "reports", "parties"] as Page[]);
+      }
+
+      return userRole === "master" ? masterPages : accountPages;
+    },
+    [isReadOnly, userRole]
   );
   const currentPage = allowedPages.includes(page) ? page : "dashboard";
 
@@ -177,14 +188,20 @@ export default function App({
   }
 
   const renderPage = (activeRole: UserRole) => {
-    const canManage = activeRole === "master";
+    const canManage = activeRole === "master" && !isReadOnly;
 
     if (currentPage === "dashboard") {
-      return <Dashboard onNavigate={(target) => setPage(target)} />;
+      return (
+        <Dashboard
+          isReadOnly={isReadOnly}
+          lockedMessage={`${companyName} ${fiscalYear ? `FY ${fiscalYear}` : ""} is closed. Entries cannot be added in a closed fiscal year.`}
+          onNavigate={(target) => setPage(target)}
+        />
+      );
     }
     if (currentPage === "parties") return <Parties canManage={canManage} />;
-    if (currentPage === "sales") return <Sales canManage={canManage} canEdit />;
-    if (currentPage === "collections") return <Collections canManage={canManage} canEdit />;
+    if (currentPage === "sales") return <Sales canManage={canManage} canEdit={!isReadOnly} />;
+    if (currentPage === "collections") return <Collections canManage={canManage} canEdit={!isReadOnly} />;
     if (currentPage === "creditNotes") return <CreditNotes canManage={canManage} />;
     if (currentPage === "imports") return <Imports canManage={canManage} />;
     if (currentPage === "reports") return <Reports />;
@@ -193,7 +210,7 @@ export default function App({
       <Settings
         userRole={activeRole}
         onCompanySettingsChange={(nextCompanyName, nextFiscalYear) => {
-          setCompanyName(nextCompanyName || "Dhaulagiri Accounts");
+          setCompanyName(nextCompanyName || "Company");
           setFiscalYear(nextFiscalYear);
         }}
         onUserRoleChange={updateUserRole}
@@ -205,7 +222,7 @@ export default function App({
     return (
       <main className="login-page" onKeyDown={moveEnterToNextField}>
         <section className="login-brand">
-          <p className="eyebrow">Dhaulagiri</p>
+          <p className="company-name-display">{companyName}</p>
           <h1>Accounts</h1>
           <p>Sales bills, receivables, collections, adjustments, output VAT, and customer ledgers in one workspace.</p>
           <p className="login-credit">Vibecoded by Kanchan Dahal</p>
@@ -252,10 +269,11 @@ export default function App({
     <div className="app-shell" onKeyDown={moveEnterToNextField}>
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">Dhaulagiri</p>
+          <p className="company-name-display compact inverse">{companyName}</p>
           <h1>Accounts</h1>
           <p className="sidebar-note">Sales, receivables, collections, credit notes, VAT, and customer ledgers.</p>
           <p className="sidebar-note">User: {userRole === "master" ? "Master" : "Account"}</p>
+          {isReadOnly && <p className="sidebar-note">Locked fiscal year: view only</p>}
         </div>
 
         <nav>
@@ -283,7 +301,7 @@ export default function App({
       <main className="main-content">
         <header className="page-header">
           <div>
-            <p className="eyebrow">
+            <p className="company-name-display compact">
               {companyName} {fiscalYear ? `- FY ${fiscalYear}` : ""}
             </p>
             <h2>{pageLabels[currentPage]}</h2>

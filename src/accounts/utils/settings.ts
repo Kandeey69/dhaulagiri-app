@@ -1,7 +1,9 @@
+import { getCompanySetting } from "../../companyContext";
+
 const SUITE_VAT_RATE_KEY = "suite-agent-service-vat-rate";
 
 export function getSuiteVatRatePercent() {
-  const value = Number(localStorage.getItem(SUITE_VAT_RATE_KEY) ?? 13);
+  const value = Number(getCompanySetting(SUITE_VAT_RATE_KEY, "13"));
   return Number.isFinite(value) && value >= 0 ? value : 13;
 }
 

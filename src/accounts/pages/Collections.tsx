@@ -8,6 +8,7 @@ import {
   saveCollection,
   updateCollection,
 } from "../data/storage";
+import { companyStorageKey } from "../../companyContext";
 
 const bankSuggestions = [
   "Cash",
@@ -59,7 +60,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
   const [registerSearch, setRegisterSearch] = useState("");
   const [receiptToCancel, setReceiptToCancel] = useState("");
   const [cancelledReceiptNumbersText, setCancelledReceiptNumbersText] = useState(() =>
-    localStorage.getItem("accounts-cancelled-receipt-numbers") ?? ""
+    localStorage.getItem(companyStorageKey("accounts-cancelled-receipt-numbers")) ?? ""
   );
 
   const numericAmount = Number(amount || 0);
@@ -99,7 +100,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("accounts-cancelled-receipt-numbers", cancelledReceiptNumbersText);
+    localStorage.setItem(companyStorageKey("accounts-cancelled-receipt-numbers"), cancelledReceiptNumbersText);
   }, [cancelledReceiptNumbersText]);
 
   function clearForm() {

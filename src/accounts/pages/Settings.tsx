@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { MASTER_PASSWORD, type UserRole } from "../auth";
+import { getCompanySetting, setCompanySetting } from "../../companyContext";
 
 type SettingsProps = {
   onCompanySettingsChange: (companyName: string, fiscalYear: string) => void;
@@ -14,10 +15,10 @@ export default function Settings({
 }: SettingsProps) {
   const [password, setPassword] = useState("");
   const [companyName, setCompanyName] = useState(
-    () => localStorage.getItem("accounts-company-name") || "Dhaulagiri Accounts"
+    () => getCompanySetting("accounts-company-name", "Company")
   );
   const [fiscalYear, setFiscalYear] = useState(
-    () => localStorage.getItem("accounts-fiscal-year") || ""
+    () => getCompanySetting("accounts-fiscal-year", "")
   );
   const [message, setMessage] = useState("");
 
@@ -43,8 +44,8 @@ export default function Settings({
   function saveCompanySettings() {
     const nextCompanyName = companyName.trim();
     const nextFiscalYear = fiscalYear.trim();
-    localStorage.setItem("accounts-company-name", nextCompanyName);
-    localStorage.setItem("accounts-fiscal-year", nextFiscalYear);
+    setCompanySetting("accounts-company-name", nextCompanyName);
+    setCompanySetting("accounts-fiscal-year", nextFiscalYear);
     onCompanySettingsChange(nextCompanyName, nextFiscalYear);
     setMessage("Settings saved.");
   }

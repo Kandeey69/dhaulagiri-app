@@ -28,11 +28,11 @@ type PartyMonthRow = {
   netVatPayable: number;
 };
 
-export default function OutputVatReport() {
+export default function OutputVatReport({ initialMonth = "1" }: { initialMonth?: string }) {
   const [parties, setParties] = useState<Party[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [creditNotes, setCreditNotes] = useState<CreditNote[]>([]);
-  const [month, setMonth] = useState("1");
+  const [month, setMonth] = useState(initialMonth);
 
   useEffect(() => {
     async function load() {

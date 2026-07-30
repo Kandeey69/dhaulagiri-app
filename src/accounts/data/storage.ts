@@ -1,4 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
+import { getActiveAccountsDatabaseUrl } from "../../companyContext";
 import type {
   ActivityLog,
   Collection,
@@ -10,11 +11,23 @@ import type {
 } from "./types";
 import { calculateVatAmount } from "../utils/settings";
 
+export type AccountsBackupData = {
+  activityLogs: ActivityLog[];
+  collections: Collection[];
+  creditNotes: CreditNote[];
+  parties: Party[];
+  sales: Sale[];
+};
+
 let dbPromise: Promise<Database> | null = null;
+let dbUrl = "";
 
 async function getDb() {
-  if (!dbPromise) {
-    dbPromise = Database.load("sqlite:accounts.db");
+  const activeDbUrl = getActiveAccountsDatabaseUrl();
+
+  if (!dbPromise || dbUrl !== activeDbUrl) {
+    dbUrl = activeDbUrl;
+    dbPromise = Database.load(activeDbUrl);
   }
 
   const db = await dbPromise;
@@ -353,6 +366,184 @@ function mapCreditNote(row: CreditNoteRow): CreditNote {
   };
 }
 
+export async function getAccountsBackupData(): Promise<AccountsBackupData> {
+  const [parties, sales, collections, creditNotes, activityLogs] = await Promise.all([
+    getParties(),
+    getSales(),
+    getCollections(),
+    getCreditNotes(),
+    getActivityLogs(100000),
+  ]);
+
+  return {
+    activityLogs,
+    collections,
+    creditNotes,
+    parties,
+    sales,
+  };
+}
+
+export async function restoreAccountsBackupData(data: Partial<AccountsBackupData>): Promise<void> {
+  const db = await getDb();
+  const parties = data.parties ?? [];
+  const sales = data.sales ?? [];
+  const collections = data.collections ?? [];
+  const creditNotes = data.creditNotes ?? [];
+  const activityLogs = data.activityLogs ?? [];
+
+  await db.execute("DELETE FROM activity_logs");
+  await db.execute("DELETE FROM credit_notes");
+  await db.execute("DELETE FROM collections");
+  await db.execute("DELETE FROM sales");
+  await db.execute("DELETE FROM parties");
+
+  for (const party of parties) {
+    await db.execute(
+      `
+      INSERT INTO parties (
+        id,
+        name,
+        address,
+        phone,
+        pan_no,
+        opening_balance,
+        is_active,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `,
+      [
+        party.id,
+        party.name,
+        party.address ?? "",
+        party.phone ?? "",
+        party.panNo ?? "",
+        Number(party.openingBalance || 0),
+        party.isActive ? 1 : 0,
+        party.createdAt || new Date().toISOString(),
+      ]
+    );
+  }
+
+  for (const sale of sales) {
+    await db.execute(
+      `
+      INSERT INTO sales (
+        id,
+        bill_no,
+        date_bs,
+        date_ad,
+        party_id,
+        quantity,
+        rate,
+        amount,
+        sales_amount,
+        vat_amount,
+        total_amount,
+        remarks,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `,
+      [
+        sale.id,
+        sale.billNo,
+        sale.dateBs,
+        sale.dateAd ?? "",
+        sale.partyId,
+        0,
+        0,
+        sale.totalAmount,
+        sale.salesAmount,
+        sale.vatAmount,
+        sale.totalAmount,
+        sale.remarks ?? "",
+        sale.createdAt || new Date().toISOString(),
+      ]
+    );
+  }
+
+  for (const collection of collections) {
+    await db.execute(
+      `
+      INSERT INTO collections (
+        id,
+        date_bs,
+        date_ad,
+        party_id,
+        bank_name,
+        amount,
+        reference_no,
+        remarks,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        collection.id,
+        collection.dateBs,
+        collection.dateAd ?? "",
+        collection.partyId,
+        collection.bankName ?? "",
+        collection.amount,
+        collection.receiptNo ?? "",
+        collection.remarks ?? "",
+        collection.createdAt || new Date().toISOString(),
+      ]
+    );
+  }
+
+  for (const creditNote of creditNotes) {
+    await db.execute(
+      `
+      INSERT INTO credit_notes (
+        id,
+        credit_note_no,
+        date_bs,
+        date_ad,
+        party_id,
+        amount,
+        vat_amount,
+        total_amount,
+        remarks,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `,
+      [
+        creditNote.id,
+        creditNote.creditNoteNo,
+        creditNote.dateBs,
+        creditNote.dateAd ?? "",
+        creditNote.partyId,
+        creditNote.amount,
+        creditNote.vatAmount,
+        creditNote.totalAmount,
+        creditNote.remarks ?? "",
+        creditNote.createdAt || new Date().toISOString(),
+      ]
+    );
+  }
+
+  for (const log of activityLogs) {
+    await db.execute(
+      `
+      INSERT INTO activity_logs (id, action, detail, created_at)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [
+        log.id || crypto.randomUUID(),
+        log.action,
+        log.detail,
+        log.createdAt || new Date().toISOString(),
+      ]
+    );
+  }
+
+  await logActivity("Backup Imported", `Imported backup with ${parties.length} parties.`);
+}
+
 export async function getParties(): Promise<Party[]> {
   const db = await getDb();
 
@@ -521,6 +712,57 @@ export async function updateParty(input: Omit<Party, "createdAt">): Promise<Part
     openingBalance: Number(input.openingBalance || 0),
     createdAt: "",
   };
+}
+
+export async function upsertPartiesForCarryForward(parties: Party[]): Promise<void> {
+  const db = await getDb();
+  const now = new Date().toISOString();
+
+  for (const party of parties) {
+    const name = party.name.trim();
+
+    if (!party.id || !name) {
+      continue;
+    }
+
+    await db.execute(
+      `
+      INSERT INTO parties (
+        id,
+        name,
+        address,
+        phone,
+        pan_no,
+        opening_balance,
+        is_active,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        address = excluded.address,
+        phone = excluded.phone,
+        pan_no = excluded.pan_no,
+        opening_balance = excluded.opening_balance,
+        is_active = excluded.is_active
+      `,
+      [
+        party.id,
+        name,
+        party.address ?? "",
+        party.phone ?? "",
+        party.panNo ?? "",
+        Number(party.openingBalance || 0),
+        party.isActive ? 1 : 0,
+        party.createdAt || now,
+      ]
+    );
+  }
+
+  await logActivity(
+    "Opening Balances Refreshed",
+    `Carried forward opening balances for ${parties.length} parties.`
+  );
 }
 
 function normalizeDateDisplay(value: string) {
@@ -1343,12 +1585,38 @@ export async function getPartyLedger(partyId: string): Promise<LedgerRow[]> {
     FROM credit_notes
     WHERE party_id = $1
 
-    ORDER BY createdAt ASC
     `,
     [partyId]
   );
 
   let runningBalance = openingBalance;
+  const transactionOrder = {
+    Sale: 1,
+    Collection: 2,
+    Adjustment: 3,
+  } as const;
+  const sortedTransactions = transactions
+    .map((transaction) => ({
+      ...transaction,
+      dateBs: normalizeDateDisplay(transaction.dateBs || ""),
+    }))
+    .sort((left, right) => {
+      const dateCompare = (left.dateBs || "9999/99/99").localeCompare(
+        right.dateBs || "9999/99/99"
+      );
+
+      if (dateCompare !== 0) {
+        return dateCompare;
+      }
+
+      const typeCompare = transactionOrder[left.type] - transactionOrder[right.type];
+
+      if (typeCompare !== 0) {
+        return typeCompare;
+      }
+
+      return (left.createdAt || "").localeCompare(right.createdAt || "");
+    });
 
   const rows: LedgerRow[] = [
     {
@@ -1362,14 +1630,14 @@ export async function getPartyLedger(partyId: string): Promise<LedgerRow[]> {
     },
   ];
 
-  for (const transaction of transactions) {
+  for (const transaction of sortedTransactions) {
     runningBalance =
       runningBalance +
       Number(transaction.debit || 0) -
       Number(transaction.credit || 0);
 
     rows.push({
-      dateBs: normalizeDateDisplay(transaction.dateBs || ""),
+      dateBs: transaction.dateBs,
       type: transaction.type,
       reference: transaction.reference || "",
       debit: Number(transaction.debit || 0),

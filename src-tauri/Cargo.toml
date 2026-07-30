@@ -1,12 +1,12 @@
 [package]
-name = "import-purchase-app"
-version = "0.1.0"
-description = "Local desktop app for Dhaulagiri import purchase workflow"
-authors = ["Dhaulagiri"]
+name = "easysolution"
+version = "0.1.1"
+description = "Local desktop app for sales, receivables, purchase and payable workflow"
+authors = ["Easysolution"]
 edition = "2021"
 
 [lib]
-name = "import_purchase_app_lib"
+name = "easysolution_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -17,4 +17,3 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
-

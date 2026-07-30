@@ -4,6 +4,7 @@ import {
   normalizeFreightIndiaStatus,
   normalizePartyCategory,
   normalizePaymentMethod,
+  normalizeSupplierCurrency,
   type AppData,
   type AppSettings,
   type ImportPurchase,
@@ -12,6 +13,7 @@ import {
   type Payment,
 } from './domain'
 import { loadData as loadLocalData, saveData as saveLocalData } from './storage'
+import { getActivePurchaseDatabaseUrl } from '../companyContext'
 
 type SqlDatabase = {
   execute: (query: string, bindValues?: unknown[]) => Promise<unknown>
@@ -63,6 +65,7 @@ const purchaseFromDb = (row: Record<string, unknown>): ImportPurchase => ({
   vendorPartyId: String(row.vendorPartyId ?? ''),
   vendorBillNumber: String(row.vendorBillNumber ?? ''),
   billDate: String(row.billDate ?? ''),
+  supplierCurrency: normalizeSupplierCurrency(row.supplierCurrency),
   amountIC: Number(row.amountIC ?? 0),
   supplierExchangeRate: Number(row.supplierExchangeRate ?? 0),
   supplierAmountNPR: Number(row.supplierAmountNPR ?? 0),
@@ -76,6 +79,7 @@ const purchaseFromDb = (row: Record<string, unknown>): ImportPurchase => ({
   terminalVatNPR: Number(row.terminalVatNPR ?? 0),
   totalTerminalChargeNPR: Number(row.totalTerminalChargeNPR ?? 0),
   freightIndiaStatus: normalizeFreightIndiaStatus(row.freightIndiaStatus),
+  freightIndiaPartyId: String(row.freightIndiaPartyId ?? ''),
   freightIndiaAmountIC: Number(row.freightIndiaAmountIC ?? 0),
   freightIndiaExchangeRate: Number(row.freightIndiaExchangeRate ?? 0),
   freightIndiaAmountNPR: Number(row.freightIndiaAmountNPR ?? 0),
@@ -130,6 +134,7 @@ const settingsFromDb = (row?: Record<string, unknown>): AppSettings => ({
   companyName: String(row?.companyName ?? defaultSettings.companyName),
   fiscalYear: String(row?.fiscalYear ?? defaultSettings.fiscalYear),
   defaultExchangeRate: Number(row?.defaultExchangeRate ?? defaultSettings.defaultExchangeRate),
+  supplierPurchaseCurrency: normalizeSupplierCurrency(row?.supplierPurchaseCurrency),
   panVatNo: String(row?.panVatNo ?? defaultSettings.panVatNo),
   address: String(row?.address ?? defaultSettings.address),
   phone: String(row?.phone ?? defaultSettings.phone),
@@ -172,14 +177,53 @@ async function ensureActivityLogColumns(db: SqlDatabase) {
   }
 }
 
+async function ensureSupplierCurrencyColumns(db: SqlDatabase) {
+  const purchaseColumns = await db.select<Record<string, unknown>[]>(
+    'PRAGMA table_info(import_purchases)',
+  )
+  const hasSupplierCurrency = purchaseColumns.some(
+    (column) => String(column.name ?? '') === 'supplierCurrency',
+  )
+
+  if (!hasSupplierCurrency) {
+    await db.execute("ALTER TABLE import_purchases ADD COLUMN supplierCurrency TEXT NOT NULL DEFAULT 'INR'")
+  }
+
+  const settingsColumns = await db.select<Record<string, unknown>[]>(
+    'PRAGMA table_info(app_settings)',
+  )
+  const hasSupplierPurchaseCurrency = settingsColumns.some(
+    (column) => String(column.name ?? '') === 'supplierPurchaseCurrency',
+  )
+
+  if (!hasSupplierPurchaseCurrency) {
+    await db.execute("ALTER TABLE app_settings ADD COLUMN supplierPurchaseCurrency TEXT NOT NULL DEFAULT 'INR'")
+  }
+}
+
+async function ensureFreightIndiaPartyColumn(db: SqlDatabase) {
+  const purchaseColumns = await db.select<Record<string, unknown>[]>(
+    'PRAGMA table_info(import_purchases)',
+  )
+  const hasFreightIndiaPartyId = purchaseColumns.some(
+    (column) => String(column.name ?? '') === 'freightIndiaPartyId',
+  )
+
+  if (!hasFreightIndiaPartyId) {
+    await db.execute("ALTER TABLE import_purchases ADD COLUMN freightIndiaPartyId TEXT NOT NULL DEFAULT ''")
+  }
+}
+
 async function createSqliteRepository(): Promise<DataRepository> {
   const { default: Database } = await import('@tauri-apps/plugin-sql')
-  const db = await Database.load('sqlite:import-purchases.db')
+  const db = await Database.load(getActivePurchaseDatabaseUrl())
   let saveQueue = Promise.resolve()
 
   await initializeSchema(db)
   await ensureLocalExpenseColumns(db)
   await ensureActivityLogColumns(db)
+  await ensureSupplierCurrencyColumns(db)
+  await ensureFreightIndiaPartyColumn(db)
 
   const saveSnapshot = async (data: AppData) => {
     await db.execute('DELETE FROM payments')
@@ -191,13 +235,14 @@ async function createSqliteRepository(): Promise<DataRepository> {
 
     await db.execute(
       `INSERT INTO app_settings (
-        id, companyName, fiscalYear, defaultExchangeRate, panVatNo,
-        address, phone, agentServiceVatRate
-      ) VALUES ('default', $1, $2, $3, $4, $5, $6, $7)`,
+        id, companyName, fiscalYear, defaultExchangeRate, supplierPurchaseCurrency,
+        panVatNo, address, phone, agentServiceVatRate
+      ) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         data.settings.companyName,
         data.settings.fiscalYear,
         data.settings.defaultExchangeRate,
+        normalizeSupplierCurrency(data.settings.supplierPurchaseCurrency),
         data.settings.panVatNo,
         data.settings.address,
         data.settings.phone,
@@ -230,12 +275,12 @@ async function createSqliteRepository(): Promise<DataRepository> {
     for (const purchase of data.purchases) {
       await db.execute(
         `INSERT INTO import_purchases (
-          id, vendorPartyId, vendorBillNumber, billDate, amountIC,
-          supplierExchangeRate, supplierAmountNPR, customAgentPartyId,
+          id, vendorPartyId, vendorBillNumber, billDate, supplierCurrency,
+          amountIC, supplierExchangeRate, supplierAmountNPR, customAgentPartyId,
           debitNoteNumber, debitNoteDate, importDutyNPR, customServiceNPR,
           importVatNPR, terminalChargeWithoutVatNPR, terminalVatNPR,
           totalTerminalChargeNPR, freightIndiaStatus, freightIndiaAmountIC,
-          freightIndiaExchangeRate, freightIndiaAmountNPR, otherChargesNPR,
+          freightIndiaPartyId, freightIndiaExchangeRate, freightIndiaAmountNPR, otherChargesNPR,
           debitNoteTotalNPR, agentServiceBillNumber, agentServiceBillDate,
           agentServiceAmountBeforeVatNPR, agentServiceVatNPR,
           agentServiceTotalNPR, totalAgentPayableNPR, totalInputVatNPR,
@@ -243,13 +288,14 @@ async function createSqliteRepository(): Promise<DataRepository> {
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
           $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-          $25, $26, $27, $28, $29, $30, $31, $32, $33
+          $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35
         )`,
         [
           purchase.id,
           purchase.vendorPartyId,
           purchase.vendorBillNumber,
           purchase.billDate,
+          normalizeSupplierCurrency(purchase.supplierCurrency),
           purchase.amountIC,
           purchase.supplierExchangeRate,
           purchase.supplierAmountNPR,
@@ -264,6 +310,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
           purchase.totalTerminalChargeNPR,
           normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
           purchase.freightIndiaAmountIC,
+          purchase.freightIndiaPartyId,
           purchase.freightIndiaExchangeRate,
           purchase.freightIndiaAmountNPR,
           purchase.otherChargesNPR,
