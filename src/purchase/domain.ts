@@ -19,6 +19,7 @@ export type PaymentMethod = 'Nabil Bank' | 'Kamana Sewa Bank' | 'Everest Bank'
 export type SupplierCurrency = 'INR' | 'USD'
 export type Currency = 'NPR' | 'INR' | 'USD' | 'INR/IC'
 export type LocalExpenseType = 'Fixed Asset' | 'Expense'
+export type TransactionLifecycleStatus = import('../domain/lifecycle').TransactionLifecycleStatus
 
 export type Party = {
   id: string
@@ -36,6 +37,8 @@ export type Party = {
 
 export type ImportPurchase = {
   id: string
+  fiscalYearId: string
+  lifecycleStatus?: TransactionLifecycleStatus
   vendorPartyId: string
   vendorBillNumber: string
   billDate: string
@@ -57,6 +60,9 @@ export type ImportPurchase = {
   freightIndiaAmountIC: number
   freightIndiaExchangeRate: number
   freightIndiaAmountNPR: number
+  totalKg: number
+  loadingUnloadingChargePerKg: number
+  loadingUnloadingChargeNPR: number
   otherChargesNPR: number
   debitNoteTotalNPR: number
   agentServiceBillNumber: string
@@ -67,6 +73,16 @@ export type ImportPurchase = {
   totalAgentPayableNPR: number
   totalInputVatNPR: number
   landedCostNPR: number
+  appliedVatRate: number
+  appliedExchangeRate: number
+  calculationVersion: string
+  calculatedAt: string
+  postedAt?: string
+  postedBy?: string
+  voidedAt?: string
+  reversedAt?: string
+  reversalReason?: string
+  replacementTransactionId?: string
   remarks: string
   createdAt: string
   updatedAt: string
@@ -74,6 +90,8 @@ export type ImportPurchase = {
 
 export type Payment = {
   id: string
+  fiscalYearId: string
+  lifecycleStatus?: TransactionLifecycleStatus
   partyId: string
   paymentDate: string
   paymentType: PaymentType
@@ -84,12 +102,29 @@ export type Payment = {
   paymentMethod: PaymentMethod
   referenceNumber: string
   remarks: string
+  postedAt?: string
+  postedBy?: string
+  voidedAt?: string
+  reversedAt?: string
+  reversalReason?: string
+  replacementTransactionId?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type PaymentAllocation = {
+  id: string
+  paymentId: string
+  purchaseId: string
+  amountNPR: number
   createdAt: string
   updatedAt: string
 }
 
 export type LocalPurchaseExpense = {
   id: string
+  fiscalYearId: string
+  lifecycleStatus?: TransactionLifecycleStatus
   partyId: string
   billNumber: string
   billDate: string
@@ -99,6 +134,12 @@ export type LocalPurchaseExpense = {
   vatNPR: number
   totalAmountNPR: number
   remarks: string
+  postedAt?: string
+  postedBy?: string
+  voidedAt?: string
+  reversedAt?: string
+  reversalReason?: string
+  replacementTransactionId?: string
   createdAt: string
   updatedAt: string
 }
@@ -111,6 +152,7 @@ export type ActivityLog = {
   oldValue: string
   newValue: string
   createdAt: string
+  metadata?: string
 }
 
 export type AppSettings = {
@@ -127,9 +169,12 @@ export type AppSettings = {
 export type AppData = {
   settings: AppSettings
   parties: Party[]
+  fiscalYears: import('../domain/fiscalYear').FiscalYear[]
   purchases: ImportPurchase[]
   localExpenses: LocalPurchaseExpense[]
   payments: Payment[]
+  paymentAllocations: PaymentAllocation[]
+  ledgerEntries: import('../domain/ledger').LedgerEntry[]
   activityLogs: ActivityLog[]
 }
 

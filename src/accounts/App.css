@@ -496,6 +496,15 @@ textarea:disabled {
   align-items: center;
 }
 
+.row-actions {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.row-actions button {
+  flex: 0 0 auto;
+}
+
 .file-button {
   display: inline-flex;
   align-items: center;
@@ -996,11 +1005,16 @@ td {
   .action-buttons,
   .import-actions,
   .form-actions,
-  .row-actions,
   .unlock-row {
     align-items: stretch;
     flex-direction: column;
     min-width: 0;
+  }
+
+  .row-actions {
+    align-items: center;
+    flex-direction: row;
+    min-width: max-content;
   }
 
   .toolbar label,

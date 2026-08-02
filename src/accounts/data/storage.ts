@@ -1,5 +1,9 @@
 import Database from "@tauri-apps/plugin-sql";
-import { getActiveAccountsDatabaseUrl } from "../../companyContext";
+import {
+  getActiveAccountsDatabaseUrl,
+  getActiveCompanyId,
+  getActiveCompanyProfile,
+} from "../../companyContext";
 import type {
   ActivityLog,
   Collection,
@@ -7,15 +11,31 @@ import type {
   LedgerRow,
   OutstandingRow,
   Party,
+  ReceiptAllocation,
   Sale,
 } from "./types";
 import { calculateVatAmount } from "../utils/settings";
+import {
+  createFiscalYearFromCode,
+  findFiscalYearByBsDate,
+  getOrCreateMigrationFiscalYear,
+  type FiscalYear,
+} from "../../domain/fiscalYear";
+import { createSequentialAllocations, validateAllocations } from "../../domain/allocations";
+import type { TransactionLifecycleStatus } from "../../domain/lifecycle";
+import {
+  postCreditNote,
+  postCustomerReceipt,
+  postSale,
+  type LedgerEntry,
+} from "../../domain/ledger";
 
 export type AccountsBackupData = {
   activityLogs: ActivityLog[];
   collections: Collection[];
   creditNotes: CreditNote[];
   parties: Party[];
+  receiptAllocations?: ReceiptAllocation[];
   sales: Sale[];
 };
 
@@ -84,6 +104,170 @@ async function ensureUniqueWholeNumberIndex(
     WHERE ${columnName} IS NOT NULL
       AND trim(${columnName}) <> ''
   `);
+}
+
+function getActiveFiscalYearCode() {
+  return getActiveCompanyProfile()?.fiscalYear || "2082/83";
+}
+
+function getActiveFiscalYearId() {
+  return createFiscalYearFromCode(
+    getActiveCompanyId() || "default",
+    getActiveFiscalYearCode()
+  ).id;
+}
+
+function mapFiscalYear(row: Record<string, unknown>): FiscalYear {
+  return {
+    id: String(row.id ?? ""),
+    companyId: String(row.companyId ?? (getActiveCompanyId() || "default")),
+    code: String(row.code ?? getActiveFiscalYearCode()),
+    startBs: String(row.startBs ?? ""),
+    endBs: String(row.endBs ?? ""),
+    startAd: String(row.startAd ?? ""),
+    endAd: String(row.endAd ?? ""),
+    status: (row.status as FiscalYear["status"]) ?? "OPEN",
+    createdAt: String(row.createdAt ?? ""),
+    updatedAt: String(row.updatedAt ?? ""),
+  };
+}
+
+async function getFiscalYears(db: Database) {
+  const rows = await db.select<Record<string, unknown>[]>(
+    "SELECT * FROM fiscal_years ORDER BY startBs DESC"
+  );
+  const fiscalYears = rows.map(mapFiscalYear);
+  const migrationFiscalYear = getOrCreateMigrationFiscalYear(
+    getActiveCompanyId() || "default",
+    fiscalYears,
+    getActiveFiscalYearCode()
+  );
+
+  return fiscalYears.some((fiscalYear) => fiscalYear.id === migrationFiscalYear.id)
+    ? fiscalYears
+    : [migrationFiscalYear, ...fiscalYears];
+}
+
+async function resolveFiscalYearId(db: Database, dateBs: string) {
+  const fiscalYears = await getFiscalYears(db);
+  return (
+    findFiscalYearByBsDate(dateBs, fiscalYears)?.id ??
+    getOrCreateMigrationFiscalYear(
+      getActiveCompanyId() || "default",
+      fiscalYears,
+      getActiveFiscalYearCode()
+    ).id
+  );
+}
+
+async function ensureAccountingModel(db: Database) {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS fiscal_years (
+      id TEXT PRIMARY KEY,
+      companyId TEXT NOT NULL,
+      code TEXT NOT NULL,
+      startBs TEXT NOT NULL,
+      endBs TEXT NOT NULL,
+      startAd TEXT NOT NULL DEFAULT '',
+      endAd TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      UNIQUE(companyId, code)
+    )
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS receipt_allocations (
+      id TEXT PRIMARY KEY,
+      receipt_id TEXT NOT NULL,
+      sale_id TEXT NOT NULL,
+      amount_npr REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (receipt_id) REFERENCES collections(id),
+      FOREIGN KEY (sale_id) REFERENCES sales(id)
+    )
+  `);
+
+  await ensureColumn(db, "sales", "fiscal_year_id", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, "sales", "lifecycle_status", "TEXT NOT NULL DEFAULT 'POSTED'");
+  await ensureColumn(db, "sales", "applied_vat_rate", "REAL NOT NULL DEFAULT 13");
+  await ensureColumn(db, "sales", "calculation_version", "TEXT NOT NULL DEFAULT 'sales-policy-v1'");
+  await ensureColumn(db, "sales", "calculated_at", "TEXT NOT NULL DEFAULT ''");
+  await ensureLifecycleColumns(db, "sales");
+  await ensureColumn(db, "collections", "fiscal_year_id", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, "collections", "lifecycle_status", "TEXT NOT NULL DEFAULT 'POSTED'");
+  await ensureLifecycleColumns(db, "collections");
+  await ensureColumn(db, "credit_notes", "fiscal_year_id", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, "credit_notes", "lifecycle_status", "TEXT NOT NULL DEFAULT 'POSTED'");
+  await ensureLifecycleColumns(db, "credit_notes");
+  await ensureColumn(db, "activity_logs", "metadata", "TEXT NOT NULL DEFAULT ''");
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS ledger_entries (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      company_id TEXT NOT NULL,
+      fiscal_year_id TEXT NOT NULL,
+      transaction_date TEXT NOT NULL,
+      account_code TEXT NOT NULL,
+      party_id TEXT,
+      source_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      posting_version TEXT NOT NULL DEFAULT 'v1',
+      debit REAL NOT NULL DEFAULT 0,
+      credit REAL NOT NULL DEFAULT 0,
+      narration TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      reversal_of_entry_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_sales_fiscal_year ON sales(fiscal_year_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_collections_fiscal_year ON collections(fiscal_year_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_credit_notes_fiscal_year ON credit_notes(fiscal_year_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_receipt_allocations_receipt ON receipt_allocations(receipt_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_receipt_allocations_sale ON receipt_allocations(sale_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_accounts_ledger_source ON ledger_entries(source_type, source_id, posting_version)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_accounts_ledger_party ON ledger_entries(party_id)");
+
+  const fiscalYear = createFiscalYearFromCode(
+    getActiveCompanyId() || "default",
+    getActiveFiscalYearCode()
+  );
+  await db.execute(
+    `
+    INSERT OR IGNORE INTO fiscal_years (
+      id, companyId, code, startBs, endBs, startAd, endAd, status, createdAt, updatedAt
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `,
+    [
+      fiscalYear.id,
+      fiscalYear.companyId,
+      fiscalYear.code,
+      fiscalYear.startBs,
+      fiscalYear.endBs,
+      fiscalYear.startAd ?? "",
+      fiscalYear.endAd ?? "",
+      fiscalYear.status,
+      fiscalYear.createdAt,
+      fiscalYear.updatedAt,
+    ]
+  );
+  await db.execute("UPDATE sales SET fiscal_year_id = $1 WHERE fiscal_year_id = ''", [fiscalYear.id]);
+  await db.execute("UPDATE collections SET fiscal_year_id = $1 WHERE fiscal_year_id = ''", [fiscalYear.id]);
+  await db.execute("UPDATE credit_notes SET fiscal_year_id = $1 WHERE fiscal_year_id = ''", [fiscalYear.id]);
+  await db.execute("UPDATE sales SET calculated_at = created_at WHERE calculated_at = ''");
+}
+
+async function ensureLifecycleColumns(db: Database, tableName: string) {
+  await ensureColumn(db, tableName, "posted_at", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, tableName, "posted_by", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, tableName, "voided_at", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, tableName, "reversed_at", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, tableName, "reversal_reason", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, tableName, "replacement_transaction_id", "TEXT NOT NULL DEFAULT ''");
 }
 
 async function initDb(db: Database) {
@@ -185,6 +369,8 @@ async function initDb(db: Database) {
     "credit_note_no",
     "idx_credit_notes_no_unique_number"
   );
+
+  await ensureAccountingModel(db);
 }
 
 function normalizeWholeNumber(value: string, fieldName: string) {
@@ -246,6 +432,8 @@ type PartyRow = {
 
 type SaleRow = {
   id: string;
+  fiscal_year_id?: string | null;
+  lifecycle_status?: string | null;
   bill_no: string;
   date_bs: string | null;
   date_ad: string | null;
@@ -265,6 +453,8 @@ type SaleRow = {
 
 type CollectionRow = {
   id: string;
+  fiscal_year_id?: string | null;
+  lifecycle_status?: string | null;
   date_bs: string | null;
   date_ad: string | null;
   party_id: string;
@@ -277,6 +467,8 @@ type CollectionRow = {
 
 type CreditNoteRow = {
   id: string;
+  fiscal_year_id?: string | null;
+  lifecycle_status?: string | null;
   credit_note_no: string;
   date_bs: string | null;
   date_ad: string | null;
@@ -294,6 +486,13 @@ type ActivityLogRow = {
   detail: string;
   created_at: string;
 };
+
+function lifecycleStatus(value: unknown): TransactionLifecycleStatus {
+  const status = String(value ?? "POSTED");
+  return status === "DRAFT" || status === "VOID" || status === "REVERSED"
+    ? status
+    : "POSTED";
+}
 
 function mapParty(row: PartyRow): Party {
   return {
@@ -319,6 +518,8 @@ function mapSale(row: SaleRow): Sale {
 
   return {
     id: row.id,
+    fiscalYearId: row.fiscal_year_id ?? getActiveFiscalYearId(),
+    lifecycleStatus: lifecycleStatus(row.lifecycle_status),
     billNo: row.bill_no,
     dateBs: normalizeDateDisplay(row.date_bs ?? ""),
     dateAd: row.date_ad ?? "",
@@ -336,6 +537,8 @@ function mapSale(row: SaleRow): Sale {
 function mapCollection(row: CollectionRow): Collection {
   return {
     id: row.id,
+    fiscalYearId: row.fiscal_year_id ?? getActiveFiscalYearId(),
+    lifecycleStatus: lifecycleStatus(row.lifecycle_status),
     dateBs: normalizeDateDisplay(row.date_bs ?? ""),
     dateAd: row.date_ad ?? "",
     partyId: row.party_id,
@@ -354,6 +557,8 @@ function mapCreditNote(row: CreditNoteRow): CreditNote {
 
   return {
     id: row.id,
+    fiscalYearId: row.fiscal_year_id ?? getActiveFiscalYearId(),
+    lifecycleStatus: lifecycleStatus(row.lifecycle_status),
     creditNoteNo: row.credit_note_no,
     dateBs: normalizeDateDisplay(row.date_bs ?? ""),
     dateAd: row.date_ad ?? "",
@@ -366,13 +571,152 @@ function mapCreditNote(row: CreditNoteRow): CreditNote {
   };
 }
 
+async function runDbTransaction<T>(db: Database, work: () => Promise<T>) {
+  await db.execute("BEGIN IMMEDIATE TRANSACTION");
+  try {
+    const result = await work();
+    await db.execute("COMMIT");
+    return result;
+  } catch (error) {
+    await db.execute("ROLLBACK");
+    throw error;
+  }
+}
+
+async function createReceiptAllocations(
+  db: Database,
+  collection: Collection,
+  excludeReceiptId = ""
+) {
+  const saleRows = await db.select<{ id: string; total_amount: number | null; amount: number | null; date_bs: string | null; created_at: string }[]>(
+    `
+    SELECT id, total_amount, amount, date_bs, created_at
+    FROM sales
+    WHERE party_id = $1
+      AND fiscal_year_id = $2
+    ORDER BY date_bs ASC, created_at ASC
+    `,
+    [collection.partyId, collection.fiscalYearId ?? ""]
+  );
+  const existingRows = await db.select<{ id: string; receipt_id: string; sale_id: string; amount_npr: number; created_at: string; updated_at: string }[]>(
+    `
+    SELECT *
+    FROM receipt_allocations
+    WHERE receipt_id <> $1
+    `,
+    [excludeReceiptId]
+  );
+  const existingAllocations = existingRows.map((allocation) => ({
+    id: allocation.id,
+    sourceId: allocation.receipt_id,
+    targetId: allocation.sale_id,
+    targetType: "SALE" as const,
+    amountNPR: Number(allocation.amount_npr || 0),
+    createdAt: allocation.created_at,
+    updatedAt: allocation.updated_at,
+  }));
+  const now = new Date().toISOString();
+  const allocations = createSequentialAllocations({
+    idFactory: () => crypto.randomUUID(),
+    sourceId: collection.id,
+    sourceAmountNPR: collection.amount,
+    targetType: "SALE",
+    targets: saleRows.map((sale) => ({
+      id: sale.id,
+      totalNPR: Number(sale.total_amount || sale.amount || 0),
+    })),
+    existingAllocations,
+    timestamp: now,
+  });
+  const validation = validateAllocations({
+    sourceAmountNPR: collection.amount,
+    allocations,
+    targets: saleRows.map((sale) => ({
+      id: sale.id,
+      totalNPR: Number(sale.total_amount || sale.amount || 0),
+    })),
+    existingAllocations,
+  });
+
+  if (!validation.valid) {
+    throw new Error(validation.errors.map((error) => error.message).join("\n"));
+  }
+
+  return allocations.map((allocation) => ({
+    id: allocation.id,
+    receiptId: allocation.sourceId,
+    saleId: allocation.targetId,
+    amountNPR: allocation.amountNPR,
+    createdAt: allocation.createdAt,
+    updatedAt: allocation.updatedAt,
+  }));
+}
+
+function accountPostingContext(fiscalYearId: string) {
+  const companyId = getActiveCompanyId() || "default";
+  const fiscalYear = createFiscalYearFromCode(companyId, getActiveFiscalYearCode());
+  return {
+    companyId,
+    fiscalYearId,
+    fiscalYear: {
+      ...fiscalYear,
+      id: fiscalYearId,
+    },
+    idFactory: () => crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    userName: "System",
+  };
+}
+
+async function insertLedgerEntries(db: Database, entries: LedgerEntry[]) {
+  for (const entry of entries) {
+    await db.execute(
+      `
+      INSERT INTO ledger_entries (
+        id, batch_id, company_id, fiscal_year_id, transaction_date, account_code,
+        party_id, source_type, source_id, posting_version, debit, credit,
+        narration, status, reversal_of_entry_id, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      `,
+      [
+        entry.id,
+        entry.batchId,
+        entry.companyId,
+        entry.fiscalYearId,
+        entry.transactionDate,
+        entry.accountCode,
+        entry.partyId ?? "",
+        entry.sourceType,
+        entry.sourceId,
+        entry.postingVersion,
+        entry.debit,
+        entry.credit,
+        entry.narration,
+        entry.status,
+        entry.reversalOfEntryId ?? "",
+        entry.createdAt,
+        entry.updatedAt,
+      ]
+    );
+  }
+}
+
+async function replaceLedgerPosting(db: Database, sourceType: string, sourceId: string, entries: LedgerEntry[]) {
+  await db.execute(
+    "DELETE FROM ledger_entries WHERE source_type = $1 AND source_id = $2 AND status = 'ACTIVE'",
+    [sourceType, sourceId]
+  );
+  await insertLedgerEntries(db, entries);
+}
+
 export async function getAccountsBackupData(): Promise<AccountsBackupData> {
-  const [parties, sales, collections, creditNotes, activityLogs] = await Promise.all([
+  const [parties, sales, collections, creditNotes, activityLogs, receiptAllocations] = await Promise.all([
     getParties(),
     getSales(),
     getCollections(),
     getCreditNotes(),
     getActivityLogs(100000),
+    getReceiptAllocations(),
   ]);
 
   return {
@@ -380,8 +724,25 @@ export async function getAccountsBackupData(): Promise<AccountsBackupData> {
     collections,
     creditNotes,
     parties,
+    receiptAllocations,
     sales,
   };
+}
+
+export async function getReceiptAllocations(): Promise<ReceiptAllocation[]> {
+  const db = await getDb();
+  const rows = await db.select<{ id: string; receipt_id: string; sale_id: string; amount_npr: number; created_at: string; updated_at: string }[]>(
+    "SELECT * FROM receipt_allocations ORDER BY created_at ASC"
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    receiptId: row.receipt_id,
+    saleId: row.sale_id,
+    amountNPR: Number(row.amount_npr || 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
 }
 
 export async function restoreAccountsBackupData(data: Partial<AccountsBackupData>): Promise<void> {
@@ -391,7 +752,9 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
   const collections = data.collections ?? [];
   const creditNotes = data.creditNotes ?? [];
   const activityLogs = data.activityLogs ?? [];
+  const receiptAllocations = data.receiptAllocations ?? [];
 
+  await db.execute("DELETE FROM receipt_allocations");
   await db.execute("DELETE FROM activity_logs");
   await db.execute("DELETE FROM credit_notes");
   await db.execute("DELETE FROM collections");
@@ -427,10 +790,12 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
   }
 
   for (const sale of sales) {
+    const fiscalYearId = sale.fiscalYearId || await resolveFiscalYearId(db, sale.dateBs);
     await db.execute(
       `
       INSERT INTO sales (
         id,
+        fiscal_year_id,
         bill_no,
         date_bs,
         date_ad,
@@ -444,10 +809,11 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
         remarks,
         created_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       `,
       [
         sale.id,
+        fiscalYearId,
         sale.billNo,
         sale.dateBs,
         sale.dateAd ?? "",
@@ -465,10 +831,12 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
   }
 
   for (const collection of collections) {
+    const fiscalYearId = collection.fiscalYearId || await resolveFiscalYearId(db, collection.dateBs);
     await db.execute(
       `
       INSERT INTO collections (
         id,
+        fiscal_year_id,
         date_bs,
         date_ad,
         party_id,
@@ -478,10 +846,11 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
         remarks,
         created_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       `,
       [
         collection.id,
+        fiscalYearId,
         collection.dateBs,
         collection.dateAd ?? "",
         collection.partyId,
@@ -495,10 +864,12 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
   }
 
   for (const creditNote of creditNotes) {
+    const fiscalYearId = creditNote.fiscalYearId || await resolveFiscalYearId(db, creditNote.dateBs);
     await db.execute(
       `
       INSERT INTO credit_notes (
         id,
+        fiscal_year_id,
         credit_note_no,
         date_bs,
         date_ad,
@@ -509,10 +880,11 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
         remarks,
         created_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       `,
       [
         creditNote.id,
+        fiscalYearId,
         creditNote.creditNoteNo,
         creditNote.dateBs,
         creditNote.dateAd ?? "",
@@ -522,6 +894,24 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
         creditNote.totalAmount,
         creditNote.remarks ?? "",
         creditNote.createdAt || new Date().toISOString(),
+      ]
+    );
+  }
+
+  for (const allocation of receiptAllocations) {
+    await db.execute(
+      `
+      INSERT INTO receipt_allocations (
+        id, receipt_id, sale_id, amount_npr, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+      `,
+      [
+        allocation.id || crypto.randomUUID(),
+        allocation.receiptId,
+        allocation.saleId,
+        Number(allocation.amountNPR || 0),
+        allocation.createdAt || new Date().toISOString(),
+        allocation.updatedAt || new Date().toISOString(),
       ]
     );
   }
@@ -844,6 +1234,7 @@ export async function saveSale(
   const billNo = normalizeWholeNumber(input.billNo, "Bill number");
 
   const dateBs = normalizeDateInput(input.dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -877,6 +1268,7 @@ export async function saveSale(
   const sale: Sale = {
     ...input,
     id: crypto.randomUUID(),
+    fiscalYearId,
     billNo,
     dateBs,
     salesAmount,
@@ -889,6 +1281,7 @@ export async function saveSale(
     `
     INSERT INTO sales (
       id,
+      fiscal_year_id,
       bill_no,
       date_bs,
       date_ad,
@@ -905,10 +1298,11 @@ export async function saveSale(
       remarks,
       created_at
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
     `,
     [
       sale.id,
+      sale.fiscalYearId ?? "",
       sale.billNo,
       sale.dateBs,
       sale.dateAd ?? "",
@@ -927,6 +1321,26 @@ export async function saveSale(
     ]
   );
 
+  await replaceLedgerPosting(
+    db,
+    "SALE",
+    sale.id,
+    postSale(
+      {
+        id: sale.id,
+        lifecycleStatus: "DRAFT",
+        fiscalYearId: sale.fiscalYearId ?? "",
+        date: sale.dateBs,
+        partyId: sale.partyId,
+        salesAmount: sale.salesAmount,
+        vatAmount: sale.vatAmount,
+        totalAmount: sale.totalAmount,
+        reference: sale.billNo,
+      },
+      accountPostingContext(sale.fiscalYearId ?? "")
+    )
+  );
+
   await logActivity("Sale Created", `Created sale bill no. ${sale.billNo}.`);
   return sale;
 }
@@ -941,6 +1355,7 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
   const billNo = normalizeWholeNumber(input.billNo, "Bill number");
 
   const dateBs = normalizeDateInput(input.dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -977,20 +1392,22 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
     UPDATE sales
     SET
       bill_no = $1,
-      date_bs = $2,
-      date_ad = $3,
-      party_id = $4,
-      quantity = $5,
-      rate = $6,
-      amount = $7,
-      sales_amount = $8,
-      vat_amount = $9,
-      total_amount = $10,
-      remarks = $11
-    WHERE id = $12
+      fiscal_year_id = $2,
+      date_bs = $3,
+      date_ad = $4,
+      party_id = $5,
+      quantity = $6,
+      rate = $7,
+      amount = $8,
+      sales_amount = $9,
+      vat_amount = $10,
+      total_amount = $11,
+      remarks = $12
+    WHERE id = $13
     `,
     [
       billNo,
+      fiscalYearId,
       dateBs,
       input.dateAd ?? "",
       input.partyId,
@@ -1006,6 +1423,26 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
       input.remarks ?? "",
       input.id,
     ]
+  );
+
+  await replaceLedgerPosting(
+    db,
+    "SALE",
+    input.id,
+    postSale(
+      {
+        id: input.id,
+        lifecycleStatus: "DRAFT",
+        fiscalYearId,
+        date: dateBs,
+        partyId: input.partyId,
+        salesAmount,
+        vatAmount,
+        totalAmount,
+        reference: billNo,
+      },
+      accountPostingContext(fiscalYearId)
+    )
   );
 
   await logActivity("Sale Updated", `Updated sale bill no. ${billNo}.`);
@@ -1027,15 +1464,29 @@ export async function deleteSale(saleId: string): Promise<void> {
 
   const db = await getDb();
 
-  await db.execute(
-    `
-    DELETE FROM sales
-    WHERE id = $1
-    `,
-    [saleId]
-  );
-
-  await logActivity("Sale Deleted", `Deleted sale ${saleId}.`);
+  await runDbTransaction(db, async () => {
+    await db.execute("DELETE FROM receipt_allocations WHERE sale_id = $1", [saleId]);
+    await db.execute("DELETE FROM ledger_entries WHERE source_type = 'SALE' AND source_id = $1", [saleId]);
+    await db.execute(
+      `
+      DELETE FROM sales
+      WHERE id = $1
+      `,
+      [saleId]
+    );
+    await db.execute(
+      `
+      INSERT INTO activity_logs (id, action, detail, created_at)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [
+        crypto.randomUUID(),
+        "Sale Deleted",
+        `Deleted sale ${saleId}.`,
+        new Date().toISOString(),
+      ]
+    );
+  });
 }
 
 export async function getCollections(): Promise<Collection[]> {
@@ -1077,6 +1528,7 @@ export async function saveCollection(
   }
 
   const dateBs = normalizeDateInput(input.dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -1093,6 +1545,7 @@ export async function saveCollection(
   const collection: Collection = {
     ...input,
     id: crypto.randomUUID(),
+    fiscalYearId,
     dateBs,
     bankName: input.bankName?.trim() ?? "",
     receiptNo,
@@ -1100,38 +1553,87 @@ export async function saveCollection(
     createdAt: new Date().toISOString(),
   };
 
-  await db.execute(
-    `
-    INSERT INTO collections (
-      id,
-      date_bs,
-      date_ad,
-      party_id,
-      bank_name,
-      amount,
-      reference_no,
-      remarks,
-      created_at
-    )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    `,
-    [
-      collection.id,
-      collection.dateBs,
-      collection.dateAd ?? "",
-      collection.partyId,
-      collection.bankName ?? "",
-      collection.amount,
-      collection.receiptNo ?? "",
-      collection.remarks ?? "",
-      collection.createdAt,
-    ]
-  );
+  await runDbTransaction(db, async () => {
+    await db.execute(
+      `
+      INSERT INTO collections (
+        id,
+        fiscal_year_id,
+        date_bs,
+        date_ad,
+        party_id,
+        bank_name,
+        amount,
+        reference_no,
+        remarks,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `,
+      [
+        collection.id,
+        collection.fiscalYearId ?? "",
+        collection.dateBs,
+        collection.dateAd ?? "",
+        collection.partyId,
+        collection.bankName ?? "",
+        collection.amount,
+        collection.receiptNo ?? "",
+        collection.remarks ?? "",
+        collection.createdAt,
+      ]
+    );
 
-  await logActivity(
-    "Collection Created",
-    `Created collection receipt no. ${collection.receiptNo}.`
-  );
+    const allocations = await createReceiptAllocations(db, collection);
+    for (const allocation of allocations) {
+      await db.execute(
+        `
+        INSERT INTO receipt_allocations (
+          id, receipt_id, sale_id, amount_npr, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          allocation.id,
+          allocation.receiptId,
+          allocation.saleId,
+          allocation.amountNPR,
+          allocation.createdAt,
+          allocation.updatedAt,
+        ]
+      );
+    }
+
+    await replaceLedgerPosting(
+      db,
+      "CUSTOMER_RECEIPT",
+      collection.id,
+      postCustomerReceipt(
+        {
+          id: collection.id,
+          lifecycleStatus: "DRAFT",
+          fiscalYearId: collection.fiscalYearId ?? "",
+          date: collection.dateBs,
+          partyId: collection.partyId,
+          amountNPR: collection.amount,
+          reference: collection.receiptNo ?? collection.id,
+        },
+        accountPostingContext(collection.fiscalYearId ?? "")
+      )
+    );
+
+    await db.execute(
+      `
+      INSERT INTO activity_logs (id, action, detail, created_at)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [
+        crypto.randomUUID(),
+        "Collection Created",
+        `Created collection receipt no. ${collection.receiptNo}.`,
+        new Date().toISOString(),
+      ]
+    );
+  });
   return collection;
 }
 
@@ -1167,6 +1669,7 @@ export async function updateCollection(
   }
 
   const dateBs = normalizeDateInput(input.dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -1180,43 +1683,97 @@ export async function updateCollection(
     throw new Error("Amount must be greater than zero.");
   }
 
-  await db.execute(
-    `
-    UPDATE collections
-    SET
-      date_bs = $1,
-      date_ad = $2,
-      party_id = $3,
-      bank_name = $4,
-      amount = $5,
-      reference_no = $6,
-      remarks = $7
-    WHERE id = $8
-    `,
-    [
-      dateBs,
-      input.dateAd ?? "",
-      input.partyId,
-      input.bankName?.trim() ?? "",
-      Number(input.amount || 0),
-      receiptNo,
-      input.remarks ?? "",
-      input.id,
-    ]
-  );
-
-  await logActivity(
-    "Collection Updated",
-    `Updated collection receipt no. ${receiptNo}.`
-  );
-  return {
+  const collection = {
     ...input,
+    fiscalYearId,
     dateBs,
     bankName: input.bankName?.trim() ?? "",
     amount: Number(input.amount || 0),
     receiptNo,
     createdAt: "",
   };
+
+  await runDbTransaction(db, async () => {
+    await db.execute(
+      `
+      UPDATE collections
+      SET
+        fiscal_year_id = $1,
+        date_bs = $2,
+        date_ad = $3,
+        party_id = $4,
+        bank_name = $5,
+        amount = $6,
+        reference_no = $7,
+        remarks = $8
+      WHERE id = $9
+      `,
+      [
+        fiscalYearId,
+        dateBs,
+        input.dateAd ?? "",
+        input.partyId,
+        input.bankName?.trim() ?? "",
+        Number(input.amount || 0),
+        receiptNo,
+        input.remarks ?? "",
+        input.id,
+      ]
+    );
+
+    await db.execute("DELETE FROM receipt_allocations WHERE receipt_id = $1", [input.id]);
+    const allocations = await createReceiptAllocations(db, collection, input.id);
+    for (const allocation of allocations) {
+      await db.execute(
+        `
+        INSERT INTO receipt_allocations (
+          id, receipt_id, sale_id, amount_npr, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          allocation.id,
+          allocation.receiptId,
+          allocation.saleId,
+          allocation.amountNPR,
+          allocation.createdAt,
+          allocation.updatedAt,
+        ]
+      );
+    }
+
+    await replaceLedgerPosting(
+      db,
+      "CUSTOMER_RECEIPT",
+      collection.id,
+      postCustomerReceipt(
+        {
+          id: collection.id,
+          lifecycleStatus: "DRAFT",
+          fiscalYearId: collection.fiscalYearId ?? "",
+          date: collection.dateBs,
+          partyId: collection.partyId,
+          amountNPR: collection.amount,
+          reference: collection.receiptNo ?? collection.id,
+        },
+        accountPostingContext(collection.fiscalYearId ?? "")
+      )
+    );
+
+    await db.execute(
+      `
+      INSERT INTO activity_logs (id, action, detail, created_at)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [
+        crypto.randomUUID(),
+        "Collection Updated",
+        `Updated collection receipt no. ${receiptNo}.`,
+        new Date().toISOString(),
+      ]
+    );
+  });
+
+  return collection;
 }
 
 export async function deleteCollection(collectionId: string): Promise<void> {
@@ -1226,15 +1783,29 @@ export async function deleteCollection(collectionId: string): Promise<void> {
 
   const db = await getDb();
 
-  await db.execute(
-    `
-    DELETE FROM collections
-    WHERE id = $1
-    `,
-    [collectionId]
-  );
-
-  await logActivity("Collection Deleted", `Deleted collection ${collectionId}.`);
+  await runDbTransaction(db, async () => {
+    await db.execute("DELETE FROM receipt_allocations WHERE receipt_id = $1", [collectionId]);
+    await db.execute("DELETE FROM ledger_entries WHERE source_type = 'CUSTOMER_RECEIPT' AND source_id = $1", [collectionId]);
+    await db.execute(
+      `
+      DELETE FROM collections
+      WHERE id = $1
+      `,
+      [collectionId]
+    );
+    await db.execute(
+      `
+      INSERT INTO activity_logs (id, action, detail, created_at)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [
+        crypto.randomUUID(),
+        "Collection Deleted",
+        `Deleted collection ${collectionId}.`,
+        new Date().toISOString(),
+      ]
+    );
+  });
 }
 
 export async function getCreditNotes(): Promise<CreditNote[]> {
@@ -1259,6 +1830,7 @@ export async function saveCreditNote(
     "Credit note number"
   );
   const dateBs = normalizeDateInput(input.dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -1294,6 +1866,7 @@ export async function saveCreditNote(
   const creditNote: CreditNote = {
     ...input,
     id: crypto.randomUUID(),
+    fiscalYearId,
     creditNoteNo,
     dateBs,
     amount,
@@ -1306,6 +1879,7 @@ export async function saveCreditNote(
     `
     INSERT INTO credit_notes (
       id,
+      fiscal_year_id,
       credit_note_no,
       date_bs,
       date_ad,
@@ -1316,10 +1890,11 @@ export async function saveCreditNote(
       remarks,
       created_at
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     `,
     [
       creditNote.id,
+      creditNote.fiscalYearId ?? "",
       creditNote.creditNoteNo,
       creditNote.dateBs,
       creditNote.dateAd ?? "",
@@ -1330,6 +1905,26 @@ export async function saveCreditNote(
       creditNote.remarks ?? "",
       creditNote.createdAt,
     ]
+  );
+
+  await replaceLedgerPosting(
+    db,
+    "CREDIT_NOTE",
+    creditNote.id,
+    postCreditNote(
+      {
+        id: creditNote.id,
+        lifecycleStatus: "DRAFT",
+        fiscalYearId: creditNote.fiscalYearId ?? "",
+        date: creditNote.dateBs,
+        partyId: creditNote.partyId,
+        amount: creditNote.amount,
+        vatAmount: creditNote.vatAmount,
+        totalAmount: creditNote.totalAmount,
+        reference: creditNote.creditNoteNo,
+      },
+      accountPostingContext(creditNote.fiscalYearId ?? "")
+    )
   );
 
   await logActivity(
@@ -1353,6 +1948,7 @@ export async function updateCreditNote(
     "Credit note number"
   );
   const dateBs = normalizeDateInput(input.dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -1393,17 +1989,19 @@ export async function updateCreditNote(
     UPDATE credit_notes
     SET
       credit_note_no = $1,
-      date_bs = $2,
-      date_ad = $3,
-      party_id = $4,
-      amount = $5,
-      vat_amount = $6,
-      total_amount = $7,
-      remarks = $8
-    WHERE id = $9
+      fiscal_year_id = $2,
+      date_bs = $3,
+      date_ad = $4,
+      party_id = $5,
+      amount = $6,
+      vat_amount = $7,
+      total_amount = $8,
+      remarks = $9
+    WHERE id = $10
     `,
     [
       creditNoteNo,
+      fiscalYearId,
       dateBs,
       input.dateAd ?? "",
       input.partyId,
@@ -1415,12 +2013,33 @@ export async function updateCreditNote(
     ]
   );
 
+  await replaceLedgerPosting(
+    db,
+    "CREDIT_NOTE",
+    input.id,
+    postCreditNote(
+      {
+        id: input.id,
+        lifecycleStatus: "DRAFT",
+        fiscalYearId,
+        date: dateBs,
+        partyId: input.partyId,
+        amount,
+        vatAmount,
+        totalAmount,
+        reference: creditNoteNo,
+      },
+      accountPostingContext(fiscalYearId)
+    )
+  );
+
   await logActivity(
     "Credit Note Updated",
     `Updated credit note no. ${creditNoteNo}.`
   );
   return {
     ...input,
+    fiscalYearId,
     creditNoteNo,
     dateBs,
     amount,
@@ -1437,15 +2056,28 @@ export async function deleteCreditNote(creditNoteId: string): Promise<void> {
 
   const db = await getDb();
 
-  await db.execute(
-    `
-    DELETE FROM credit_notes
-    WHERE id = $1
-    `,
-    [creditNoteId]
-  );
-
-  await logActivity("Credit Note Deleted", `Deleted credit note ${creditNoteId}.`);
+  await runDbTransaction(db, async () => {
+    await db.execute("DELETE FROM ledger_entries WHERE source_type = 'CREDIT_NOTE' AND source_id = $1", [creditNoteId]);
+    await db.execute(
+      `
+      DELETE FROM credit_notes
+      WHERE id = $1
+      `,
+      [creditNoteId]
+    );
+    await db.execute(
+      `
+      INSERT INTO activity_logs (id, action, detail, created_at)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [
+        crypto.randomUUID(),
+        "Credit Note Deleted",
+        `Deleted credit note ${creditNoteId}.`,
+        new Date().toISOString(),
+      ]
+    );
+  });
 }
 
 export async function getOutstanding(): Promise<OutstandingRow[]> {

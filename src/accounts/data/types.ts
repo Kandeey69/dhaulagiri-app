@@ -11,6 +11,8 @@ export type Party = {
 
 export type Sale = {
   id: string;
+  fiscalYearId?: string;
+  lifecycleStatus?: import("../../domain/lifecycle").TransactionLifecycleStatus;
   billNo: string;
   dateBs: string;
   dateAd?: string;
@@ -19,11 +21,19 @@ export type Sale = {
   vatAmount: number;
   totalAmount: number;
   remarks?: string;
+  postedAt?: string;
+  postedBy?: string;
+  voidedAt?: string;
+  reversedAt?: string;
+  reversalReason?: string;
+  replacementTransactionId?: string;
   createdAt: string;
 };
 
 export type Collection = {
   id: string;
+  fiscalYearId?: string;
+  lifecycleStatus?: import("../../domain/lifecycle").TransactionLifecycleStatus;
   dateBs: string;
   dateAd?: string;
   partyId: string;
@@ -31,11 +41,19 @@ export type Collection = {
   amount: number;
   receiptNo?: string;
   remarks?: string;
+  postedAt?: string;
+  postedBy?: string;
+  voidedAt?: string;
+  reversedAt?: string;
+  reversalReason?: string;
+  replacementTransactionId?: string;
   createdAt: string;
 };
 
 export type CreditNote = {
   id: string;
+  fiscalYearId?: string;
+  lifecycleStatus?: import("../../domain/lifecycle").TransactionLifecycleStatus;
   creditNoteNo: string;
   dateBs: string;
   dateAd?: string;
@@ -44,6 +62,12 @@ export type CreditNote = {
   vatAmount: number;
   totalAmount: number;
   remarks?: string;
+  postedAt?: string;
+  postedBy?: string;
+  voidedAt?: string;
+  reversedAt?: string;
+  reversalReason?: string;
+  replacementTransactionId?: string;
   createdAt: string;
 };
 
@@ -72,4 +96,13 @@ export type ActivityLog = {
   action: string;
   detail: string;
   createdAt: string;
+};
+
+export type ReceiptAllocation = {
+  id: string;
+  receiptId: string;
+  saleId: string;
+  amountNPR: number;
+  createdAt: string;
+  updatedAt: string;
 };

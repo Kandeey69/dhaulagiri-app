@@ -10,8 +10,10 @@ import {
   type LocalPurchaseExpense,
   type Party,
   type Payment,
+  type PaymentAllocation,
 } from './domain'
-import { companyStorageKey } from '../companyContext'
+import { companyStorageKey, getActiveCompanyId, getActiveCompanyProfile } from '../companyContext'
+import { findFiscalYearByBsDate, getOrCreateMigrationFiscalYear } from '../domain/fiscalYear'
 
 const storageKey = 'easysolution-import-purchase-app-v1'
 const activeStorageKey = () => companyStorageKey(storageKey)
@@ -19,9 +21,12 @@ const activeStorageKey = () => companyStorageKey(storageKey)
 const emptyData: AppData = {
   settings: defaultSettings,
   parties: [],
+  fiscalYears: [],
   purchases: [],
   localExpenses: [],
   payments: [],
+  paymentAllocations: [],
+  ledgerEntries: [],
   activityLogs: [],
 }
 
@@ -34,6 +39,74 @@ export function createId() {
   return id()
 }
 
+export function activeFiscalYear(data: Pick<AppData, 'fiscalYears' | 'settings'>) {
+  const companyId = getActiveCompanyId() || 'default'
+  const code = getActiveCompanyProfile()?.fiscalYear || data.settings.fiscalYear || defaultSettings.fiscalYear
+  return getOrCreateMigrationFiscalYear(companyId, data.fiscalYears, code)
+}
+
+const fiscalYearForDate = (date: string, data: Pick<AppData, 'fiscalYears' | 'settings'>) =>
+  findFiscalYearByBsDate(date, data.fiscalYears) ?? activeFiscalYear(data)
+
+export function normalizeAppData(data: AppData): AppData {
+  const fiscalYear = activeFiscalYear(data)
+  const fiscalYears = data.fiscalYears.some((item) => item.id === fiscalYear.id)
+    ? data.fiscalYears
+    : [fiscalYear, ...data.fiscalYears]
+
+  return {
+    ...data,
+    fiscalYears,
+    purchases: data.purchases.map((purchase) => ({
+      ...purchase,
+      fiscalYearId: purchase.fiscalYearId || fiscalYearForDate(purchase.billDate, { ...data, fiscalYears }).id,
+      lifecycleStatus: purchase.lifecycleStatus ?? 'POSTED',
+      supplierCurrency: normalizeSupplierCurrency(purchase.supplierCurrency),
+      freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
+      freightIndiaPartyId: purchase.freightIndiaPartyId ?? '',
+      totalKg: Number(purchase.totalKg ?? 0),
+      loadingUnloadingChargePerKg: Number(purchase.loadingUnloadingChargePerKg ?? 0),
+      loadingUnloadingChargeNPR: Number(purchase.loadingUnloadingChargeNPR ?? 0),
+      appliedVatRate: Number(purchase.appliedVatRate ?? data.settings.agentServiceVatRate),
+      appliedExchangeRate: Number(purchase.appliedExchangeRate ?? purchase.supplierExchangeRate ?? data.settings.defaultExchangeRate),
+      calculationVersion: purchase.calculationVersion || 'legacy-migrated-v1',
+      calculatedAt: purchase.calculatedAt || purchase.updatedAt || purchase.createdAt || new Date().toISOString(),
+      postedAt: purchase.postedAt ?? purchase.createdAt ?? '',
+      postedBy: purchase.postedBy ?? '',
+      voidedAt: purchase.voidedAt ?? '',
+      reversedAt: purchase.reversedAt ?? '',
+      reversalReason: purchase.reversalReason ?? '',
+      replacementTransactionId: purchase.replacementTransactionId ?? '',
+    })),
+    payments: data.payments.map((payment) => ({
+      ...payment,
+      fiscalYearId: payment.fiscalYearId || fiscalYearForDate(payment.paymentDate, { ...data, fiscalYears }).id,
+      lifecycleStatus: payment.lifecycleStatus ?? 'POSTED',
+      paymentMethod: normalizePaymentMethod(payment.paymentMethod),
+      postedAt: payment.postedAt ?? payment.createdAt ?? '',
+      postedBy: payment.postedBy ?? '',
+      voidedAt: payment.voidedAt ?? '',
+      reversedAt: payment.reversedAt ?? '',
+      reversalReason: payment.reversalReason ?? '',
+      replacementTransactionId: payment.replacementTransactionId ?? '',
+    })),
+    localExpenses: data.localExpenses.map((localExpense) => ({
+      ...localExpense,
+      fiscalYearId: localExpense.fiscalYearId || fiscalYearForDate(localExpense.billDate, { ...data, fiscalYears }).id,
+      lifecycleStatus: localExpense.lifecycleStatus ?? 'POSTED',
+      expenseType: localExpense.expenseType ?? 'Expense',
+      postedAt: localExpense.postedAt ?? localExpense.createdAt ?? '',
+      postedBy: localExpense.postedBy ?? '',
+      voidedAt: localExpense.voidedAt ?? '',
+      reversedAt: localExpense.reversedAt ?? '',
+      reversalReason: localExpense.reversalReason ?? '',
+      replacementTransactionId: localExpense.replacementTransactionId ?? '',
+    })),
+    paymentAllocations: data.paymentAllocations ?? [],
+    ledgerEntries: data.ledgerEntries ?? [],
+  }
+}
+
 export function loadData(): AppData {
     const saved = localStorage.getItem(activeStorageKey())
 
@@ -43,7 +116,7 @@ export function loadData(): AppData {
 
   try {
     const parsed = JSON.parse(saved) as Partial<AppData>
-    return {
+    return normalizeAppData({
       ...emptyData,
       ...parsed,
       settings: {
@@ -57,27 +130,13 @@ export function loadData(): AppData {
         ...party,
         category: normalizePartyCategory(party.category),
       })),
-      purchases: (parsed.purchases ?? []).map((purchase) => ({
-        ...purchase,
-        supplierCurrency: normalizeSupplierCurrency(purchase.supplierCurrency),
-        freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
-        freightIndiaPartyId: purchase.freightIndiaPartyId ?? '',
-      })),
-      payments: (parsed.payments ?? []).map((payment) => ({
-        ...payment,
-        paymentMethod: normalizePaymentMethod(payment.paymentMethod),
-      })),
-      localExpenses: (parsed.localExpenses ?? []).map((localExpense) => ({
-        ...localExpense,
-        expenseType: localExpense.expenseType ?? 'Expense',
-      })),
       activityLogs: (parsed.activityLogs ?? []).map((log) => ({
         ...log,
         userName: log.userName ?? 'Unknown',
         oldValue: log.oldValue ?? '',
         newValue: log.newValue ?? '',
       })),
-    }
+    } as AppData)
   } catch {
     return emptyData
   }
@@ -137,6 +196,20 @@ export function withNewPurchase(
     supplierCurrency: normalizeSupplierCurrency(purchase.supplierCurrency),
     freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
     freightIndiaPartyId: purchase.freightIndiaPartyId ?? '',
+    totalKg: Number(purchase.totalKg ?? 0),
+    loadingUnloadingChargePerKg: Number(purchase.loadingUnloadingChargePerKg ?? 0),
+    loadingUnloadingChargeNPR: Number(purchase.loadingUnloadingChargeNPR ?? 0),
+    appliedVatRate: Number(purchase.appliedVatRate ?? defaultSettings.agentServiceVatRate),
+    appliedExchangeRate: Number(purchase.appliedExchangeRate ?? purchase.supplierExchangeRate ?? defaultSettings.defaultExchangeRate),
+    calculationVersion: purchase.calculationVersion || 'legacy-migrated-v1',
+    calculatedAt: purchase.calculatedAt || createdAt,
+    lifecycleStatus: purchase.lifecycleStatus ?? 'POSTED',
+    postedAt: purchase.postedAt ?? createdAt,
+    postedBy: purchase.postedBy ?? '',
+    voidedAt: purchase.voidedAt ?? '',
+    reversedAt: purchase.reversedAt ?? '',
+    reversalReason: purchase.reversalReason ?? '',
+    replacementTransactionId: purchase.replacementTransactionId ?? '',
     id: id(),
     createdAt,
     updatedAt: createdAt,
@@ -149,6 +222,13 @@ export function withUpdatedPurchase(purchase: ImportPurchase): ImportPurchase {
     supplierCurrency: normalizeSupplierCurrency(purchase.supplierCurrency),
     freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),
     freightIndiaPartyId: purchase.freightIndiaPartyId ?? '',
+    totalKg: Number(purchase.totalKg ?? 0),
+    loadingUnloadingChargePerKg: Number(purchase.loadingUnloadingChargePerKg ?? 0),
+    loadingUnloadingChargeNPR: Number(purchase.loadingUnloadingChargeNPR ?? 0),
+    appliedVatRate: Number(purchase.appliedVatRate ?? defaultSettings.agentServiceVatRate),
+    appliedExchangeRate: Number(purchase.appliedExchangeRate ?? purchase.supplierExchangeRate ?? defaultSettings.defaultExchangeRate),
+    calculationVersion: purchase.calculationVersion || 'legacy-migrated-v1',
+    calculatedAt: purchase.calculatedAt || purchase.updatedAt || now(),
     updatedAt: now(),
   }
 }
@@ -160,6 +240,13 @@ export function withNewLocalExpense(
 
   return {
     ...localExpense,
+    lifecycleStatus: localExpense.lifecycleStatus ?? 'POSTED',
+    postedAt: localExpense.postedAt ?? createdAt,
+    postedBy: localExpense.postedBy ?? '',
+    voidedAt: localExpense.voidedAt ?? '',
+    reversedAt: localExpense.reversedAt ?? '',
+    reversalReason: localExpense.reversalReason ?? '',
+    replacementTransactionId: localExpense.replacementTransactionId ?? '',
     id: id(),
     createdAt,
     updatedAt: createdAt,
@@ -181,6 +268,26 @@ export function withNewPayment(
   return {
     ...payment,
     paymentMethod: normalizePaymentMethod(payment.paymentMethod),
+    lifecycleStatus: payment.lifecycleStatus ?? 'POSTED',
+    postedAt: payment.postedAt ?? createdAt,
+    postedBy: payment.postedBy ?? '',
+    voidedAt: payment.voidedAt ?? '',
+    reversedAt: payment.reversedAt ?? '',
+    reversalReason: payment.reversalReason ?? '',
+    replacementTransactionId: payment.replacementTransactionId ?? '',
+    id: id(),
+    createdAt,
+    updatedAt: createdAt,
+  }
+}
+
+export function createPaymentAllocation(
+  allocation: Omit<PaymentAllocation, 'id' | 'createdAt' | 'updatedAt'>,
+): PaymentAllocation {
+  const createdAt = now()
+
+  return {
+    ...allocation,
     id: id(),
     createdAt,
     updatedAt: createdAt,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { LedgerRow, OutstandingRow, Party } from "../data/types";
 import { getOutstanding, getParties, getPartyLedger } from "../data/storage";
 import { saveLedgerPdf } from "../utils/pdf";
@@ -21,9 +21,21 @@ export default function Reports() {
   const [outputVatMonth, setOutputVatMonth] = useState(
     () => localStorage.getItem(companyStorageKey("accounts-output-vat-month")) || "1"
   );
+  const [reportSearch, setReportSearch] = useState("");
   const [message, setMessage] = useState("");
 
-  async function loadReport() {
+  const loadLedger = useCallback(async (partyId: string) => {
+    setSelectedPartyId(partyId);
+
+    if (!partyId) {
+      setLedgerRows([]);
+      return;
+    }
+
+    setLedgerRows(await getPartyLedger(partyId));
+  }, []);
+
+  const loadReport = useCallback(async () => {
     const [loadedRows, loadedParties] = await Promise.all([getOutstanding(), getParties()]);
     setRows(loadedRows);
     setParties(loadedParties);
@@ -38,24 +50,47 @@ export default function Reports() {
     if (dashboardMonth) {
       setOutputVatMonth(dashboardMonth);
     }
-  }
-
-  async function loadLedger(partyId: string) {
-    setSelectedPartyId(partyId);
-
-    if (!partyId) {
-      setLedgerRows([]);
-      return;
-    }
-
-    setLedgerRows(await getPartyLedger(partyId));
-  }
+  }, [loadLedger]);
 
   useEffect(() => {
     loadReport();
-  }, []);
+  }, [loadReport]);
 
   const selectedParty = parties.find((party) => party.id === selectedPartyId);
+  const reportSearchText = reportSearch.trim().toLowerCase();
+  const filteredParties = reportSearchText
+    ? parties.filter((party) =>
+        [party.name, party.panNo, party.address, party.phone]
+          .some((value) => String(value || "").toLowerCase().includes(reportSearchText))
+      )
+    : parties;
+  const filteredLedgerRows = reportSearchText
+    ? ledgerRows.filter((row) =>
+        [
+          row.dateBs,
+          row.type,
+          row.reference,
+          row.remarks,
+          row.debit,
+          row.credit,
+          row.balance,
+        ]
+          .some((value) => String(value || "").toLowerCase().includes(reportSearchText))
+      )
+    : ledgerRows;
+  const filteredOutstandingRows = reportSearchText
+    ? rows.filter((row) =>
+        [
+          row.partyName,
+          row.openingBalance,
+          row.totalSales,
+          row.totalCollections,
+          row.totalAdjustments,
+          row.outstanding,
+        ]
+          .some((value) => String(value || "").toLowerCase().includes(reportSearchText))
+      )
+    : rows;
 
   async function handleDownloadLedgerPdf() {
     setMessage("");
@@ -114,6 +149,14 @@ export default function Reports() {
           </div>
 
           <div className="toolbar">
+            <label className="search-field">
+              Search report
+              <input
+                value={reportSearch}
+                onChange={(event) => setReportSearch(event.target.value)}
+                placeholder="Party, bill, receipt, amount"
+              />
+            </label>
             <label>
               Select Party
               <select
@@ -121,7 +164,7 @@ export default function Reports() {
                 onChange={(e) => loadLedger(e.target.value)}
               >
                 <option value="">Select Party</option>
-                {parties.map((party) => (
+                {filteredParties.map((party) => (
                   <option key={party.id} value={party.id}>
                     {party.name}
                   </option>
@@ -144,7 +187,7 @@ export default function Reports() {
               </thead>
 
               <tbody>
-                {ledgerRows.map((row, index) => (
+                {filteredLedgerRows.map((row, index) => (
                   <tr key={`${row.type}-${row.reference}-${index}`}>
                     <td>{row.dateBs || "-"}</td>
                     <td>{row.type}</td>
@@ -156,10 +199,10 @@ export default function Reports() {
                     </td>
                   </tr>
                 ))}
-                {ledgerRows.length === 0 && (
+                {filteredLedgerRows.length === 0 && (
                   <tr>
                     <td className="empty" colSpan={6}>
-                      Select a party to view ledger rows.
+                      {ledgerRows.length ? "No ledger rows match the search." : "Select a party to view ledger rows."}
                     </td>
                   </tr>
                 )}
@@ -179,6 +222,17 @@ export default function Reports() {
             </button>
           </div>
 
+          <div className="toolbar">
+            <label className="search-field">
+              Search outstanding
+              <input
+                value={reportSearch}
+                onChange={(event) => setReportSearch(event.target.value)}
+                placeholder="Party or amount"
+              />
+            </label>
+          </div>
+
           <div className="table-wrap">
             <table>
               <thead>
@@ -193,7 +247,7 @@ export default function Reports() {
               </thead>
 
               <tbody>
-                {rows.map((row) => (
+                {filteredOutstandingRows.map((row) => (
                   <tr key={row.partyId}>
                     <td>{row.partyName}</td>
                     <td>{row.openingBalance.toLocaleString()}</td>
@@ -205,10 +259,10 @@ export default function Reports() {
                     </td>
                   </tr>
                 ))}
-                {rows.length === 0 && (
+                {filteredOutstandingRows.length === 0 && (
                   <tr>
                     <td className="empty" colSpan={6}>
-                      No outstanding records yet.
+                      {rows.length ? "No outstanding records match the search." : "No outstanding records yet."}
                     </td>
                   </tr>
                 )}

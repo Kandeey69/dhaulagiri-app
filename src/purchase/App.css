@@ -260,6 +260,217 @@ nav button.logout-button {
   margin-top: 12px;
 }
 
+.context-bar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 280px) minmax(140px, auto);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 18px;
+  border: 1px solid #bfd5e8;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #eef6fb;
+}
+
+.context-bar.closed {
+  border-color: #1f2937;
+  background: #111827;
+}
+
+.context-bar span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.context-bar strong {
+  display: block;
+  color: var(--heading);
+  font-size: 16px;
+}
+
+.context-bar.closed span,
+.context-bar.closed strong {
+  color: #f8fafc;
+}
+
+.read-only-banner {
+  border: 1px solid #111827;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #ffffff;
+  background: #111827;
+  font-weight: 800;
+}
+
+.validation-summary {
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #7f1d1d;
+  background: #fef2f2;
+}
+
+.validation-summary strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.validation-summary ul {
+  margin: 0 0 8px 18px;
+  padding: 0;
+}
+
+.field-messages {
+  display: grid;
+  gap: 3px;
+}
+
+.field-error,
+.field-warning {
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.field-error {
+  color: #b91c1c;
+}
+
+.field-warning {
+  color: #b45309;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #1f2937;
+  background: #e5e7eb;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.status-badge.posted {
+  color: #075985;
+  background: #e0f2fe;
+}
+
+.status-badge.draft {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.status-badge.reversed,
+.status-badge.void {
+  color: #7f1d1d;
+  background: #fee2e2;
+}
+
+.status-badge.closed-year-read-only {
+  color: #ffffff;
+  background: #111827;
+}
+
+.effect-box {
+  grid-column: 1 / -1;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #f0fdf4;
+}
+
+.effect-box strong,
+.allocation-header strong {
+  display: block;
+  color: var(--heading);
+}
+
+.effect-box ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 14px;
+  margin: 8px 0 0 18px;
+  padding: 0;
+  color: #166534;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.calculation-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.summary-line {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.summary-line span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.summary-line strong {
+  color: var(--heading);
+  font-size: 18px;
+}
+
+.summary-line em,
+.autosave-status {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.allocation-box {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.allocation-header,
+.allocation-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.allocation-header span,
+.allocation-totals span,
+.allocation-totals strong {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.allocation-totals strong {
+  color: var(--heading);
+}
+
+.money-cell {
+  text-align: right;
+}
+
 .stack {
   display: grid;
   gap: 18px;
@@ -678,8 +889,13 @@ td {
 
 .row-actions {
   display: flex;
+  flex-wrap: nowrap;
   gap: 8px;
   white-space: nowrap;
+}
+
+.row-actions button {
+  flex: 0 0 auto;
 }
 
 .empty {
@@ -721,8 +937,14 @@ td {
 
   .two-column,
   .metric-grid,
+  .calculation-summary,
+  .context-bar,
   .summary-grid,
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .effect-box ul {
     grid-template-columns: 1fr;
   }
 }

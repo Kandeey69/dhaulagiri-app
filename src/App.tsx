@@ -24,7 +24,8 @@ import {
   type AppSettings,
   type SupplierCurrency,
 } from "./purchase/domain";
-import { createDataRepository } from "./purchase/repository";
+import { createDataRepository, getEmptyData } from "./purchase/repository";
+import { createFiscalYearFromCode } from "./domain/fiscalYear";
 import PurchaseApp from "./purchase/App";
 import {
   createCompanyYearId,
@@ -670,9 +671,62 @@ async function importPortableCompanyBackup(file: File) {
   await restoreAccountsBackupData(parsed.accounts);
 
   const purchaseRepository = await createDataRepository();
-  await purchaseRepository.saveData({
+  const emptyPurchaseData = getEmptyData();
+  const importedFiscalYears = parsed.purchase.fiscalYears ?? [];
+  const fallbackFiscalYear = createFiscalYearFromCode(
+    profile.id,
+    settings.fiscalYear,
+    profile.isLocked ? "CLOSED" : "OPEN",
+  );
+  const fiscalYearIdMap = new Map<string, string>();
+  const fiscalYears = importedFiscalYears.length
+    ? importedFiscalYears.map((fiscalYear) => {
+        const status =
+          fiscalYear.status === "CLOSED" || fiscalYear.status === "SOFT_CLOSED" || fiscalYear.status === "OPEN"
+            ? fiscalYear.status
+            : profile.isLocked
+              ? "CLOSED"
+              : "OPEN";
+        const nextFiscalYear = {
+          ...createFiscalYearFromCode(profile.id, fiscalYear.code || settings.fiscalYear, status),
+          startBs: fiscalYear.startBs || fallbackFiscalYear.startBs,
+          endBs: fiscalYear.endBs || fallbackFiscalYear.endBs,
+          startAd: fiscalYear.startAd,
+          endAd: fiscalYear.endAd,
+          createdAt: fiscalYear.createdAt || fallbackFiscalYear.createdAt,
+          updatedAt: new Date().toISOString(),
+        };
+        fiscalYearIdMap.set(fiscalYear.id, nextFiscalYear.id);
+        return nextFiscalYear;
+      })
+    : [fallbackFiscalYear];
+  const defaultFiscalYearId = fiscalYears[0]?.id ?? fallbackFiscalYear.id;
+  const remapFiscalYearId = (fiscalYearId: string) =>
+    fiscalYearIdMap.get(fiscalYearId) ?? defaultFiscalYearId;
+  const restoredPurchaseData: AppData = {
+    ...emptyPurchaseData,
     ...parsed.purchase,
     settings,
+    parties: parsed.purchase.parties ?? [],
+    fiscalYears,
+    purchases: (parsed.purchase.purchases ?? []).map((purchase) => ({
+      ...purchase,
+      fiscalYearId: remapFiscalYearId(purchase.fiscalYearId),
+    })),
+    localExpenses: (parsed.purchase.localExpenses ?? []).map((localExpense) => ({
+      ...localExpense,
+      fiscalYearId: remapFiscalYearId(localExpense.fiscalYearId),
+    })),
+    payments: (parsed.purchase.payments ?? []).map((payment) => ({
+      ...payment,
+      fiscalYearId: remapFiscalYearId(payment.fiscalYearId),
+    })),
+    paymentAllocations: parsed.purchase.paymentAllocations ?? [],
+    ledgerEntries: (parsed.purchase.ledgerEntries ?? []).map((entry) => ({
+      ...entry,
+      companyId: profile.id,
+      fiscalYearId: remapFiscalYearId(entry.fiscalYearId),
+    })),
     activityLogs: [
       {
         id: crypto.randomUUID(),
@@ -685,7 +739,8 @@ async function importPortableCompanyBackup(file: File) {
       },
       ...(parsed.purchase.activityLogs ?? []),
     ],
-  });
+  };
+  await purchaseRepository.saveData(restoredPurchaseData);
 
   return profile;
 }
@@ -978,6 +1033,7 @@ export default function App() {
     return (
       <CompanySelector
         companies={companies}
+        message={exportMessage}
         userRole={userRole}
         onAddCompany={() => setIsAddingCompany(true)}
         onImportBackup={importBackupFile}
@@ -1631,8 +1687,10 @@ function buildMultiTablePdf(
   const rowsPerPage = 22;
   const tableWidth = pageWidth - margin * 2;
   const pages = sections.flatMap((section) => {
-    const rowChunks = chunkRows(section.rows.length ? section.rows : [["No records found"]], rowsPerPage);
-    const columnWidth = tableWidth / section.headers.length;
+    const headers = Array.isArray(section.headers) && section.headers.length ? section.headers : ["Details"];
+    const rows = Array.isArray(section.rows) ? section.rows : [];
+    const rowChunks = chunkRows(rows.length ? rows : [["No records found"]], rowsPerPage);
+    const columnWidth = tableWidth / headers.length;
 
     return rowChunks.map((pageRows, sectionPageIndex) => {
       let y = pageHeight - margin;
@@ -1650,7 +1708,7 @@ function buildMultiTablePdf(
       ];
       y -= 34;
 
-      section.headers.forEach((header, index) => {
+      headers.forEach((header, index) => {
         const x = margin + index * columnWidth;
         ops.push(pdfRect(x, y - rowHeight + 5, columnWidth, rowHeight));
         ops.push(pdfText(fitPdfText(header, 22), x + 4, y - 9, 8, "F2"));
@@ -1662,7 +1720,7 @@ function buildMultiTablePdf(
           /^Total/i.test(row[0] ?? '') ||
           /^Net payable/i.test(row[0] ?? '') ||
           /^\d+\./.test(row[0] ?? '') === false && row.slice(1).every((value) => !value)
-        section.headers.forEach((_, index) => {
+        headers.forEach((_, index) => {
           const x = margin + index * columnWidth;
           const value = row[index] ?? "";
           ops.push(pdfRect(x, y - rowHeight + 5, columnWidth, rowHeight));
@@ -1771,13 +1829,14 @@ type CompanySetupProps = {
 
 type CompanySelectorProps = {
   companies: CompanyProfile[];
+  message: string;
   userRole: UserRole;
   onAddCompany: () => void;
   onImportBackup: (file: File) => Promise<void>;
   onSelectCompany: (companyId: string) => void;
 };
 
-function CompanySelector({ companies, onAddCompany, onImportBackup, onSelectCompany, userRole }: CompanySelectorProps) {
+function CompanySelector({ companies, message, onAddCompany, onImportBackup, onSelectCompany, userRole }: CompanySelectorProps) {
   const isMaster = userRole === "master";
   const [isImportingBackup, setIsImportingBackup] = useState(false);
 
@@ -1825,6 +1884,7 @@ function CompanySelector({ companies, onAddCompany, onImportBackup, onSelectComp
           )}
         </div>
       </header>
+      {message && <p className="module-status-message">{message}</p>}
 
       <section className="module-grid company-grid">
         {companies.map((company) => (

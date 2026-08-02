@@ -10,6 +10,12 @@ const NORMALIZE_FREIGHT_STATUS_SCHEMA: &str =
     include_str!("../migrations/006_normalize_freight_status.sql");
 const SUPPLIER_CURRENCY_SCHEMA: &str =
     include_str!("../migrations/007_supplier_currency.sql");
+const ACCOUNTING_MODEL_SCHEMA: &str =
+    include_str!("../migrations/008_accounting_model.sql");
+const LIFECYCLE_LEDGER_SCHEMA: &str =
+    include_str!("../migrations/009_lifecycle_ledger.sql");
+const PURCHASE_LOADING_UNLOADING_SCHEMA: &str =
+    include_str!("../migrations/010_purchase_loading_unloading.sql");
 const DATABASE_URL: &str = "sqlite:import-purchases.db";
 
 #[tauri::command]
@@ -69,6 +75,24 @@ pub fn run() {
             version: 7,
             description: "add_supplier_currency",
             sql: SUPPLIER_CURRENCY_SCHEMA,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 8,
+            description: "add_fiscal_years_and_allocations",
+            sql: ACCOUNTING_MODEL_SCHEMA,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 9,
+            description: "add_lifecycle_and_ledger_entries",
+            sql: LIFECYCLE_LEDGER_SCHEMA,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 10,
+            description: "add_purchase_loading_unloading_charges",
+            sql: PURCHASE_LOADING_UNLOADING_SCHEMA,
             kind: MigrationKind::Up,
         },
     ];

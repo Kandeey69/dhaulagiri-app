@@ -1,12 +1,39 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import './App.css'
 import {
-  calculatePurchaseTotals,
+  calculatePurchaseComputedTotals,
   hasAgentValues,
   isAgentPayment,
   isSupplierPayment,
 } from './calculations'
+import {
+  createPurchaseCalculationPolicy,
+  freightCreatesTransporterPayable,
+} from '../domain/accountingPolicy'
+import {
+  createFiscalYearFromCode,
+  ensureFiscalYearEditable,
+  findFiscalYearByBsDate,
+  validateDateInFiscalYear,
+} from '../domain/fiscalYear'
+import { validatePaymentDomain, type FieldError } from '../domain/validation'
+import {
+  postLocalExpense,
+  postPurchase,
+  postSupplierPayment,
+  type LedgerEntry,
+} from '../domain/ledger'
+import { createDraftKey } from '../application/draftAutosave'
+import { validatePurchaseFormForUi, validationMessagesByField } from '../application/purchaseFormValidation'
+import { availableTransactionActions } from '../application/transactionActions'
+import { AppContextBar } from '../components/AppContextBar'
+import { TransactionStatusBadge } from '../components/StatusBadge'
+import { ValidationSummary } from '../components/ValidationSummary'
+import { FreightTreatmentExplanation } from '../features/purchases/FreightTreatmentExplanation'
+import { PurchaseCalculationSummary } from '../features/purchases/PurchaseCalculationSummary'
+import { useDraftAutosave } from '../hooks/useDraftAutosave'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import {
   countries,
   defaultSettings,
@@ -36,6 +63,7 @@ import {
 } from './repository'
 import {
   createActivity,
+  createId,
   withNewLocalExpense,
   withNewParty,
   withNewPayment,
@@ -45,6 +73,7 @@ import {
   withUpdatedPayment,
   withUpdatedPurchase,
 } from './storage'
+import { getActiveCompanyId, getActiveCompanyProfile } from '../companyContext'
 
 type View =
   | 'Dashboard'
@@ -140,6 +169,8 @@ const emptyQuickLocalSupplier: QuickLocalSupplierForm = {
 
 const createEmptyPurchase = (settings: AppSettings = defaultSettings): ImportPurchase => ({
   id: '',
+  fiscalYearId: '',
+  lifecycleStatus: 'DRAFT',
   vendorPartyId: '',
   vendorBillNumber: '',
   billDate: '',
@@ -162,6 +193,9 @@ const createEmptyPurchase = (settings: AppSettings = defaultSettings): ImportPur
   freightIndiaAmountIC: 0,
   freightIndiaExchangeRate: settings.defaultExchangeRate,
   freightIndiaAmountNPR: 0,
+  totalKg: 0,
+  loadingUnloadingChargePerKg: 0,
+  loadingUnloadingChargeNPR: 0,
   otherChargesNPR: 0,
   debitNoteTotalNPR: 0,
   agentServiceBillNumber: '',
@@ -172,6 +206,16 @@ const createEmptyPurchase = (settings: AppSettings = defaultSettings): ImportPur
   totalAgentPayableNPR: 0,
   totalInputVatNPR: 0,
   landedCostNPR: 0,
+  appliedVatRate: settings.agentServiceVatRate,
+  appliedExchangeRate: settings.defaultExchangeRate,
+  calculationVersion: 'purchase-policy-v1',
+  calculatedAt: '',
+  postedAt: '',
+  postedBy: '',
+  voidedAt: '',
+  reversedAt: '',
+  reversalReason: '',
+  replacementTransactionId: '',
   remarks: '',
   createdAt: '',
   updatedAt: '',
@@ -179,6 +223,8 @@ const createEmptyPurchase = (settings: AppSettings = defaultSettings): ImportPur
 
 const createEmptyPayment = (): Payment => ({
   id: '',
+  fiscalYearId: '',
+  lifecycleStatus: 'DRAFT',
   partyId: '',
   paymentDate: '',
   paymentType: 'Indian Supplier Payment',
@@ -189,12 +235,20 @@ const createEmptyPayment = (): Payment => ({
   paymentMethod: 'Nabil Bank',
   referenceNumber: '',
   remarks: '',
+  postedAt: '',
+  postedBy: '',
+  voidedAt: '',
+  reversedAt: '',
+  reversalReason: '',
+  replacementTransactionId: '',
   createdAt: '',
   updatedAt: '',
 })
 
 const createEmptyLocalExpense = (): LocalPurchaseExpense => ({
   id: '',
+  fiscalYearId: '',
+  lifecycleStatus: 'DRAFT',
   partyId: '',
   billNumber: '',
   billDate: '',
@@ -204,6 +258,12 @@ const createEmptyLocalExpense = (): LocalPurchaseExpense => ({
   vatNPR: 0,
   totalAmountNPR: 0,
   remarks: '',
+  postedAt: '',
+  postedBy: '',
+  voidedAt: '',
+  reversedAt: '',
+  reversalReason: '',
+  replacementTransactionId: '',
   createdAt: '',
   updatedAt: '',
 })
@@ -366,7 +426,7 @@ const paymentTypeForNonSupplierParty = (party: Party | undefined): Payment['paym
 }
 
 const shouldCreditIndianTransport = (status: FreightIndiaStatus) =>
-  status === 'To be paid by us'
+  freightCreatesTransporterPayable(status)
 
 const includeSelectedParty = (parties: Party[], selectedPartyId: string, partyById: Map<string, Party>) => {
   const selectedParty = partyById.get(selectedPartyId)
@@ -744,13 +804,14 @@ function App({
   const [partySearch, setPartySearch] = useState('')
   const [partyCategoryFilter, setPartyCategoryFilter] = useState<'All' | PartyCategory>('All')
   const [purchaseForm, setPurchaseForm] = useState<ImportPurchase>(() => createEmptyPurchase())
+  const [purchaseValidationErrors, setPurchaseValidationErrors] = useState<FieldError[]>([])
+  const [purchaseValidationWarnings, setPurchaseValidationWarnings] = useState<FieldError[]>([])
   const [paymentForm, setPaymentForm] = useState<Payment>(() => createEmptyPayment())
-  const [paymentMode, setPaymentMode] = useState<'Indian Supplier' | 'Other Party'>('Indian Supplier')
+  const [paymentValidationErrors, setPaymentValidationErrors] = useState<FieldError[]>([])
   const [paymentBillYear, setPaymentBillYear] = useState<'Current' | 'Last year'>('Current')
+  const [paymentMode, setPaymentMode] = useState<'Indian Supplier' | 'Other Party'>('Indian Supplier')
   const [supplierPaymentCurrency, setSupplierPaymentCurrency] = useState<SupplierCurrency>('INR')
   const [supplierPaymentExchangeRate, setSupplierPaymentExchangeRate] = useState(defaultSettings.defaultExchangeRate)
-  const [selectedSupplierBillIds, setSelectedSupplierBillIds] = useState<string[]>([])
-  const [reconciliationPaymentId, setReconciliationPaymentId] = useState('')
   const [bankOutflowNPR, setBankOutflowNPR] = useState(0)
   const [localExpenseForm, setLocalExpenseForm] = useState<LocalPurchaseExpense>(() => createEmptyLocalExpense())
   const [quickLocalSupplierForm, setQuickLocalSupplierForm] = useState<QuickLocalSupplierForm>(emptyQuickLocalSupplier)
@@ -773,6 +834,10 @@ function App({
   })
   const [ledgerPartyId, setLedgerPartyId] = useState('')
   const [vatFilters, setVatFilters] = useState({ month: '' })
+  const [selectedFiscalYearId, setSelectedFiscalYearId] = useState(() =>
+    window.localStorage.getItem('purchase-selected-fiscal-year') ?? '',
+  )
+  const lastSavedSnapshotRef = useRef('')
 
   useEffect(() => {
     if (initialUserRole) {
@@ -788,6 +853,7 @@ function App({
         const loadedData = await nextRepository.loadData()
 
         if (!cancelled) {
+          lastSavedSnapshotRef.current = JSON.stringify(loadedData)
           setRepository(nextRepository)
           setData(loadedData)
           setSettingsForm(loadedData.settings)
@@ -810,10 +876,21 @@ function App({
       return
     }
 
-    repository.saveData(data).catch((error) => {
-      console.error('Could not save app data.', error)
-      window.alert(`Could not save data: ${errorMessage(error)}`)
-    })
+    const saveTimer = window.setTimeout(() => {
+      const nextSnapshot = JSON.stringify(data)
+      if (nextSnapshot === lastSavedSnapshotRef.current) {
+        return
+      }
+
+      repository.saveData(data).catch((error) => {
+        console.error('Could not save app data.', error)
+        window.alert(`Could not save data: ${errorMessage(error)}`)
+      }).then(() => {
+        lastSavedSnapshotRef.current = nextSnapshot
+      })
+    }, 600)
+
+    return () => window.clearTimeout(saveTimer)
   }, [data, isStorageReady, repository])
 
   const activeParties = data.parties.filter((party) => party.isActive)
@@ -823,8 +900,41 @@ function App({
   const indianSupplierPaymentParties = [...indianSuppliers, ...indianTransportParties]
   const localSuppliers = activeParties.filter((party) => party.category === 'Local Suppliers')
   const otherPaymentParties = activeParties.filter((party) => !isIndianSupplierCategory(party))
-  const canEditOrDelete = userRole === 'Master' && !isReadOnly
-  const canEditPurchase = !isReadOnly && (userRole === 'Master' || userRole === 'Account')
+  const activeCompanyId = getActiveCompanyId() || 'default'
+  const fiscalYearOptions = useMemo(() => {
+    const profile = getActiveCompanyProfile()
+    const code = profile?.fiscalYear || data.settings.fiscalYear || defaultSettings.fiscalYear
+    const companyYears = data.fiscalYears.filter((fiscalYear) => fiscalYear.companyId === activeCompanyId)
+    const candidate =
+      companyYears.find((fiscalYear) => fiscalYear.code === code) ??
+      companyYears.find((fiscalYear) => fiscalYear.id === data.purchases[0]?.fiscalYearId) ??
+      createFiscalYearFromCode(activeCompanyId, code, isReadOnly ? 'CLOSED' : 'OPEN')
+
+    return companyYears.some((fiscalYear) => fiscalYear.id === candidate.id)
+      ? companyYears
+      : [candidate, ...companyYears]
+  }, [activeCompanyId, data.fiscalYears, data.purchases, data.settings.fiscalYear, isReadOnly])
+  const activeFiscalYear = useMemo(() => {
+    const selected =
+      fiscalYearOptions.find((fiscalYear) => fiscalYear.id === selectedFiscalYearId) ??
+      fiscalYearOptions.find((fiscalYear) => fiscalYear.status === 'OPEN') ??
+      fiscalYearOptions[0]
+
+    return isReadOnly ? { ...selected, status: 'CLOSED' as const } : selected
+  }, [fiscalYearOptions, isReadOnly, selectedFiscalYearId])
+  const isClosedFiscalYear = activeFiscalYear.status === 'CLOSED'
+  const canEditOrDelete = userRole === 'Master' && !isReadOnly && !isClosedFiscalYear
+  const canEditPurchase = !isReadOnly && !isClosedFiscalYear && (userRole === 'Master' || userRole === 'Account')
+
+  useEffect(() => {
+    if (!activeFiscalYear.id) {
+      return
+    }
+    if (selectedFiscalYearId !== activeFiscalYear.id) {
+      setSelectedFiscalYearId(activeFiscalYear.id)
+    }
+    window.localStorage.setItem('purchase-selected-fiscal-year', activeFiscalYear.id)
+  }, [activeFiscalYear.id, selectedFiscalYearId])
   const isUsdSupplierMode = data.settings.supplierPurchaseCurrency === 'USD'
   const selectedSupplierCurrency: SupplierCurrency = isUsdSupplierMode
     ? normalizeSupplierCurrency(purchaseForm.supplierCurrency)
@@ -839,49 +949,8 @@ function App({
     freightIndiaExchangeRate: data.settings.defaultExchangeRate,
   }
   const configuredVatRate = vatRateDecimal(data.settings)
-  const purchaseTotals = calculatePurchaseTotals(
-    effectivePurchaseForm,
-    data.settings.agentServiceVatRate,
-  )
-  const currentYearSupplierPayments = data.payments.filter(
-    (payment) => isSupplierPayment(payment) && payment.remarks.includes('Bill year: Current'),
-  )
-  const selectedReconciliationPayment = data.payments.find(
-    (payment) => payment.id === reconciliationPaymentId,
-  )
-  const paidSupplierBillNumbers = new Set(
-    data.payments
-      .filter(
-        (payment) =>
-          isSupplierPayment(payment) &&
-          payment.id !== reconciliationPaymentId,
-      )
-      .flatMap((payment) =>
-        payment.referenceNumber
-          .split(',')
-          .map((billNumber) => billNumber.trim())
-          .filter(Boolean),
-      ),
-  )
-  const supplierBillOptions = selectedReconciliationPayment
-    ? data.purchases.filter(
-        (purchase) =>
-          purchase.vendorPartyId === selectedReconciliationPayment.partyId &&
-          (!paidSupplierBillNumbers.has(purchase.vendorBillNumber) ||
-            selectedSupplierBillIds.includes(purchase.id)),
-      )
-    : []
-  const selectedSupplierBills = supplierBillOptions.filter((purchase) =>
-    selectedSupplierBillIds.includes(purchase.id),
-  )
-  const selectedSupplierBillAmountIC = selectedSupplierBills.reduce(
-    (sum, purchase) => sum + purchase.amountIC,
-    0,
-  )
-  const selectedSupplierBillAmountNPR = selectedSupplierBills.reduce(
-    (sum, purchase) => sum + purchase.supplierAmountNPR,
-    0,
-  )
+  const purchasePolicy = createPurchaseCalculationPolicy(data.settings)
+  const purchaseTotals = calculatePurchaseComputedTotals(effectivePurchaseForm, purchasePolicy)
   const isUsdSupplierPaymentMode = data.settings.supplierPurchaseCurrency === 'USD'
   const selectedSupplierPaymentCurrency: SupplierCurrency = isUsdSupplierPaymentMode
     ? supplierPaymentCurrency
@@ -891,10 +960,43 @@ function App({
     : data.settings.defaultExchangeRate
   const indianSupplierPaymentNPR = paymentForm.amount * selectedSupplierPaymentExchangeRate
   const commissionExpenseNPR = Math.max(0, bankOutflowNPR - indianSupplierPaymentNPR)
-  const reconciliationDifferenceNPR =
-    (selectedReconciliationPayment?.amountNPR ?? 0) - selectedSupplierBillAmountNPR
   const localExpenseVatNPR = n(localExpenseForm.amountBeforeVatNPR * configuredVatRate)
   const localExpenseTotalNPR = localExpenseForm.amountBeforeVatNPR + localExpenseVatNPR
+  const purchaseErrorMessages = validationMessagesByField(purchaseValidationErrors)
+  const purchaseWarningMessages = validationMessagesByField(purchaseValidationWarnings)
+  const paymentErrorMessages = validationMessagesByField(paymentValidationErrors)
+  const purchaseDraftKey = createDraftKey([
+    'purchase-entry',
+    activeCompanyId,
+    activeFiscalYear.id,
+    userRole ?? 'guest',
+  ])
+  const purchaseAutosave = useDraftAutosave({
+    enabled: Boolean(userRole && !purchaseForm.id && !isClosedFiscalYear),
+    keyName: purchaseDraftKey,
+    value: purchaseForm,
+    version: `purchase-v1-${activeFiscalYear.id}`,
+  })
+
+  useKeyboardShortcuts({
+    onSaveDraft: () => setDashboardEntryMessage('Draft saved automatically.'),
+    onReviewOrPost: () => document.querySelector<HTMLButtonElement>('[data-primary-submit="true"]')?.click(),
+    onEscape: () => setGlobalSearch(''),
+  })
+
+  useEffect(() => {
+    if (
+      !purchaseAutosave.recovered ||
+      purchaseForm.id ||
+      purchaseForm.vendorPartyId ||
+      purchaseForm.vendorBillNumber ||
+      purchaseForm.debitNoteNumber
+    ) {
+      return
+    }
+
+    setPurchaseForm(purchaseAutosave.recovered)
+  }, [purchaseAutosave.recovered, purchaseForm.debitNoteNumber, purchaseForm.id, purchaseForm.vendorBillNumber, purchaseForm.vendorPartyId])
 
   const partyById = useMemo(() => {
     const map = new Map<string, Party>()
@@ -909,12 +1011,18 @@ function App({
       localExpense.expenseHead || 'Local purchase/expense bill',
     ].join(' - '), [])
   const sortedPurchases = useMemo(
-    () => [...data.purchases].sort(latestImportPurchaseFirst),
-    [data.purchases],
+    () =>
+      data.purchases
+        .filter((purchase) => purchase.fiscalYearId === activeFiscalYear.id)
+        .sort(latestImportPurchaseFirst),
+    [activeFiscalYear.id, data.purchases],
   )
   const sortedPayments = useMemo(
-    () => [...data.payments].sort((left, right) => latestDateFirst(left.paymentDate, right.paymentDate)),
-    [data.payments],
+    () =>
+      data.payments
+        .filter((payment) => payment.fiscalYearId === activeFiscalYear.id)
+        .sort((left, right) => latestDateFirst(left.paymentDate, right.paymentDate)),
+    [activeFiscalYear.id, data.payments],
   )
   const filteredPayments = useMemo(
     () =>
@@ -924,8 +1032,11 @@ function App({
     [paymentMode, sortedPayments],
   )
   const sortedLocalExpenses = useMemo(
-    () => [...data.localExpenses].sort((left, right) => latestDateFirst(left.billDate, right.billDate)),
-    [data.localExpenses],
+    () =>
+      data.localExpenses
+        .filter((localExpense) => localExpense.fiscalYearId === activeFiscalYear.id)
+        .sort((left, right) => latestDateFirst(left.billDate, right.billDate)),
+    [activeFiscalYear.id, data.localExpenses],
   )
   const vendorOptions = includeSelectedParty(indianSuppliers, purchaseForm.vendorPartyId, partyById)
   const agentOptions = includeSelectedParty(customAgents, purchaseForm.customAgentPartyId, partyById)
@@ -1017,11 +1128,30 @@ function App({
     oldValue = '',
     newValue = '',
   ) => {
+    const fiscalYears = next.fiscalYears.some((fiscalYear) => fiscalYear.id === activeFiscalYear.id)
+      ? next.fiscalYears
+      : [activeFiscalYear, ...next.fiscalYears]
     setData({
       ...next,
+      fiscalYears,
       activityLogs: [createActivity(action, details, userRole ?? 'Unknown', oldValue, newValue), ...next.activityLogs],
     })
   }
+
+  const postingContext = (fiscalYearId: string) => ({
+    companyId: getActiveCompanyId() || 'default',
+    fiscalYearId,
+    fiscalYear: {
+      ...activeFiscalYear,
+      id: fiscalYearId,
+    },
+    idFactory: createId,
+    timestamp: new Date().toISOString(),
+    userName: userRole ?? 'Unknown',
+  })
+
+  const appendLedgerEntries = (entries: LedgerEntry[]) =>
+    [...data.ledgerEntries, ...entries]
 
   const loginAsAccount = () => {
     setUserRole('Account')
@@ -1056,8 +1186,8 @@ function App({
   }
 
   const openNewPurchaseEntry = () => {
-    if (isReadOnly) {
-      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} ${data.settings.fiscalYear ? `FY ${data.settings.fiscalYear}` : ''} is closed. Entries cannot be added in a closed fiscal year.`)
+    if (isClosedFiscalYear) {
+      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} FY ${activeFiscalYear.code} is closed. Entries cannot be added in a closed fiscal year.`)
       return
     }
 
@@ -1067,8 +1197,8 @@ function App({
   }
 
   const openNewPaymentEntry = () => {
-    if (isReadOnly) {
-      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} ${data.settings.fiscalYear ? `FY ${data.settings.fiscalYear}` : ''} is closed. Entries cannot be added in a closed fiscal year.`)
+    if (isClosedFiscalYear) {
+      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} FY ${activeFiscalYear.code} is closed. Entries cannot be added in a closed fiscal year.`)
       return
     }
 
@@ -1077,14 +1207,13 @@ function App({
     setPaymentMode('Indian Supplier')
     setPaymentBillYear('Current')
     resetSupplierPaymentCurrency()
-    setSelectedSupplierBillIds([])
     setBankOutflowNPR(0)
     setView('Payment Entry')
   }
 
   const openNewLocalExpenseEntry = () => {
-    if (isReadOnly) {
-      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} ${data.settings.fiscalYear ? `FY ${data.settings.fiscalYear}` : ''} is closed. Entries cannot be added in a closed fiscal year.`)
+    if (isClosedFiscalYear) {
+      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} FY ${activeFiscalYear.code} is closed. Entries cannot be added in a closed fiscal year.`)
       return
     }
 
@@ -1094,25 +1223,39 @@ function App({
   }
 
   const dashboard = useMemo(() => {
+    const currentPurchases = sortedPurchases
+    const currentPayments = sortedPayments
     const supplierOpening = data.parties
       .filter(isIndianSupplierCategory)
       .reduce((sum, party) => sum + party.openingPayable, 0)
     const agentOpening = data.parties
       .filter(isCustomAgentCategory)
       .reduce((sum, party) => sum + party.openingPayable, 0)
-    const supplierBills = data.purchases.reduce(
+    const supplierPartyIds = new Set(
+      data.parties.filter(isIndianSupplierCategory).map((party) => party.id),
+    )
+    const agentPartyIds = new Set(
+      data.parties.filter(isCustomAgentCategory).map((party) => party.id),
+    )
+    const localSupplierParties = data.parties.filter((party) => party.category === 'Local Suppliers')
+    const localSupplierPartyIds = new Set(localSupplierParties.map((party) => party.id))
+    const localSupplierOpening = localSupplierParties.reduce(
+      (sum, party) => sum + party.openingPayable,
+      0,
+    )
+    const supplierBills = currentPurchases.reduce(
       (sum, purchase) => sum + purchase.supplierAmountNPR,
       0,
     )
-    const agentBills = data.purchases.reduce(
+    const agentBills = currentPurchases.reduce(
       (sum, purchase) => sum + purchase.totalAgentPayableNPR,
       0,
     )
-    const supplierPayments = data.payments
-      .filter(isSupplierPayment)
+    const supplierPayments = currentPayments
+      .filter((payment) => isSupplierPayment(payment) && supplierPartyIds.has(payment.partyId))
       .reduce((sum, payment) => sum + payment.amountNPR, 0)
-    const agentPayments = data.payments
-      .filter(isAgentPayment)
+    const agentPayments = currentPayments
+      .filter((payment) => isAgentPayment(payment) && agentPartyIds.has(payment.partyId))
       .reduce((sum, payment) => sum + payment.amountNPR, 0)
     const transportParties = data.parties.filter(isIndianTransportCategory)
     const transportPartyIds = new Set(transportParties.map((party) => party.id))
@@ -1120,47 +1263,64 @@ function App({
       (sum, party) => sum + party.openingPayable,
       0,
     )
-    const transportCredits = data.purchases
+    const transportCredits = currentPurchases
       .filter((purchase) => shouldCreditIndianTransport(purchase.freightIndiaStatus))
       .reduce((sum, purchase) => sum + purchase.freightIndiaAmountNPR, 0)
-    const transportPayments = data.payments
+    const transportPayments = currentPayments
       .filter(
         (payment) =>
           payment.paymentType === 'Freight Payment' || transportPartyIds.has(payment.partyId),
       )
       .reduce((sum, payment) => sum + payment.amountNPR, 0)
+    const localSupplierBills = sortedLocalExpenses.reduce(
+      (sum, localExpense) => sum + localExpense.totalAmountNPR,
+      0,
+    )
+    const localSupplierPayments = currentPayments
+      .filter(
+        (payment) =>
+          payment.paymentType === 'Other Supplier Payment' &&
+          localSupplierPartyIds.has(payment.partyId),
+      )
+      .reduce((sum, payment) => sum + payment.amountNPR, 0)
+    const supplierPayable = supplierOpening + supplierBills - supplierPayments
+    const agentPayable = agentOpening + agentBills - agentPayments
+    const transportPayable = transportOpening + transportCredits - transportPayments
+    const localSupplierPayable = localSupplierOpening + localSupplierBills - localSupplierPayments
 
     return {
-      supplierPayable: supplierOpening + supplierBills - supplierPayments,
-      agentPayable: agentOpening + agentBills - agentPayments,
-      transportPayable: transportOpening + transportCredits - transportPayments,
-      inputVat: data.purchases.reduce((sum, purchase) => sum + purchase.totalInputVatNPR, 0),
-      landedCost: data.purchases.reduce((sum, purchase) => sum + purchase.landedCostNPR, 0),
+      totalPayable: supplierPayable + agentPayable + transportPayable + localSupplierPayable,
+      supplierPayable,
+      agentPayable,
+      transportPayable,
+      localSupplierPayable,
+      inputVat: currentPurchases.reduce((sum, purchase) => sum + purchase.totalInputVatNPR, 0),
+      landedCost: currentPurchases.reduce((sum, purchase) => sum + purchase.landedCostNPR, 0),
       recentPurchases: sortedPurchases.slice(0, 5),
       recentPayments: sortedPayments.slice(0, 5),
     }
-  }, [data, sortedPayments, sortedPurchases])
+  }, [data.parties, sortedLocalExpenses, sortedPayments, sortedPurchases])
 
   const monthlyLandedCost = useMemo(
     () =>
       makeMonthlyRows(
-        data.purchases.map((purchase) => ({
+        sortedPurchases.map((purchase) => ({
           date: purchase.agentServiceBillDate,
           amount: purchase.landedCostNPR,
         })),
       ),
-    [data.purchases],
+    [sortedPurchases],
   )
   const purchaseBySupplier = useMemo(
     () =>
       makePartySlices(
-        data.purchases.map((purchase) => ({
+        sortedPurchases.map((purchase) => ({
           id: purchase.vendorPartyId,
           name: partyName(purchase.vendorPartyId),
           amount: purchase.supplierAmountNPR,
         })),
       ),
-    [data.purchases, partyName],
+    [partyName, sortedPurchases],
   )
 
   const filteredPurchases = useMemo(() => {
@@ -1189,15 +1349,24 @@ function App({
       )
     })
   }, [sortedPurchases, summaryFilters])
+  const purchaseSummaryTotals = useMemo(
+    () => ({
+      supplierAmountNPR: filteredPurchases.reduce((sum, purchase) => sum + purchase.supplierAmountNPR, 0),
+      inputVatNPR: filteredPurchases.reduce((sum, purchase) => sum + purchase.totalInputVatNPR, 0),
+      landedCostNPR: filteredPurchases.reduce((sum, purchase) => sum + purchase.landedCostNPR, 0),
+      outstandingRows: filteredPurchases.length,
+    }),
+    [filteredPurchases],
+  )
 
   const supplierPayables = useMemo(() => {
     return data.parties
       .filter(isIndianSupplierCategory)
       .map((party) => {
-        const totalBills = data.purchases
+        const totalBills = sortedPurchases
           .filter((purchase) => purchase.vendorPartyId === party.id)
           .reduce((sum, purchase) => sum + purchase.supplierAmountNPR, 0)
-        const totalPayments = data.payments
+        const totalPayments = sortedPayments
           .filter((payment) => payment.partyId === party.id && isSupplierPayment(payment))
           .reduce((sum, payment) => sum + payment.amountNPR, 0)
 
@@ -1208,13 +1377,13 @@ function App({
           outstanding: party.openingPayable + totalBills - totalPayments,
         }
       })
-  }, [data.parties, data.payments, data.purchases])
+  }, [data.parties, sortedPayments, sortedPurchases])
 
   const agentPayables = useMemo(() => {
     return data.parties
       .filter(isCustomAgentCategory)
       .map((party) => {
-        const agentPurchases = data.purchases.filter(
+        const agentPurchases = sortedPurchases.filter(
           (purchase) => purchase.customAgentPartyId === party.id,
         )
         const totalDebitNotes = agentPurchases.reduce(
@@ -1225,7 +1394,7 @@ function App({
           (sum, purchase) => sum + purchase.agentServiceTotalNPR,
           0,
         )
-        const totalPayments = data.payments
+        const totalPayments = sortedPayments
           .filter((payment) => payment.partyId === party.id && isAgentPayment(payment))
           .reduce((sum, payment) => sum + payment.amountNPR, 0)
 
@@ -1238,7 +1407,7 @@ function App({
             party.openingPayable + totalDebitNotes + totalServiceBills - totalPayments,
         }
       })
-  }, [data.parties, data.payments, data.purchases])
+  }, [data.parties, sortedPayments, sortedPurchases])
 
   const indianTransportReport = useMemo(() => {
     const transportParties = data.parties.filter(isIndianTransportCategory)
@@ -1247,7 +1416,7 @@ function App({
       0,
     )
     const transportPartyIds = new Set(transportParties.map((party) => party.id))
-    const creditedPurchases = data.purchases.filter(
+    const creditedPurchases = sortedPurchases.filter(
       (purchase) =>
         shouldCreditIndianTransport(purchase.freightIndiaStatus) &&
         purchase.freightIndiaAmountNPR > 0 &&
@@ -1257,7 +1426,7 @@ function App({
       (sum, purchase) => sum + purchase.freightIndiaAmountNPR,
       0,
     )
-    const transportPayments = data.payments.filter(
+    const transportPayments = sortedPayments.filter(
       (payment) =>
         payment.paymentType === 'Freight Payment' || transportPartyIds.has(payment.partyId),
     )
@@ -1325,7 +1494,7 @@ function App({
       outstanding: openingPayable + freightCredits - totalPayments,
       ledger,
     }
-  }, [data.parties, data.payments, data.purchases, partyName])
+  }, [data.parties, partyName, sortedPayments, sortedPurchases])
 
   const payableRows = useMemo(() => {
     const supplierRows = supplierPayables.map((row) => ({
@@ -1355,10 +1524,10 @@ function App({
     const localSupplierRows = data.parties
       .filter((party) => party.category === 'Local Suppliers')
       .map((party) => {
-        const totalBills = data.localExpenses
+        const totalBills = sortedLocalExpenses
           .filter((localExpense) => localExpense.partyId === party.id)
           .reduce((sum, localExpense) => sum + localExpense.totalAmountNPR, 0)
-        const totalPayments = data.payments
+        const totalPayments = sortedPayments
           .filter((payment) => payment.partyId === party.id && payment.paymentType === 'Other Supplier Payment')
           .reduce((sum, payment) => sum + payment.amountNPR, 0)
 
@@ -1378,14 +1547,14 @@ function App({
     const transportRows = data.parties
       .filter(isIndianTransportCategory)
       .map((party) => {
-        const freightTotal = data.purchases
+        const freightTotal = sortedPurchases
           .filter(
             (purchase) =>
               purchase.freightIndiaPartyId === party.id &&
               shouldCreditIndianTransport(purchase.freightIndiaStatus),
           )
           .reduce((sum, purchase) => sum + purchase.freightIndiaAmountNPR, 0)
-        const payments = data.payments
+        const payments = sortedPayments
           .filter(
             (payment) =>
               payment.partyId === party.id &&
@@ -1428,7 +1597,7 @@ function App({
         row.payments ||
         row.outstanding,
     )
-  }, [agentPayables, data.localExpenses, data.parties, data.payments, data.purchases, indianTransportReport, supplierPayables])
+  }, [agentPayables, data.parties, indianTransportReport, sortedLocalExpenses, sortedPayments, sortedPurchases, supplierPayables])
 
   const selectedLedgerParty = partyById.get(ledgerPartyId)
   const ledgerRows = useMemo(() => {
@@ -1449,7 +1618,7 @@ function App({
     ]
 
     if (isIndianSupplierCategory(selectedLedgerParty)) {
-      data.purchases
+      sortedPurchases
         .filter((purchase) => purchase.vendorPartyId === selectedLedgerParty.id)
         .forEach((purchase) => {
           rows.push({
@@ -1465,7 +1634,7 @@ function App({
     }
 
     if (isCustomAgentCategory(selectedLedgerParty)) {
-      data.purchases
+      sortedPurchases
         .filter((purchase) => purchase.customAgentPartyId === selectedLedgerParty.id)
         .forEach((purchase) => {
           if (purchase.debitNoteTotalNPR > 0) {
@@ -1495,7 +1664,7 @@ function App({
     }
 
     if (selectedLedgerParty.category === 'Local Suppliers') {
-      data.localExpenses
+      sortedLocalExpenses
         .filter((localExpense) => localExpense.partyId === selectedLedgerParty.id)
         .forEach((localExpense) => {
           rows.push({
@@ -1511,7 +1680,7 @@ function App({
     }
 
     if (isIndianTransportCategory(selectedLedgerParty)) {
-      data.purchases
+      sortedPurchases
         .filter(
           (purchase) =>
             purchase.freightIndiaPartyId === selectedLedgerParty.id &&
@@ -1530,7 +1699,7 @@ function App({
         })
     }
 
-    data.payments
+    sortedPayments
       .filter((payment) => payment.partyId === selectedLedgerParty.id)
       .forEach((payment) => {
         rows.push({
@@ -1565,7 +1734,7 @@ function App({
           rows: [] as Array<(typeof rows)[number] & { running: number }>,
         },
       ).rows
-  }, [data.localExpenses, data.payments, data.purchases, localExpenseDescription, selectedLedgerParty, partyName])
+  }, [localExpenseDescription, partyName, selectedLedgerParty, sortedLocalExpenses, sortedPayments, sortedPurchases])
 
   const vatRows = useMemo(() => {
     const importVatRows = sortedPurchases.flatMap((purchase) => {
@@ -1617,7 +1786,7 @@ function App({
       .filter((row) => row.amount > 0)
       .filter((row) => !vatFilters.month || bsMonthFromDate(row.date) === vatFilters.month)
       .sort((a, b) => latestDateFirst(a.date, b.date))
-  }, [partyName, sortedLocalExpenses, sortedPurchases, vatFilters.month])
+  }, [configuredVatRate, partyName, sortedLocalExpenses, sortedPurchases, vatFilters.month])
 
   const totalVat = vatRows.reduce((sum, row) => sum + row.amount, 0)
 
@@ -1641,6 +1810,8 @@ function App({
     key: K,
     value: ImportPurchase[K],
   ) => {
+    setPurchaseValidationErrors((current) => current.filter((error) => error.field !== key))
+    setPurchaseValidationWarnings((current) => current.filter((error) => error.field !== key))
     setPurchaseForm((current) => ({ ...current, [key]: value }))
   }
 
@@ -1663,6 +1834,7 @@ function App({
   }
 
   const updatePaymentField = <K extends keyof Payment>(key: K, value: Payment[K]) => {
+    setPaymentValidationErrors((current) => current.filter((error) => error.field !== key))
     setPaymentForm((current) => ({ ...current, [key]: value }))
   }
 
@@ -1688,6 +1860,19 @@ function App({
       ...current,
       [key]: value,
     }))
+  }
+
+  const focusFirstInvalidField = (errors: FieldError[]) => {
+    const firstError = errors[0]
+    if (!firstError) {
+      return
+    }
+
+    window.requestAnimationFrame(() => {
+      const field = document.querySelector<HTMLElement>(`[name="${firstError.field}"]`)
+      field?.focus()
+      field?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
   }
 
   const saveSettings = (event: FormEvent) => {
@@ -1759,6 +1944,8 @@ function App({
         'freightIndiaStatus',
         'freightIndiaPartyName',
         'freightIndiaAmountIC',
+        'totalKg',
+        'loadingUnloadingChargePerKg',
         'otherChargesNPR',
         'agentServiceBillNumber',
         'agentServiceBillDateBS',
@@ -1782,6 +1969,8 @@ function App({
         'Paid by custom agent',
         '',
         '102900',
+        '0',
+        '0',
         '0',
         'ASB-001',
         '2082/01/03',
@@ -2143,6 +2332,9 @@ function App({
 
       const purchase = {
         ...draft,
+        fiscalYearId:
+          findFiscalYearByBsDate(pragapanpatraDate || agentServiceBillDate, data.fiscalYears)?.id ??
+          activeFiscalYear.id,
         vendorPartyId: vendor.id,
         vendorBillNumber,
         billDate,
@@ -2162,13 +2354,15 @@ function App({
           : '',
         freightIndiaAmountIC: n(getCsvValue(row, 'freightIndiaAmountIC')),
         freightIndiaExchangeRate: data.settings.defaultExchangeRate,
+        totalKg: n(getCsvValue(row, 'totalKg', 'kg', 'totalWeightKg')),
+        loadingUnloadingChargePerKg: n(getCsvValue(row, 'loadingUnloadingChargePerKg', 'loadingUnloadingPerKg', 'loadingChargePerKg')),
         otherChargesNPR: n(getCsvValue(row, 'otherChargesNPR')),
         agentServiceBillNumber: getCsvValue(row, 'agentServiceBillNumber'),
         agentServiceBillDate,
         agentServiceAmountBeforeVatNPR: n(getCsvValue(row, 'agentServiceAmountBeforeVatNPR')),
         remarks: getCsvValue(row, 'remarks'),
       }
-      const totals = calculatePurchaseTotals(purchase, data.settings.agentServiceVatRate)
+      const totals = calculatePurchaseComputedTotals(purchase, purchasePolicy)
 
       if (hasAgentValues(purchase) && !purchase.customAgentPartyId) {
         const reason = 'Custom agent is required for Pragapanpatra/service values.'
@@ -2192,7 +2386,14 @@ function App({
         return
       }
 
-      importedPurchases.push(withNewPurchase({ ...purchase, ...totals }))
+      importedPurchases.push(withNewPurchase({
+        ...purchase,
+        ...totals,
+        appliedVatRate: purchasePolicy.vatRatePercent,
+        appliedExchangeRate: importSupplierExchangeRate,
+        calculationVersion: purchasePolicy.calculationVersion,
+        calculatedAt: new Date().toISOString(),
+      }))
       importedDetails.push({
         status: 'Imported',
         line,
@@ -2256,7 +2457,7 @@ function App({
       const amount = n(getCsvValue(row, 'amountIC', 'amount', 'amountLC'))
       const paymentMethodText = getCsvValue(row, 'paymentMethod', 'bank', 'method')
       const paymentMethodValue = resolvePaymentMethod(paymentMethodText)
-      const billYearValue = getCsvValue(row, 'billYear', 'year')
+      const billYearValue = getCsvValue(row, 'billYear', 'year') || 'Current'
       const bankOutflow = n(getCsvValue(row, 'bankOutflowNPR', 'bankOutflow', 'amountWithCommission'))
       const referenceNumber = getCsvValue(row, 'billNumber', 'referenceNumber', 'reference')
       const importedRemarks = getCsvValue(row, 'remarks')
@@ -2313,7 +2514,7 @@ function App({
       }
 
       if (billYearValue !== 'Current' && billYearValue !== 'Last year') {
-        skip('Bill year is required and must be Current or Last year.')
+        skip('Bill year must be Current or Last year.')
         return
       }
 
@@ -2332,6 +2533,7 @@ function App({
         .filter(Boolean)
         .join('; ')
       const created = withNewPayment({
+        fiscalYearId: activeFiscalYear.id,
         partyId: party.id,
         paymentDate,
         paymentType: 'Indian Supplier Payment',
@@ -2452,6 +2654,7 @@ function App({
       }
 
       const created = withNewPayment({
+        fiscalYearId: activeFiscalYear.id,
         partyId: party.id,
         paymentDate,
         paymentType: paymentTypeForNonSupplierParty(party),
@@ -2624,41 +2827,78 @@ function App({
   const savePurchase = (event: FormEvent) => {
     event.preventDefault()
 
-    if (!purchaseForm.vendorPartyId || !purchaseForm.vendorBillNumber.trim() || !purchaseForm.billDate) {
-      window.alert('Vendor, bill number, and bill date are required.')
-      return
-    }
-
-    if (hasAgentValues(purchaseForm) && !purchaseForm.customAgentPartyId) {
-      window.alert('Custom agent is required when Pragapanpatra or service bill values are entered.')
-      return
-    }
-
-    if (!purchaseForm.freightIndiaStatus) {
-      window.alert('Freight India status is required.')
-      return
-    }
-
-    if (
-      shouldCreditIndianTransport(purchaseForm.freightIndiaStatus) &&
-      !purchaseForm.freightIndiaPartyId
-    ) {
-      window.alert('Select the Indian transport company when freight is to be paid by us.')
-      return
-    }
-
-    if (supplierExchangeRate <= 0) {
-      window.alert(`${selectedSupplierCurrency} exchange rate must be greater than zero.`)
+    try {
+      ensureFiscalYearEditable(activeFiscalYear)
+    } catch (error) {
+      const errors = [{ field: 'billDate', message: errorMessage(error) }]
+      setPurchaseValidationErrors(errors)
+      focusFirstInvalidField(errors)
       return
     }
 
     if (purchaseForm.id && !canEditPurchase) {
-      window.alert('Account user cannot edit existing purchases.')
+      const errors = [{ field: 'vendorBillNumber', message: 'This purchase cannot be edited in the current role or year.' }]
+      setPurchaseValidationErrors(errors)
+      focusFirstInvalidField(errors)
+      return
+    }
+
+    const fiscalDate =
+      normalizeBsDate(purchaseForm.debitNoteDate) ||
+      normalizeBsDate(purchaseForm.agentServiceBillDate)
+    const transactionFiscalYear =
+      (fiscalDate ? findFiscalYearByBsDate(fiscalDate, data.fiscalYears) : undefined) ?? activeFiscalYear
+    const manualErrors: FieldError[] = []
+
+    if (!purchaseForm.billDate) {
+      manualErrors.push({ field: 'billDate', message: 'Bill date is required.' })
+    }
+
+    if (hasAgentValues(purchaseForm) && !purchaseForm.customAgentPartyId) {
+      manualErrors.push({
+        field: 'customAgentPartyId',
+        message: 'Custom agent is required when Pragapanpatra or service bill values are entered.',
+      })
+    }
+
+    if (!purchaseForm.freightIndiaStatus) {
+      manualErrors.push({ field: 'freightIndiaStatus', message: 'Freight India status is required.' })
+    }
+
+    if (supplierExchangeRate <= 0) {
+      manualErrors.push({
+        field: 'supplierExchangeRate',
+        message: `${selectedSupplierCurrency} exchange rate must be greater than zero.`,
+      })
+    }
+
+    const purchaseValidation = validatePurchaseFormForUi({
+      purchase: {
+        ...purchaseForm,
+        billDate: fiscalDate || transactionFiscalYear.startBs,
+        supplierExchangeRate,
+      },
+      fiscalYear: transactionFiscalYear,
+      vendorCategory: partyById.get(purchaseForm.vendorPartyId)?.category,
+      vatRatePercent: purchasePolicy.vatRatePercent,
+      existingPurchases: data.purchases,
+    })
+    const validationErrors = [
+      ...manualErrors,
+      ...purchaseValidation.errors,
+      ...purchaseValidation.warnings,
+    ]
+    setPurchaseValidationErrors(validationErrors)
+    setPurchaseValidationWarnings([])
+
+    if (validationErrors.length) {
+      focusFirstInvalidField(validationErrors)
       return
     }
 
     const fixedRatePurchase = {
       ...purchaseForm,
+      fiscalYearId: transactionFiscalYear.id,
       debitNoteDate: normalizeBsDate(purchaseForm.debitNoteDate),
       agentServiceBillDate: normalizeBsDate(purchaseForm.agentServiceBillDate),
       supplierCurrency: selectedSupplierCurrency,
@@ -2668,11 +2908,15 @@ function App({
         : '',
       freightIndiaExchangeRate: data.settings.defaultExchangeRate,
     }
-    const totalsForSave = calculatePurchaseTotals(fixedRatePurchase, data.settings.agentServiceVatRate)
+    const totalsForSave = calculatePurchaseComputedTotals(fixedRatePurchase, purchasePolicy)
     const purchaseToSave = {
       ...fixedRatePurchase,
       ...totalsForSave,
       agentServiceVatNPR: totalsForSave.agentServiceVatNPR,
+      appliedVatRate: purchasePolicy.vatRatePercent,
+      appliedExchangeRate: supplierExchangeRate,
+      calculationVersion: purchasePolicy.calculationVersion,
+      calculatedAt: new Date().toISOString(),
     }
     const purchaseReview = [
       purchaseForm.id ? 'Review purchase update before save:' : 'Review purchase before save:',
@@ -2708,14 +2952,36 @@ function App({
     } else {
       const created = withNewPurchase({
         ...purchaseToSave,
+        lifecycleStatus: 'POSTED',
+        postedAt: new Date().toISOString(),
+        postedBy: userRole ?? 'Unknown',
       })
+      const ledgerEntries = postPurchase({
+        id: created.id,
+        lifecycleStatus: 'DRAFT',
+        fiscalYearId: created.fiscalYearId,
+        date: normalizeBsDate(created.debitNoteDate) || normalizeBsDate(created.agentServiceBillDate) || activeFiscalYear.startBs,
+        vendorPartyId: created.vendorPartyId,
+        customAgentPartyId: created.customAgentPartyId,
+        freightIndiaPartyId: created.freightIndiaPartyId,
+        freightIndiaStatus: created.freightIndiaStatus,
+        supplierAmountNPR: created.supplierAmountNPR,
+        totalAgentPayableNPR: created.totalAgentPayableNPR,
+        freightIndiaAmountNPR: created.freightIndiaAmountNPR,
+        landedCostNPR: created.landedCostNPR,
+        totalInputVatNPR: created.totalInputVatNPR,
+        reference: created.vendorBillNumber,
+      }, postingContext(created.fiscalYearId))
       setDataWithLog(
-        { ...data, purchases: [created, ...data.purchases] },
+        { ...data, purchases: [created, ...data.purchases], ledgerEntries: appendLedgerEntries(ledgerEntries) },
         'Created import purchase',
         `${partyName(created.vendorPartyId)} - ${created.vendorBillNumber}`,
       )
     }
 
+    setPurchaseValidationErrors([])
+    setPurchaseValidationWarnings([])
+    purchaseAutosave.clearDraft()
     setPurchaseForm(createEmptyPurchase(data.settings))
   }
 
@@ -2746,8 +3012,12 @@ function App({
   const savePayment = (event: FormEvent) => {
     event.preventDefault()
 
-    if (!paymentForm.partyId || !paymentForm.paymentDate) {
-      window.alert('Party and payment date are required.')
+    try {
+      ensureFiscalYearEditable(activeFiscalYear)
+    } catch (error) {
+      const errors = [{ field: 'paymentDate', message: errorMessage(error) }]
+      setPaymentValidationErrors(errors)
+      focusFirstInvalidField(errors)
       return
     }
 
@@ -2757,6 +3027,7 @@ function App({
       paymentMode === 'Indian Supplier'
         ? {
           ...paymentForm,
+          fiscalYearId: activeFiscalYear.id,
           paymentDate: normalizeBsDate(paymentForm.paymentDate),
           paymentType: 'Indian Supplier Payment' as const,
             currency: selectedSupplierPaymentCurrency,
@@ -2771,6 +3042,7 @@ function App({
           }
         : {
             ...paymentForm,
+            fiscalYearId: activeFiscalYear.id,
             paymentDate: normalizeBsDate(paymentForm.paymentDate),
             paymentType: otherPaymentTypeForParty(selectedParty),
             currency: 'NPR' as const,
@@ -2781,33 +3053,61 @@ function App({
             remarks: '',
           }
 
+    const paymentManualErrors: FieldError[] = []
+
+    if (!paymentForm.partyId) {
+      paymentManualErrors.push({ field: 'partyId', message: 'Party is required.' })
+    }
+
+    if (!paymentForm.paymentDate) {
+      paymentManualErrors.push({ field: 'paymentDate', message: 'Payment date is required.' })
+    }
+
     if (paymentMode === 'Indian Supplier' && paymentForm.amount <= 0) {
-      window.alert('Amount in IC/LC is required.')
-      return
+      paymentManualErrors.push({ field: 'amount', message: 'Amount in IC/LC is required.' })
     }
 
     if (paymentMode === 'Indian Supplier' && selectedSupplierPaymentExchangeRate <= 0) {
-      window.alert(`${selectedSupplierPaymentCurrency} exchange rate must be greater than zero.`)
-      return
+      paymentManualErrors.push({
+        field: 'exchangeRate',
+        message: `${selectedSupplierPaymentCurrency} exchange rate must be greater than zero.`,
+      })
     }
 
     if (paymentMode === 'Indian Supplier' && !paymentForm.referenceNumber.trim()) {
-      window.alert('Bill number is required.')
-      return
+      paymentManualErrors.push({ field: 'referenceNumber', message: 'Bill number is required.' })
     }
 
     if (paymentMode === 'Indian Supplier' && !isIndianTransportPayment && bankOutflowNPR < indianSupplierPaymentNPR) {
-      window.alert('Amount in NC with commission cannot be less than converted supplier payment NPR.')
-      return
+      paymentManualErrors.push({
+        field: 'bankOutflowNPR',
+        message: 'Amount in NC with commission cannot be less than converted supplier payment NPR.',
+      })
     }
 
     if (paymentMode === 'Other Party' && paymentForm.amount <= 0) {
-      window.alert('Payment amount is required.')
+      paymentManualErrors.push({ field: 'amount', message: 'Payment amount is required.' })
+    }
+
+    const paymentValidation = validatePaymentDomain({
+      payment: paymentToSave,
+      fiscalYear: activeFiscalYear,
+    })
+    const validationErrors = [
+      ...paymentManualErrors,
+      ...paymentValidation.errors,
+    ]
+    setPaymentValidationErrors(validationErrors)
+
+    if (validationErrors.length) {
+      focusFirstInvalidField(validationErrors)
       return
     }
 
     if (paymentForm.id && !canEditOrDelete) {
-      window.alert('Account user cannot edit existing payments.')
+      const errors = [{ field: 'partyId', message: 'Account user cannot edit existing payments.' }]
+      setPaymentValidationErrors(errors)
+      focusFirstInvalidField(errors)
       return
     }
     const paymentReview = [
@@ -2844,15 +3144,35 @@ function App({
         auditValue(updated),
       )
     } else {
-      const created = withNewPayment(paymentToSave)
+      const created = withNewPayment({
+        ...paymentToSave,
+        lifecycleStatus: 'POSTED',
+        postedAt: new Date().toISOString(),
+        postedBy: userRole ?? 'Unknown',
+      })
+      const ledgerEntries = postSupplierPayment({
+        id: created.id,
+        lifecycleStatus: 'DRAFT',
+        fiscalYearId: created.fiscalYearId,
+        date: created.paymentDate,
+        partyId: created.partyId,
+        paymentType: created.paymentType,
+        amountNPR: created.amountNPR,
+        reference: created.referenceNumber || created.id,
+      }, postingContext(created.fiscalYearId))
       setDataWithLog(
-        { ...data, payments: [created, ...data.payments] },
+        {
+          ...data,
+          payments: [created, ...data.payments],
+          ledgerEntries: appendLedgerEntries(ledgerEntries),
+        },
         'Created payment',
         `${partyName(created.partyId)} - ${npr(created.amountNPR)}`,
       )
     }
 
     setPaymentForm(createEmptyPayment())
+    setPaymentValidationErrors([])
     setPaymentBillYear('Current')
     resetSupplierPaymentCurrency()
     setBankOutflowNPR(0)
@@ -2861,9 +3181,9 @@ function App({
   const editPayment = (payment: Payment) => {
     setPaymentForm(payment)
     setPaymentMode(isSupplierPayment(payment) ? 'Indian Supplier' : 'Other Party')
-    setPaymentBillYear(payment.remarks.includes('Last year') ? 'Last year' : 'Current')
     setSupplierPaymentCurrency(normalizeSupplierCurrency(payment.currency))
     setSupplierPaymentExchangeRate(payment.exchangeRate || data.settings.defaultExchangeRate)
+    setPaymentBillYear(payment.remarks.includes('Last year') ? 'Last year' : 'Current')
     setBankOutflowNPR(payment.amountNPR)
     setView('Payment Entry')
   }
@@ -2876,6 +3196,7 @@ function App({
     const next = {
       ...data,
       payments: data.payments.filter((item) => item.id !== payment.id),
+      paymentAllocations: data.paymentAllocations.filter((allocation) => allocation.paymentId !== payment.id),
     }
     setDataWithLog(
       next,
@@ -2886,53 +3207,15 @@ function App({
     )
   }
 
-  const reconcileSupplierPayment = () => {
-    if (!selectedReconciliationPayment) {
-      window.alert('Select a current year Indian supplier payment first.')
-      return
-    }
-
-    if (!selectedSupplierBills.length) {
-      window.alert('Select one or more unpaid bills to link.')
-      return
-    }
-
-    const billNumbers = selectedSupplierBills
-      .map((purchase) => purchase.vendorBillNumber)
-      .join(', ')
-    const updated = withUpdatedPayment({
-      ...selectedReconciliationPayment,
-      referenceNumber: billNumbers,
-      remarks: [
-        selectedReconciliationPayment.remarks
-          .split('; ')
-          .filter((part) => !part.startsWith('Matched bills NPR:'))
-          .join('; '),
-        `Matched bills NPR: ${fmt(selectedSupplierBillAmountNPR)}`,
-      ]
-        .filter(Boolean)
-        .join('; '),
-    })
-    const next = {
-      ...data,
-      payments: data.payments.map((payment) =>
-        payment.id === updated.id ? updated : payment,
-      ),
-    }
-
-    setDataWithLog(
-      next,
-      'Reconciled supplier payment',
-      `${partyName(updated.partyId)} - ${billNumbers}`,
-      auditValue(selectedReconciliationPayment),
-      auditValue(updated),
-    )
-    setSelectedSupplierBillIds([])
-    setReconciliationPaymentId('')
-  }
-
   const saveLocalExpense = (event: FormEvent) => {
     event.preventDefault()
+
+    try {
+      ensureFiscalYearEditable(activeFiscalYear)
+    } catch (error) {
+      window.alert(errorMessage(error))
+      return
+    }
 
     if (!localExpenseForm.partyId || !localExpenseForm.billNumber.trim() || !localExpenseForm.billDate) {
       window.alert('Local supplier, bill number, and bill date are required.')
@@ -2944,8 +3227,15 @@ function App({
       return
     }
 
+    const dateValidation = validateDateInFiscalYear(localExpenseForm.billDate, activeFiscalYear, 'Bill date')
+    if (!dateValidation.valid) {
+      window.alert(dateValidation.error ?? 'Bill date is outside the fiscal year.')
+      return
+    }
+
     const localExpenseToSave = {
       ...localExpenseForm,
+      fiscalYearId: activeFiscalYear.id,
       billDate: normalizeBsDate(localExpenseForm.billDate),
       vatNPR: localExpenseVatNPR,
       totalAmountNPR: localExpenseTotalNPR,
@@ -2968,9 +3258,26 @@ function App({
         auditValue(updated),
       )
     } else {
-      const created = withNewLocalExpense(localExpenseToSave)
+      const created = withNewLocalExpense({
+        ...localExpenseToSave,
+        lifecycleStatus: 'POSTED',
+        postedAt: new Date().toISOString(),
+        postedBy: userRole ?? 'Unknown',
+      })
+      const ledgerEntries = postLocalExpense({
+        id: created.id,
+        lifecycleStatus: 'DRAFT',
+        fiscalYearId: created.fiscalYearId,
+        date: created.billDate,
+        partyId: created.partyId,
+        expenseType: created.expenseType,
+        amountBeforeVatNPR: created.amountBeforeVatNPR,
+        vatNPR: created.vatNPR,
+        totalAmountNPR: created.totalAmountNPR,
+        reference: created.billNumber,
+      }, postingContext(created.fiscalYearId))
       setDataWithLog(
-        { ...data, localExpenses: [created, ...data.localExpenses] },
+        { ...data, localExpenses: [created, ...data.localExpenses], ledgerEntries: appendLedgerEntries(ledgerEntries) },
         'Created local purchase/expense',
         `${partyName(created.partyId)} - ${created.billNumber}`,
       )
@@ -3089,6 +3396,63 @@ function App({
     )
   }
 
+  const exportFilteredPurchaseSummaryCsv = async () => {
+    const rows = [
+      [
+        'Fiscal year',
+        'Custom bill date',
+        'Vendor',
+        'Bill number',
+        'Supplier currency',
+        'Supplier amount',
+        'Supplier amount NPR',
+        'Custom agent',
+        'Pragapanpatra number',
+        'Import duty NPR',
+        'Import VAT NPR',
+        'Terminal charge NPR',
+        'Freight India NPR',
+        'Total KG',
+        'Loading unloading per KG',
+        'Loading unloading NPR',
+        'Debit note total NPR',
+        'Agent service total NPR',
+        'Total input VAT NPR',
+        'Landed cost NPR',
+        'Status',
+      ],
+      ...filteredPurchases.map((purchase) => [
+        activeFiscalYear.code,
+        importPurchaseSortDate(purchase),
+        partyName(purchase.vendorPartyId),
+        purchase.vendorBillNumber,
+        purchase.supplierCurrency,
+        String(purchase.amountIC),
+        String(purchase.supplierAmountNPR),
+        partyName(purchase.customAgentPartyId),
+        purchase.debitNoteNumber,
+        String(purchase.importDutyNPR),
+        String(purchase.importVatNPR),
+        String(purchase.totalTerminalChargeNPR),
+        String(purchase.freightIndiaAmountNPR),
+        String(purchase.totalKg ?? 0),
+        String(purchase.loadingUnloadingChargePerKg ?? 0),
+        String(purchase.loadingUnloadingChargeNPR ?? 0),
+        String(purchase.debitNoteTotalNPR),
+        String(purchase.agentServiceTotalNPR),
+        String(purchase.totalInputVatNPR),
+        String(purchase.landedCostNPR),
+        purchase.lifecycleStatus ?? 'POSTED',
+      ]),
+    ]
+
+    await saveBlobWithPicker(
+      `import_purchase_summary_${activeFiscalYear.code.replace('/', '-')}_${todayForFileName()}.csv`,
+      new Blob([toCsv(rows)], { type: 'text/csv;charset=utf-8' }),
+      'CSV file',
+    )
+  }
+
   const renderDashboard = () => (
     <div className="stack">
       <Panel title="New Entry">
@@ -3107,8 +3471,10 @@ function App({
       </Panel>
 
       <div className="metric-grid">
-        <Metric label="Total supplier payable" value={npr(dashboard.supplierPayable)} />
-        <Metric label="Total custom agent payable" value={npr(dashboard.agentPayable)} />
+        <Metric label="Total payable" value={npr(dashboard.totalPayable)} />
+        <Metric label="Supplier payable" value={npr(dashboard.supplierPayable)} />
+        <Metric label="Custom agent payable" value={npr(dashboard.agentPayable)} />
+        <Metric label="Local supplier payable" value={npr(dashboard.localSupplierPayable)} />
         <Metric label="Total input VAT" value={npr(dashboard.inputVat)} />
         <Metric label="Total landed cost" value={npr(dashboard.landedCost)} />
       </div>
@@ -3296,11 +3662,18 @@ function App({
 
   const renderPurchaseEntry = () => (
     <div className="stack">
+      {isClosedFiscalYear && (
+        <section className="read-only-banner" role="status">
+          This company fiscal year is closed. Purchase entry is available for viewing only.
+        </section>
+      )}
       <form onSubmit={savePurchase} className="stack">
+        <ValidationSummary errors={purchaseValidationErrors} warnings={purchaseValidationWarnings} />
         <Panel title="Section A: Supplier Invoice">
           <div className="form-grid">
             <Field label="Vendor party">
               <select
+                name="vendorPartyId"
                 value={purchaseForm.vendorPartyId}
                 onChange={(event) => updatePurchaseField('vendorPartyId', event.target.value)}
               >
@@ -3311,14 +3684,26 @@ function App({
                   </option>
                 ))}
               </select>
+              <InlineMessages errors={purchaseErrorMessages.vendorPartyId} />
             </Field>
             <Field label="Vendor bill number">
               <input
+                name="vendorBillNumber"
                 value={purchaseForm.vendorBillNumber}
                 onChange={(event) => updatePurchaseField('vendorBillNumber', event.target.value)}
               />
+              <InlineMessages
+                errors={purchaseErrorMessages.vendorBillNumber}
+                warnings={purchaseWarningMessages.vendorBillNumber}
+              />
             </Field>
-            <CalendarDateField label="Bill date (AD)" value={purchaseForm.billDate} onChange={(value) => updatePurchaseField('billDate', value)} />
+            <CalendarDateField
+              label="Bill date (AD)"
+              name="billDate"
+              value={purchaseForm.billDate}
+              errorMessages={purchaseErrorMessages.billDate}
+              onChange={(value) => updatePurchaseField('billDate', value)}
+            />
             {isUsdSupplierMode && (
               <Field label="Supplier currency">
                 <select
@@ -3333,18 +3718,39 @@ function App({
                 </select>
               </Field>
             )}
-            <NumberField label={`Amount ${selectedSupplierCurrency}`} value={purchaseForm.amountIC} onChange={(value) => updatePurchaseField('amountIC', value)} />
+            <NumberField
+              label={`Amount ${selectedSupplierCurrency}`}
+              name="amountIC"
+              value={purchaseForm.amountIC}
+              errorMessages={purchaseErrorMessages.amountIC}
+              onChange={(value) => updatePurchaseField('amountIC', value)}
+            />
             {selectedSupplierCurrency === 'USD' ? (
               <NumberField
                 label="USD exchange rate"
+                name="supplierExchangeRate"
                 value={purchaseForm.supplierExchangeRate}
                 step="0.0001"
+                errorMessages={purchaseErrorMessages.supplierExchangeRate}
                 onChange={(value) => updatePurchaseField('supplierExchangeRate', value)}
               />
             ) : (
               <ReadOnly label="Fixed INR exchange rate" value={rateFmt(data.settings.defaultExchangeRate)} />
             )}
             <ReadOnly label="Amount NPR" value={npr(purchaseTotals.supplierAmountNPR)} />
+            <NumberField
+              label="Total KG"
+              name="totalKg"
+              value={purchaseForm.totalKg}
+              onChange={(value) => updatePurchaseField('totalKg', value)}
+            />
+            <NumberField
+              label="Loading & unloading charge per KG"
+              name="loadingUnloadingChargePerKg"
+              value={purchaseForm.loadingUnloadingChargePerKg}
+              onChange={(value) => updatePurchaseField('loadingUnloadingChargePerKg', value)}
+            />
+            <ReadOnly label="Loading & unloading charge NPR" value={npr(purchaseTotals.loadingUnloadingChargeNPR)} />
             <Field label="Remarks">
               <input
                 value={purchaseForm.remarks}
@@ -3358,6 +3764,7 @@ function App({
           <div className="form-grid">
             <Field label="Custom agent party">
               <select
+                name="customAgentPartyId"
                 value={purchaseForm.customAgentPartyId}
                 onChange={(event) => updatePurchaseField('customAgentPartyId', event.target.value)}
               >
@@ -3368,6 +3775,7 @@ function App({
                   </option>
                 ))}
               </select>
+              <InlineMessages errors={purchaseErrorMessages.customAgentPartyId} />
             </Field>
             <TextField label="Pragapanpatra number" value={purchaseForm.debitNoteNumber} onChange={(value) => updatePurchaseField('debitNoteNumber', value)} />
             <DateField label="Pragapanpatra date" value={purchaseForm.debitNoteDate} onChange={(value) => updatePurchaseField('debitNoteDate', value)} />
@@ -3379,6 +3787,7 @@ function App({
             <ReadOnly label="Total terminal charge NPR" value={npr(purchaseTotals.totalTerminalChargeNPR)} />
             <Field label="Freight India status">
               <select
+                name="freightIndiaStatus"
                 value={purchaseForm.freightIndiaStatus}
                 onChange={(event) => {
                   const nextStatus = event.target.value as FreightIndiaStatus
@@ -3395,10 +3804,12 @@ function App({
                   <option key={status}>{status}</option>
                 ))}
               </select>
+              <InlineMessages errors={purchaseErrorMessages.freightIndiaStatus} />
             </Field>
             {shouldCreditIndianTransport(purchaseForm.freightIndiaStatus) && (
               <Field label="Indian transport company">
                 <select
+                  name="freightIndiaPartyId"
                   value={purchaseForm.freightIndiaPartyId}
                   onChange={(event) => updatePurchaseField('freightIndiaPartyId', event.target.value)}
                 >
@@ -3409,8 +3820,10 @@ function App({
                     </option>
                   ))}
                 </select>
+                <InlineMessages errors={purchaseErrorMessages.freightIndiaPartyId} />
               </Field>
             )}
+            <FreightTreatmentExplanation status={purchaseForm.freightIndiaStatus} />
             <NumberField label="Freight India amount IC" value={purchaseForm.freightIndiaAmountIC} onChange={(value) => updatePurchaseField('freightIndiaAmountIC', value)} />
             <ReadOnly label="Fixed freight exchange rate" value={rateFmt(data.settings.defaultExchangeRate)} />
             <ReadOnly label="Freight India amount NPR" value={npr(purchaseTotals.freightIndiaAmountNPR)} />
@@ -3430,16 +3843,14 @@ function App({
         </Panel>
 
         <Panel title="Section D: Calculated Summary">
-          <div className="summary-grid">
-            <Metric label="Supplier bill NPR" value={npr(purchaseTotals.supplierAmountNPR)} />
-            <Metric label="Pragapanpatra charges" value={npr(purchaseTotals.debitNoteTotalNPR)} />
-            <Metric label="Agent service total" value={npr(purchaseTotals.agentServiceTotalNPR)} />
-            <Metric label="Custom agent payable" value={npr(purchaseTotals.totalAgentPayableNPR)} />
-            <Metric label="Total input VAT" value={npr(purchaseTotals.totalInputVatNPR)} />
-            <Metric label="Landed cost" value={npr(purchaseTotals.landedCostNPR)} />
-          </div>
+          <PurchaseCalculationSummary totals={purchaseTotals} formatMoney={npr} />
+          <p className="autosave-status">
+            {purchaseAutosave.status === 'saved' ? 'Saved' : purchaseAutosave.status === 'unsaved' ? 'Unsaved changes' : purchaseAutosave.status === 'error' ? 'Autosave failed' : 'Draft ready'}
+          </p>
           <div className="form-actions">
-            <button type="submit">{purchaseForm.id ? 'Update purchase' : 'Save purchase'}</button>
+            <button type="submit" data-primary-submit="true" disabled={isClosedFiscalYear}>
+              {purchaseForm.id ? 'Update purchase' : 'Review and save purchase'}
+            </button>
             <button type="button" className="ghost" onClick={() => setPurchaseForm(createEmptyPurchase(data.settings))}>
               Clear form
             </button>
@@ -3458,39 +3869,52 @@ function App({
                 <th>Pragapanpatra</th>
                 <th>Input VAT</th>
                 <th>Landed Cost</th>
+                <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {sortedPurchases.map((purchase) => (
-                <tr key={purchase.id}>
-                  <td>{partyName(purchase.vendorPartyId)}</td>
-                  <td>{purchase.vendorBillNumber}</td>
-                  <td>{supplierMoney(purchase.amountIC, purchase.supplierCurrency)}</td>
-                  <td>{purchase.debitNoteNumber || '-'}</td>
-                  <td>{npr(purchase.totalInputVatNPR)}</td>
-                  <td>{npr(purchase.landedCostNPR)}</td>
-                  <td className="row-actions">
-                    {canEditPurchase || canEditOrDelete ? (
-                      <>
-                        {canEditPurchase && (
-                          <button type="button" className="small" onClick={() => editPurchase(purchase)}>
-                            Edit
-                          </button>
-                        )}
-                        {canEditOrDelete && (
-                          <button type="button" className="small danger" onClick={() => deletePurchase(purchase)}>
-                            Delete
-                          </button>
-                        )}
-                      </>
-                    ) : (
-                      '-'
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {!data.purchases.length && <EmptyRow columns={7} />}
+              {sortedPurchases.map((purchase) => {
+                const actions = availableTransactionActions({
+                  status: purchase.lifecycleStatus ?? 'POSTED',
+                  fiscalYearStatus: activeFiscalYear.status,
+                  canEditDraft: canEditPurchase,
+                  canDeleteDraft: canEditOrDelete,
+                  canReversePosted: canEditOrDelete,
+                })
+                const canEditOpenYearPurchase =
+                  canEditPurchase &&
+                  activeFiscalYear.status === 'OPEN' &&
+                  !['VOID', 'REVERSED'].includes(purchase.lifecycleStatus ?? 'POSTED')
+
+                return (
+                  <tr key={purchase.id}>
+                    <td>{partyName(purchase.vendorPartyId)}</td>
+                    <td>{purchase.vendorBillNumber}</td>
+                    <td>{supplierMoney(purchase.amountIC, purchase.supplierCurrency)}</td>
+                    <td>{purchase.debitNoteNumber || '-'}</td>
+                    <td className="money-cell">{npr(purchase.totalInputVatNPR)}</td>
+                    <td className="money-cell">{npr(purchase.landedCostNPR)}</td>
+                    <td>
+                      <TransactionStatusBadge status={purchase.lifecycleStatus} fiscalYearStatus={activeFiscalYear.status} />
+                    </td>
+                    <td className="row-actions">
+                      {(actions.includes('EDIT') || canEditOpenYearPurchase) && (
+                        <button type="button" className="small" onClick={() => editPurchase(purchase)}>
+                          Edit
+                        </button>
+                      )}
+                      {actions.includes('DELETE') && (
+                        <button type="button" className="small danger" onClick={() => deletePurchase(purchase)}>
+                          Delete
+                        </button>
+                      )}
+                      {!actions.includes('EDIT') && !actions.includes('DELETE') && 'View / Print only'}
+                    </td>
+                  </tr>
+                )
+              })}
+              {!sortedPurchases.length && <EmptyRow columns={8} />}
             </tbody>
           </table>
         </div>
@@ -3507,9 +3931,8 @@ function App({
           onClick={() => {
             setPaymentMode('Indian Supplier')
             setPaymentForm(createEmptyPayment())
+            setPaymentBillYear('Current')
             resetSupplierPaymentCurrency()
-            setSelectedSupplierBillIds([])
-            setReconciliationPaymentId('')
             setBankOutflowNPR(0)
           }}
         >
@@ -3521,9 +3944,8 @@ function App({
           onClick={() => {
             setPaymentMode('Other Party')
             setPaymentForm({ ...createEmptyPayment(), paymentType: 'Custom Agent Payment' })
+            setPaymentBillYear('Current')
             resetSupplierPaymentCurrency()
-            setSelectedSupplierBillIds([])
-            setReconciliationPaymentId('')
             setBankOutflowNPR(0)
           }}
         >
@@ -3532,29 +3954,46 @@ function App({
       </div>
 
       <Panel title={paymentMode === 'Indian Supplier' ? 'Indian Supplier Payment' : 'Custom Agent / Local Payment'}>
-        <form className="form-grid" onSubmit={savePayment}>
-          <Field label="Party">
-            <select
-              value={paymentForm.partyId}
-              onChange={(event) => {
-                updatePaymentField('partyId', event.target.value)
-                setSelectedSupplierBillIds([])
-                setBankOutflowNPR(0)
-              }}
-            >
-              <option value="">Select party</option>
-              {(paymentMode === 'Indian Supplier' ? indianSupplierPaymentPartyOptions : otherPaymentPartyOptions).map((party) => (
-                <option key={party.id} value={party.id}>
-                  {party.name} - {party.category}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <DateField label="Payment date" value={paymentForm.paymentDate} onChange={(value) => updatePaymentField('paymentDate', value)} />
-          {paymentMode === 'Indian Supplier' && (
-            <>
+        {isClosedFiscalYear && (
+          <section className="read-only-banner" role="status">
+            This company fiscal year is closed. Payment entry is available for viewing only.
+          </section>
+        )}
+        <form className="stack" onSubmit={savePayment}>
+          <ValidationSummary errors={paymentValidationErrors} />
+          <div className="form-grid">
+            <Field label="Party">
+              <select
+                name="partyId"
+                value={paymentForm.partyId}
+                onChange={(event) => {
+                  updatePaymentField('partyId', event.target.value)
+                  setBankOutflowNPR(0)
+                }}
+              >
+                <option value="">Select party</option>
+                {(paymentMode === 'Indian Supplier' ? indianSupplierPaymentPartyOptions : otherPaymentPartyOptions).map((party) => (
+                  <option key={party.id} value={party.id}>
+                    {party.name} - {party.category}
+                  </option>
+                ))}
+              </select>
+              <InlineMessages errors={paymentErrorMessages.partyId} />
+            </Field>
+            <DateField
+              label="Payment date"
+              name="paymentDate"
+              value={paymentForm.paymentDate}
+              errorMessages={paymentErrorMessages.paymentDate}
+              onChange={(value) => updatePaymentField('paymentDate', value)}
+            />
+            {paymentMode === 'Indian Supplier' && (
+              <>
               <Field label="Bill year">
-                <select value={paymentBillYear} onChange={(event) => setPaymentBillYear(event.target.value as 'Current' | 'Last year')}>
+                <select
+                  value={paymentBillYear}
+                  onChange={(event) => setPaymentBillYear(event.target.value as 'Current' | 'Last year')}
+                >
                   <option>Current</option>
                   <option>Last year</option>
                 </select>
@@ -3573,29 +4012,55 @@ function App({
                       <option key={currency} value={currency}>
                         {currency}
                       </option>
-                    ))}
-                  </select>
-                </Field>
-              )}
-              <NumberField label={`Amount ${selectedSupplierPaymentCurrency}`} value={paymentForm.amount} onChange={(value) => updatePaymentField('amount', value)} />
+                  ))}
+                </select>
+              </Field>
+            )}
+              <NumberField
+                label={`Amount ${selectedSupplierPaymentCurrency}`}
+                name="amount"
+                value={paymentForm.amount}
+                errorMessages={paymentErrorMessages.amount}
+                onChange={(value) => updatePaymentField('amount', value)}
+              />
               {selectedSupplierPaymentCurrency === 'USD' ? (
                 <NumberField
                   label="USD exchange rate"
+                  name="exchangeRate"
                   value={supplierPaymentExchangeRate}
                   step="0.0001"
+                  errorMessages={paymentErrorMessages.exchangeRate}
                   onChange={setSupplierPaymentExchangeRate}
                 />
               ) : (
                 <ReadOnly label="Fixed INR exchange rate" value={rateFmt(data.settings.defaultExchangeRate)} />
               )}
               <ReadOnly label="Converted supplier debit NPR" value={npr(indianSupplierPaymentNPR)} />
-              <NumberField label="Amount in NC with commission" value={bankOutflowNPR} onChange={setBankOutflowNPR} />
+              <NumberField
+                label="Amount in NC with commission"
+                name="bankOutflowNPR"
+                value={bankOutflowNPR}
+                errorMessages={paymentErrorMessages.bankOutflowNPR}
+                onChange={setBankOutflowNPR}
+              />
               <ReadOnly label="Commission expense" value={npr(commissionExpenseNPR)} />
-              <TextField label="Bill number" value={paymentForm.referenceNumber} onChange={(value) => updatePaymentField('referenceNumber', value)} />
+              <TextField
+                label="Bill number"
+                name="referenceNumber"
+                value={paymentForm.referenceNumber}
+                errorMessages={paymentErrorMessages.referenceNumber}
+                onChange={(value) => updatePaymentField('referenceNumber', value)}
+              />
             </>
           )}
           {paymentMode === 'Other Party' && (
-            <NumberField label="Amount NPR" value={paymentForm.amount} onChange={(value) => updatePaymentField('amount', value)} />
+            <NumberField
+              label="Amount NPR"
+              name="amount"
+              value={paymentForm.amount}
+              errorMessages={paymentErrorMessages.amount}
+              onChange={(value) => updatePaymentField('amount', value)}
+            />
           )}
           <Field label="Payment method">
             <select value={paymentForm.paymentMethod} onChange={(event) => updatePaymentField('paymentMethod', event.target.value as PaymentMethod)}>
@@ -3604,17 +4069,18 @@ function App({
               ))}
             </select>
           </Field>
+          </div>
           <div className="form-actions">
-            <button type="submit">{paymentForm.id ? 'Update payment' : 'Save payment'}</button>
+            <button type="submit" data-primary-submit="true" disabled={isClosedFiscalYear}>
+              {paymentForm.id ? 'Update payment' : 'Review and save payment'}
+            </button>
             <button
               type="button"
               className="ghost"
               onClick={() => {
                 setPaymentForm(createEmptyPayment())
-                setPaymentBillYear('Current')
                 resetSupplierPaymentCurrency()
-                setSelectedSupplierBillIds([])
-                setReconciliationPaymentId('')
+                setPaymentBillYear('Current')
                 setBankOutflowNPR(0)
               }}
             >
@@ -3636,6 +4102,7 @@ function App({
                 <th>Amount NPR</th>
                 <th>Bank</th>
                 <th>Bill / Reference</th>
+                <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -3649,6 +4116,9 @@ function App({
                   <td>{npr(payment.amountNPR)}</td>
                   <td>{payment.paymentMethod}</td>
                   <td>{payment.referenceNumber || '-'}</td>
+                  <td>
+                    <TransactionStatusBadge status={payment.lifecycleStatus} fiscalYearStatus={activeFiscalYear.status} />
+                  </td>
                   <td className="row-actions">
                     {canEditOrDelete ? (
                       <>
@@ -3665,85 +4135,11 @@ function App({
                   </td>
                 </tr>
               ))}
-              {!filteredPayments.length && <EmptyRow columns={8} />}
+              {!filteredPayments.length && <EmptyRow columns={9} />}
             </tbody>
           </table>
         </div>
       </Panel>
-
-      {paymentMode === 'Indian Supplier' && (
-        <Panel title="Current Year Supplier Payment Reconciliation">
-          <div className="form-grid">
-            <Field label="Select current year payment">
-              <select
-                value={reconciliationPaymentId}
-                onChange={(event) => {
-                  const paymentId = event.target.value
-                  const payment = data.payments.find((item) => item.id === paymentId)
-                  setReconciliationPaymentId(paymentId)
-                  setSelectedSupplierBillIds(
-                    payment
-                      ? data.purchases
-                          .filter(
-                            (purchase) =>
-                              purchase.vendorPartyId === payment.partyId &&
-                              payment.referenceNumber
-                                .split(',')
-                                .map((billNumber) => billNumber.trim())
-                                .includes(purchase.vendorBillNumber),
-                          )
-                          .map((purchase) => purchase.id)
-                      : [],
-                  )
-                }}
-              >
-                <option value="">Select payment</option>
-                {currentYearSupplierPayments.map((payment) => (
-                  <option key={payment.id} value={payment.id}>
-                    {dateText(payment.paymentDate)} - {partyName(payment.partyId)} - {ic(payment.amount)} / {npr(payment.amountNPR)}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Match unpaid bills">
-              <select
-                multiple
-                value={selectedSupplierBillIds}
-                onChange={(event) =>
-                  setSelectedSupplierBillIds(
-                    Array.from(event.target.selectedOptions).map((option) => option.value),
-                  )
-                }
-              >
-                {supplierBillOptions.map((purchase) => (
-                  <option key={purchase.id} value={purchase.id}>
-                    {purchase.vendorBillNumber} - {supplierMoney(purchase.amountIC, purchase.supplierCurrency)} / {npr(purchase.supplierAmountNPR)}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <ReadOnly label="Selected bills foreign total" value={fmt(selectedSupplierBillAmountIC)} />
-            <ReadOnly label="Selected bills NPR" value={npr(selectedSupplierBillAmountNPR)} />
-            <ReadOnly label="Payment NPR" value={npr(selectedReconciliationPayment?.amountNPR ?? 0)} />
-            <ReadOnly label="Difference" value={npr(reconciliationDifferenceNPR)} />
-            <div className="form-actions">
-              <button type="button" onClick={reconcileSupplierPayment}>
-                Link selected bills
-              </button>
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => {
-                  setReconciliationPaymentId('')
-                  setSelectedSupplierBillIds([])
-                }}
-              >
-                Clear reconciliation
-              </button>
-            </div>
-          </div>
-        </Panel>
-      )}
     </div>
   )
 
@@ -4120,6 +4516,18 @@ function App({
         </select>
         <input placeholder="Bill number" value={summaryFilters.billNumber} onChange={(event) => setSummaryFilters((current) => ({ ...current, billNumber: event.target.value }))} />
         <input placeholder="Pragapanpatra number" value={summaryFilters.debitNoteNumber} onChange={(event) => setSummaryFilters((current) => ({ ...current, debitNoteNumber: event.target.value }))} />
+        <button type="button" className="ghost" onClick={() => setSummaryFilters({ from: '', to: '', vendorPartyId: '', customAgentPartyId: '', billNumber: '', debitNoteNumber: '' })}>
+          Reset filters
+        </button>
+        <button type="button" onClick={exportFilteredPurchaseSummaryCsv}>
+          Export filtered CSV
+        </button>
+      </div>
+      <div className="summary-grid">
+        <Metric label="Filtered rows" value={String(purchaseSummaryTotals.outstandingRows)} />
+        <Metric label="Supplier NPR" value={npr(purchaseSummaryTotals.supplierAmountNPR)} />
+        <Metric label="Input VAT" value={npr(purchaseSummaryTotals.inputVatNPR)} />
+        <Metric label="Landed cost" value={npr(purchaseSummaryTotals.landedCostNPR)} />
       </div>
       <div className="table-wrap">
         <table>
@@ -4136,6 +4544,7 @@ function App({
               <th>Import VAT</th>
               <th>Terminal charge</th>
               <th>Freight NPR</th>
+              <th>Loading & unloading</th>
               <th>Other</th>
               <th>Pragapanpatra total</th>
               <th>Service total</th>
@@ -4158,6 +4567,7 @@ function App({
                 <td>{npr(purchase.importVatNPR)}</td>
                 <td>{npr(purchase.totalTerminalChargeNPR)}</td>
                 <td>{npr(purchase.freightIndiaAmountNPR)}</td>
+                <td>{npr(purchase.loadingUnloadingChargeNPR ?? 0)}</td>
                 <td>{npr(purchase.otherChargesNPR)}</td>
                 <td>{npr(purchase.debitNoteTotalNPR)}</td>
                 <td>{npr(purchase.agentServiceTotalNPR)}</td>
@@ -4166,7 +4576,7 @@ function App({
                 <td>{npr(purchase.landedCostNPR)}</td>
               </tr>
             ))}
-            {!filteredPurchases.length && <EmptyRow columns={17} />}
+            {!filteredPurchases.length && <EmptyRow columns={18} />}
           </tbody>
         </table>
       </div>
@@ -4278,7 +4688,7 @@ function App({
   const renderLandedCost = () => (
     <Panel title="Landed Cost Report">
       <Table
-        headers={['Custom bill date', 'Vendor', 'Bill number', 'Supplier bill NPR', 'Import duty', 'Custom service', 'Terminal without VAT', 'Freight India NPR', 'Other charges', 'Service before VAT', 'Landed cost']}
+        headers={['Custom bill date', 'Vendor', 'Bill number', 'Supplier bill NPR', 'Import duty', 'Custom service', 'Terminal without VAT', 'Freight India NPR', 'Loading & unloading', 'Other charges', 'Service before VAT', 'Landed cost']}
         rows={filteredPurchases.map((purchase) => [
           dateText(importPurchaseSortDate(purchase)),
           partyName(purchase.vendorPartyId),
@@ -4288,6 +4698,7 @@ function App({
           npr(purchase.customServiceNPR),
           npr(purchase.terminalChargeWithoutVatNPR),
           npr(purchase.freightIndiaAmountNPR),
+          npr(purchase.loadingUnloadingChargeNPR ?? 0),
           npr(purchase.otherChargesNPR),
           npr(purchase.agentServiceAmountBeforeVatNPR),
           npr(purchase.landedCostNPR),
@@ -4456,15 +4867,17 @@ function App({
         <header className="page-header">
           <div>
             <p className="company-name-display compact">
-              {data.settings.companyName} {data.settings.fiscalYear ? `- FY ${data.settings.fiscalYear}` : ''}
+              {data.settings.companyName} {activeFiscalYear.code ? `- FY ${activeFiscalYear.code}` : ''}
             </p>
             <h2>{currentView}</h2>
           </div>
           <div className="global-search">
             <input
+              data-global-search="true"
               value={globalSearch}
               onChange={(event) => setGlobalSearch(event.target.value)}
               placeholder="Search party, bill, debit note, payment ref, PAN/VAT"
+              aria-label="Global search"
             />
           </div>
           <button type="button" className="ghost" onClick={logout}>
@@ -4481,6 +4894,25 @@ function App({
           <section className="panel">
             <h3>Loading storage</h3>
             <p>Opening the import purchase database...</p>
+          </section>
+        )}
+
+        <AppContextBar
+          companyName={data.settings.companyName}
+          fiscalYears={fiscalYearOptions}
+          selectedFiscalYearId={activeFiscalYear.id}
+          onFiscalYearChange={(id) => {
+            setSelectedFiscalYearId(id)
+            setPurchaseForm(createEmptyPurchase(data.settings))
+            setPaymentForm(createEmptyPayment())
+            setPaymentBillYear('Current')
+            setLocalExpenseForm(createEmptyLocalExpense())
+            window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
+          }}
+        />
+        {isClosedFiscalYear && (
+          <section className="read-only-banner" role="status">
+            Fiscal year {activeFiscalYear.code} is closed. Reports remain available; entries are view and print only.
           </section>
         )}
 
@@ -4540,33 +4972,47 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 function TextField({
+  errorMessages = [],
   label,
+  name,
   value,
+  warningMessages = [],
   onChange,
 }: {
+  errorMessages?: string[]
   label: string
+  name?: string
   value: string
+  warningMessages?: string[]
   onChange: (value: string) => void
 }) {
   return (
     <Field label={label}>
-      <input value={value} onChange={(event) => onChange(event.target.value)} />
+      <input name={name} value={value} onChange={(event) => onChange(event.target.value)} />
+      <InlineMessages errors={errorMessages} warnings={warningMessages} />
     </Field>
   )
 }
 
 function DateField({
+  errorMessages = [],
   label,
+  name,
   value,
+  warningMessages = [],
   onChange,
 }: {
+  errorMessages?: string[]
   label: string
+  name?: string
   value: string
+  warningMessages?: string[]
   onChange: (value: string) => void
 }) {
   return (
     <Field label={`${label} (YYYY/MM/DD in BS)`}>
       <input
+        name={name}
         type="text"
         value={value}
         placeholder="YYYY/MM/DD in BS"
@@ -4574,46 +5020,62 @@ function DateField({
         onChange={(event) => onChange(event.target.value)}
         onBlur={(event) => onChange(normalizeBsDate(event.target.value))}
       />
+      <InlineMessages errors={errorMessages} warnings={warningMessages} />
     </Field>
   )
 }
 
 function CalendarDateField({
+  errorMessages = [],
   label,
+  name,
   value,
+  warningMessages = [],
   onChange,
 }: {
+  errorMessages?: string[]
   label: string
+  name?: string
   value: string
+  warningMessages?: string[]
   onChange: (value: string) => void
 }) {
   return (
     <Field label={label}>
       <input
+        name={name}
         type="date"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
+      <InlineMessages errors={errorMessages} warnings={warningMessages} />
     </Field>
   )
 }
 
 function NumberField({
+  errorMessages = [],
   label,
+  name,
   value,
   step = '0.01',
   readOnly = false,
+  warningMessages = [],
   onChange,
 }: {
+  errorMessages?: string[]
   label: string
+  name?: string
   value: number
   step?: string
   readOnly?: boolean
+  warningMessages?: string[]
   onChange: (value: number) => void
 }) {
   return (
     <Field label={label}>
       <input
+        name={name}
         type="number"
         min="0"
         step={step}
@@ -4623,7 +5085,35 @@ function NumberField({
         onChange={(event) => onChange(Math.max(0, n(event.target.value)))}
         onWheel={(event) => event.currentTarget.blur()}
       />
+      <InlineMessages errors={errorMessages} warnings={warningMessages} />
     </Field>
+  )
+}
+
+function InlineMessages({
+  errors = [],
+  warnings = [],
+}: {
+  errors?: string[]
+  warnings?: string[]
+}) {
+  if (!errors.length && !warnings.length) {
+    return null
+  }
+
+  return (
+    <span className="field-messages">
+      {errors.map((message) => (
+        <em key={message} className="field-error">
+          {message}
+        </em>
+      ))}
+      {warnings.map((message) => (
+        <em key={message} className="field-warning">
+          {message}
+        </em>
+      ))}
+    </span>
   )
 }
 
