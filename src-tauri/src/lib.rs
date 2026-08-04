@@ -8,12 +8,9 @@ const LOCAL_EXPENSE_TYPE_SCHEMA: &str = include_str!("../migrations/004_local_ex
 const ACTIVITY_LOG_USER_SCHEMA: &str = include_str!("../migrations/005_activity_log_user.sql");
 const NORMALIZE_FREIGHT_STATUS_SCHEMA: &str =
     include_str!("../migrations/006_normalize_freight_status.sql");
-const SUPPLIER_CURRENCY_SCHEMA: &str =
-    include_str!("../migrations/007_supplier_currency.sql");
-const ACCOUNTING_MODEL_SCHEMA: &str =
-    include_str!("../migrations/008_accounting_model.sql");
-const LIFECYCLE_LEDGER_SCHEMA: &str =
-    include_str!("../migrations/009_lifecycle_ledger.sql");
+const SUPPLIER_CURRENCY_SCHEMA: &str = include_str!("../migrations/007_supplier_currency.sql");
+const ACCOUNTING_MODEL_SCHEMA: &str = include_str!("../migrations/008_accounting_model.sql");
+const LIFECYCLE_LEDGER_SCHEMA: &str = include_str!("../migrations/009_lifecycle_ledger.sql");
 const PURCHASE_LOADING_UNLOADING_SCHEMA: &str =
     include_str!("../migrations/010_purchase_loading_unloading.sql");
 const DATABASE_URL: &str = "sqlite:import-purchases.db";

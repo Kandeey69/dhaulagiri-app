@@ -27,6 +27,26 @@ import {
 import { createDataRepository, getEmptyData } from "./purchase/repository";
 import { createFiscalYearFromCode } from "./domain/fiscalYear";
 import PurchaseApp from "./purchase/App";
+import StockApp from "./stock/App";
+import {
+  isInventoryTrackingEnabled,
+  isInventoryTrackingEnabledForCompany,
+  writeInventoryTrackingSetting,
+  writeInventoryTrackingSettingForCompany,
+} from "./stock/settings";
+import { buildSourceDocs, validStockBillsForSourceDocs } from "./stock/services/stockCalculations";
+import { carryForwardStockOpenings } from "./stock/services/stockCarryForward";
+import {
+  buildStockRegisterRows as buildStockRegisterExportRows,
+  buildStockRows as buildStockExportRows,
+} from "./stock/services/stockLedger";
+import {
+  getStockBackupDataForCompany,
+  replaceStockBackupDataForCompany,
+  upsertStockOpeningItemsForCompany,
+  type StockBackupData,
+} from "./stock/storage";
+import type { StockDocumentReference, StockEntryTarget } from "./stock/types";
 import {
   createCompanyYearId,
   getActiveCompanyId,
@@ -38,10 +58,11 @@ import {
   upsertCompanyProfile,
   type CompanyProfile,
 } from "./companyContext";
+import { scrollToPageTop } from "./scroll";
 import "./App.css";
 
 type UserRole = "account" | "master";
-type ModuleKey = "accounts" | "purchase" | "settings" | "maskebari" | "yearEnd";
+type ModuleKey = "accounts" | "purchase" | "stock" | "settings" | "maskebari" | "yearEnd";
 
 const MASTER_PASSWORD = "KANCHAN";
 const YEAR_END_PASSWORD = "DAHAL";
@@ -204,12 +225,14 @@ function purchaseClosingParties(data: AppData) {
 
 async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany: CompanyProfile) {
   const previousActiveCompanyId = getActiveCompanyId();
+  const sourceFiscalYear = createFiscalYearFromCode(sourceCompany.id, sourceCompany.fiscalYear);
 
   try {
     setActiveCompanyId(sourceCompany.id);
-    const [accountParties, accountOutstandingRows, sourcePurchaseRepository] = await Promise.all([
+    const [accountParties, accountOutstandingRows, sourceSales, sourcePurchaseRepository] = await Promise.all([
       getParties(),
       getAccountOutstanding(),
+      getSales(),
       createDataRepository(),
     ]);
     const sourcePurchaseData = await sourcePurchaseRepository.loadData();
@@ -223,57 +246,127 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
     const carriedPurchaseParties = purchaseClosingParties(sourcePurchaseData);
 
     setActiveCompanyId(targetCompany.id);
-    await upsertPartiesForCarryForward(carriedAccountParties);
-
+    const targetAccountsBefore = await getAccountsBackupData();
     const targetPurchaseRepository = await createDataRepository();
     const targetPurchaseData = await targetPurchaseRepository.loadData();
-    const targetPartyMap = new Map(targetPurchaseData.parties.map((party) => [party.id, party]));
-    const nextParties = [...targetPurchaseData.parties];
-
-    carriedPurchaseParties.forEach((party) => {
-      const existing = targetPartyMap.get(party.id);
-      const nextParty = {
-        ...(existing ?? party),
-        ...party,
-        openingPayable: party.openingPayable,
-        updatedAt: new Date().toISOString(),
-      };
-
-      if (existing) {
-        nextParties[nextParties.findIndex((item) => item.id === party.id)] = nextParty;
-      } else {
-        nextParties.unshift(nextParty);
-      }
-    });
-
-    const targetSettings = {
-      ...targetPurchaseData.settings,
-      companyName: targetCompany.name,
-      fiscalYear: targetCompany.fiscalYear,
+    const targetPurchaseBefore: AppData = JSON.parse(JSON.stringify(targetPurchaseData)) as AppData;
+    let inventory = {
+      conflicts: [] as string[],
+      created: 0,
+      eligibleItemCount: 0,
+      skippedInactiveZero: 0,
+      skippedInvalid: 0,
+      skippedNegative: 0,
+      status: "skipped" as "completed" | "skipped",
+      totalClosingQty: 0,
+      totalClosingValue: 0,
+      updated: 0,
+      warnings: ["Track inventory is disabled for the source company."],
     };
-    writeSuiteSettings(targetSettings);
-    await targetPurchaseRepository.saveData({
-      ...targetPurchaseData,
-      settings: targetSettings,
-      parties: nextParties,
-      activityLogs: [
-        {
-          id: crypto.randomUUID(),
-          action: "Opening Balances Refreshed",
-          details: `Refreshed opening balances from ${sourceCompany.fiscalYear || sourceCompany.name}.`,
-          userName: "Master",
-          oldValue: sourceCompany.id,
-          newValue: targetCompany.id,
-          createdAt: new Date().toISOString(),
-        },
-        ...targetPurchaseData.activityLogs,
-      ],
-    });
+
+    try {
+      await upsertPartiesForCarryForward(carriedAccountParties);
+
+      const targetPartyMap = new Map(targetPurchaseData.parties.map((party) => [party.id, party]));
+      const nextParties = [...targetPurchaseData.parties];
+
+      carriedPurchaseParties.forEach((party) => {
+        const existing = targetPartyMap.get(party.id);
+        const nextParty = {
+          ...(existing ?? party),
+          ...party,
+          openingPayable: party.openingPayable,
+          updatedAt: new Date().toISOString(),
+        };
+
+        if (existing) {
+          nextParties[nextParties.findIndex((item) => item.id === party.id)] = nextParty;
+        } else {
+          nextParties.unshift(nextParty);
+        }
+      });
+
+      const targetSettings = {
+        ...targetPurchaseData.settings,
+        companyName: targetCompany.name,
+        fiscalYear: targetCompany.fiscalYear,
+      };
+      writeSuiteSettings(targetSettings);
+      await targetPurchaseRepository.saveData({
+        ...targetPurchaseData,
+        settings: targetSettings,
+        parties: nextParties,
+        activityLogs: [
+          {
+            id: crypto.randomUUID(),
+            action: "Opening Balances Refreshed",
+            details: `Refreshed opening balances from ${sourceCompany.fiscalYear || sourceCompany.name}.`,
+            userName: "Master",
+            oldValue: sourceCompany.id,
+            newValue: targetCompany.id,
+            createdAt: new Date().toISOString(),
+          },
+          ...targetPurchaseData.activityLogs,
+        ],
+      });
+
+      if (isInventoryTrackingEnabledForCompany(sourceCompany.id)) {
+        const sourceDocs: StockDocumentReference[] = buildSourceDocs({
+          accountParties,
+          companyId: sourceCompany.id,
+          fiscalYearId: sourceFiscalYear.id,
+          localExpenses: sourcePurchaseData.localExpenses,
+          purchaseParties: sourcePurchaseData.parties,
+          purchases: sourcePurchaseData.purchases,
+          sales: sourceSales,
+        });
+        const [sourceStock, targetStock] = await Promise.all([
+          getStockBackupDataForCompany(sourceCompany.id),
+          getStockBackupDataForCompany(targetCompany.id),
+        ]);
+
+        inventory = await carryForwardStockOpenings({
+          asOnDate: sourceFiscalYear.endBs,
+          sourceDocs,
+          sourceFiscalYearId: sourceFiscalYear.id,
+          sourceStock,
+          targetStock,
+          writeOpenings: (items) => upsertStockOpeningItemsForCompany(targetCompany.id, items),
+        });
+        writeInventoryTrackingSettingForCompany(targetCompany.id, true);
+      }
+    } catch (error) {
+      setActiveCompanyId(targetCompany.id);
+      await restoreAccountsBackupData(targetAccountsBefore).catch((restoreError) => {
+        console.error("Account opening rollback failed:", restoreError);
+      });
+      await targetPurchaseRepository.saveData(targetPurchaseBefore).catch((restoreError) => {
+        console.error("Purchase opening rollback failed:", restoreError);
+      });
+      writeSuiteSettings(targetPurchaseBefore.settings);
+      throw new Error(
+        `Carry-forward failed before the target company was refreshed. ` +
+        `${error instanceof Error ? error.message : String(error || "Unknown carry-forward error.")}`,
+        { cause: error },
+      );
+    }
 
     return {
       accountParties: carriedAccountParties.length,
+      inventory,
       purchaseParties: carriedPurchaseParties.length,
     };
+  } finally {
+    setActiveCompanyId(previousActiveCompanyId);
+  }
+}
+
+async function withActiveCompany<T>(companyId: string, operation: () => Promise<T>) {
+  const previousActiveCompanyId = getActiveCompanyId();
+  setActiveCompanyId(companyId);
+
+  try {
+    return await operation();
   } finally {
     setActiveCompanyId(previousActiveCompanyId);
   }
@@ -285,6 +378,7 @@ type WorkbookSheet = {
 };
 
 async function downloadCompanyWorkbook(company: CompanyProfile) {
+  await withActiveCompany(company.id, async () => {
   const [
     accountParties,
     sales,
@@ -293,6 +387,7 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
     outstandingRows,
     accountActivityLogs,
     purchaseRepository,
+    stockData,
   ] = await Promise.all([
     getParties(),
     getSales(),
@@ -301,11 +396,30 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
     getAccountOutstanding(),
     getAccountActivityLogs(100000),
     createDataRepository(),
+    getStockBackupDataForCompany(company.id),
   ]);
   const purchaseData = await purchaseRepository.loadData();
   const settings = readSuiteSettings(purchaseData.settings);
   const accountPartyName = new Map(accountParties.map((party) => [party.id, party.name]));
   const purchasePartyName = new Map(purchaseData.parties.map((party) => [party.id, party.name]));
+  const fiscalYear = createFiscalYearFromCode(company.id, company.fiscalYear);
+  const stockSourceDocs = buildSourceDocs({
+    accountParties,
+    companyId: company.id,
+    fiscalYearId: fiscalYear.id,
+    localExpenses: purchaseData.localExpenses,
+    purchaseParties: purchaseData.parties,
+    purchases: purchaseData.purchases,
+    sales,
+  });
+  const {
+    purchaseBills: stockPurchaseBills,
+    salesBills: stockSalesBills,
+  } = validStockBillsForSourceDocs(stockSourceDocs, stockData.purchaseBills, stockData.salesBills);
+  const stockRows = buildStockExportRows(stockData.items, stockPurchaseBills, stockSalesBills, fiscalYear.endBs);
+  const stockRegisterRows = buildStockRegisterExportRows(stockData.items, stockPurchaseBills, stockSalesBills)
+    .filter((row) => row.date === "Opening" || row.date <= fiscalYear.endBs);
+  const stockItemById = new Map(stockData.items.map((item) => [item.id, item] as const));
   const sheets: WorkbookSheet[] = [
     {
       name: "Company",
@@ -546,12 +660,142 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
         ]),
       ],
     },
+    {
+      name: "Stock Item Master",
+      rows: [
+        ["Item code", "Item name", "Unit", "Reorder level", "Active status", "Opening quantity", "Opening rate", "Opening value"],
+        ...stockData.items.map((item) => [
+          item.code,
+          item.name,
+          item.unit,
+          item.reorderLevel,
+          item.isActive ? "Active" : "Inactive",
+          item.openingQty,
+          item.openingRate,
+          Number((item.openingQty * item.openingRate).toFixed(2)),
+        ]),
+      ],
+    },
+    {
+      name: "Stock Purchase Lines",
+      rows: [
+        ["Source type", "Source document ID", "Bill number", "Transaction date", "Item code", "Item name", "Quantity", "Entry amount", "Stock valuation amount", "Rate", "Fiscal year", "Company"],
+        ...stockPurchaseBills.flatMap((bill) =>
+          bill.items.map((line) => {
+            const item = stockItemById.get(line.itemId);
+            return [
+              bill.sourceType ?? (bill.source === "Importation" ? "Import Purchase" : "Local Purchase"),
+              bill.id,
+              bill.billNo,
+              bill.dateBs,
+              item?.code ?? "",
+              item?.name ?? "",
+              line.quantity,
+              line.entryAmount ?? line.amount,
+              line.amount,
+              line.rate,
+              company.fiscalYear,
+              company.name,
+            ];
+          }),
+        ),
+      ],
+    },
+    {
+      name: "Stock Sales Lines",
+      rows: [
+        ["Source type", "Source document ID", "Bill number", "Transaction date", "Item code", "Item name", "Quantity", "Rate", "Value", "Fiscal year", "Company"],
+        ...stockSalesBills.flatMap((bill) =>
+          bill.items.map((line) => {
+            const item = stockItemById.get(line.itemId);
+            return [
+              "Sale",
+              bill.id,
+              bill.billNo,
+              bill.dateBs,
+              item?.code ?? "",
+              item?.name ?? "",
+              line.quantity,
+              line.rate,
+              line.amount,
+              company.fiscalYear,
+              company.name,
+            ];
+          }),
+        ),
+      ],
+    },
+    {
+      name: "Stock Summary",
+      rows: [
+        ["Item code", "Item name", "Opening quantity", "Purchase quantity", "Sales quantity", "Closing quantity", "Average rate", "Closing value", "Reorder status"],
+        ...stockRows.map((row) => [
+          row.code,
+          row.name,
+          row.openingQty,
+          row.localPurchaseQty + row.importationQty,
+          row.salesQty,
+          row.closingQty,
+          row.averageRate,
+          row.closingValue,
+          row.closingQty <= row.reorderLevel ? "Below reorder" : "OK",
+        ]),
+      ],
+    },
+    {
+      name: "Stock Register",
+      rows: [
+        ["Date", "Source type", "Source document", "Item code", "Item name", "Quantity in", "Quantity out", "Running quantity", "Rate", "Value"],
+        ...stockRegisterRows.map((row) => [
+          row.date,
+          row.receivedQty ? "Purchase/Opening" : "Sale",
+          row.particulars,
+          row.code,
+          row.itemName,
+          row.receivedQty,
+          row.issuedQty,
+          row.balanceQty,
+          row.receivedQty ? row.receivedRate : row.issuedRate,
+          row.receivedQty ? row.receivedAmount : row.issuedAmount,
+        ]),
+      ],
+    },
+    {
+      name: "Inventory Valuation",
+      rows: [
+        ["Item code", "Item name", "Closing quantity", "Valuation rate", "Closing value"],
+        ...stockRows.map((row) => [
+          row.code,
+          row.name,
+          row.closingQty,
+          row.averageRate,
+          row.closingValue,
+        ]),
+      ],
+    },
+    {
+      name: "Opening Stock",
+      rows: [
+        ["Item code", "Item name", "Unit", "Opening quantity", "Opening rate", "Opening value", "Fiscal year", "Company"],
+        ...stockData.items.map((item) => [
+          item.code,
+          item.name,
+          item.unit,
+          item.openingQty,
+          item.openingRate,
+          Number((item.openingQty * item.openingRate).toFixed(2)),
+          company.fiscalYear,
+          company.name,
+        ]),
+      ],
+    },
   ];
   const filename = `${safePdfFilename(`${company.name}-${company.fiscalYear || "fy"}-complete-data`)}.xls`;
   await saveBlob(filename, new Blob([buildExcelXml(sheets)], { type: "application/vnd.ms-excel;charset=utf-8" }), {
     description: "Excel Workbook",
     mimeType: "application/vnd.ms-excel",
     extensions: [".xls"],
+  });
   });
 }
 
@@ -596,35 +840,46 @@ type PortableCompanyBackup = {
   exportedAt: string;
   kind: "easysolution-company-backup";
   purchase: AppData;
-  version: 1;
+  stock?: {
+    data: StockBackupData;
+    trackInventory: boolean;
+  };
+  version: 1 | 2;
 };
 
 async function downloadPortableCompanyBackup(company: CompanyProfile) {
-  const [accounts, purchaseRepository] = await Promise.all([
-    getAccountsBackupData(),
-    createDataRepository(),
-  ]);
-  const purchase = await purchaseRepository.loadData();
-  const backup: PortableCompanyBackup = {
-    accounts,
-    company,
-    exportedAt: new Date().toISOString(),
-    kind: "easysolution-company-backup",
-    purchase: {
-      ...purchase,
-      settings: {
-        ...purchase.settings,
-        companyName: company.name,
-        fiscalYear: company.fiscalYear,
+  await withActiveCompany(company.id, async () => {
+    const [accounts, purchaseRepository, stockData] = await Promise.all([
+      getAccountsBackupData(),
+      createDataRepository(),
+      getStockBackupDataForCompany(company.id),
+    ]);
+    const purchase = await purchaseRepository.loadData();
+    const backup: PortableCompanyBackup = {
+      accounts,
+      company,
+      exportedAt: new Date().toISOString(),
+      kind: "easysolution-company-backup",
+      purchase: {
+        ...purchase,
+        settings: {
+          ...purchase.settings,
+          companyName: company.name,
+          fiscalYear: company.fiscalYear,
+        },
       },
-    },
-    version: 1,
-  };
-  const filename = `${safePdfFilename(`${company.name}-${company.fiscalYear || "fy"}-backup`)}.easysolution-backup.json`;
-  await saveBlob(filename, new Blob([JSON.stringify(backup, null, 2)], { type: "application/json;charset=utf-8" }), {
-    description: "Easysolution Backup",
-    mimeType: "application/json",
-    extensions: [".json"],
+      stock: {
+        data: stockData,
+        trackInventory: isInventoryTrackingEnabledForCompany(company.id),
+      },
+      version: 2,
+    };
+    const filename = `${safePdfFilename(`${company.name}-${company.fiscalYear || "fy"}-backup`)}.easysolution-backup.json`;
+    await saveBlob(filename, new Blob([JSON.stringify(backup, null, 2)], { type: "application/json;charset=utf-8" }), {
+      description: "Easysolution Backup",
+      mimeType: "application/json",
+      extensions: [".json"],
+    });
   });
 }
 
@@ -642,6 +897,15 @@ async function importPortableCompanyBackup(file: File) {
 
   if (!isPortableCompanyBackup(parsed)) {
     throw new Error("This is not a valid Easysolution company backup file.");
+  }
+
+  const backupVersion = Number(parsed.version || 1);
+  if (!Number.isFinite(backupVersion) || backupVersion < 1 || backupVersion > 2) {
+    throw new Error(`Unsupported Easysolution backup version ${parsed.version}.`);
+  }
+
+  if (backupVersion >= 2 && !parsed.stock) {
+    throw new Error("This backup version requires a stock section, but none was found.");
   }
 
   const sourceCompany = parsed.company;
@@ -742,6 +1006,11 @@ async function importPortableCompanyBackup(file: File) {
   };
   await purchaseRepository.saveData(restoredPurchaseData);
 
+  if (parsed.stock) {
+    await replaceStockBackupDataForCompany(profile.id, parsed.stock.data);
+    writeInventoryTrackingSettingForCompany(profile.id, parsed.stock.trackInventory);
+  }
+
   return profile;
 }
 
@@ -751,6 +1020,8 @@ export default function App() {
   const [isAddingCompany, setIsAddingCompany] = useState(false);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [selectedModule, setSelectedModule] = useState<ModuleKey | null>(null);
+  const [stockEntryTarget, setStockEntryTarget] = useState<StockEntryTarget | null>(null);
+  const [trackInventory, setTrackInventory] = useState(false);
   const [masterPassword, setMasterPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [exportMessage, setExportMessage] = useState("");
@@ -760,6 +1031,23 @@ export default function App() {
   const activeCompany = companies.find((company) => company.id === activeCompanyIdState) ?? null;
   const companyDisplayName = activeCompany?.name || suiteSettings.companyName || "Easysolution";
   const companyFiscalYear = activeCompany?.fiscalYear || suiteSettings.fiscalYear || "";
+  const activeFiscalYear = activeCompany
+    ? createFiscalYearFromCode(activeCompany.id, activeCompany.fiscalYear || suiteSettings.fiscalYear || "")
+    : null;
+
+  useEffect(() => {
+    setStockEntryTarget(null);
+    setTrackInventory(Boolean(activeCompanyIdState) && isInventoryTrackingEnabled());
+  }, [activeCompanyIdState, companyFiscalYear]);
+
+  useEffect(() => {
+    scrollToPageTop();
+  }, [activeCompanyIdState, isAddingCompany, selectedModule, userRole]);
+
+  function navigateToModule(nextModule: ModuleKey | null) {
+    setSelectedModule(nextModule);
+    scrollToPageTop();
+  }
 
   useEffect(() => {
     if (companies.length > 0 || typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
@@ -785,9 +1073,20 @@ export default function App() {
             Boolean(profile?.id && profile?.name),
           );
 
+        let seededActiveCompanyId = getActiveCompanyId();
         seededProfiles.forEach((profile) => {
-          upsertCompanyProfile(profile);
+          const savedProfile = upsertCompanyProfile(profile);
+          if ((profile as Partial<CompanyProfile> & { trackInventory?: unknown }).trackInventory) {
+            writeInventoryTrackingSettingForCompany(savedProfile.id, true);
+          }
+          if (!seededActiveCompanyId) {
+            seededActiveCompanyId = savedProfile.id;
+          }
         });
+        if (seededActiveCompanyId) {
+          setActiveCompanyId(seededActiveCompanyId);
+          setActiveCompanyIdState(seededActiveCompanyId);
+        }
         setCompanies(getCompanyProfiles());
       })
       .catch((error) => {
@@ -806,7 +1105,8 @@ export default function App() {
   function activateCompany(companyId: string) {
     setActiveCompanyId(companyId);
     setActiveCompanyIdState(companyId);
-    setSelectedModule(null);
+    navigateToModule(null);
+    setStockEntryTarget(null);
     setMasterPassword("");
     setLoginError("");
     setIsAddingCompany(false);
@@ -816,7 +1116,8 @@ export default function App() {
     refreshCompanies();
     setActiveCompanyId("");
     setActiveCompanyIdState("");
-    setSelectedModule(null);
+    navigateToModule(null);
+    setStockEntryTarget(null);
     setExportMessage("");
     setIsAddingCompany(false);
   }
@@ -901,7 +1202,7 @@ export default function App() {
 
   function backToModulesAfterWork() {
     const company = activeCompany;
-    setSelectedModule(null);
+    navigateToModule(null);
     void syncLinkedOpeningIfNeeded(company);
   }
 
@@ -911,7 +1212,7 @@ export default function App() {
     void syncLinkedOpeningIfNeeded(company);
   }
 
-  async function createCompany(settings: AppSettings) {
+  async function createCompany(settings: AppSettings, nextTrackInventory = false) {
     const companyId = createCompanyYearId(settings.companyName, settings.fiscalYear);
     const profile = upsertCompanyProfile({
       companyGroupId: companyId,
@@ -922,6 +1223,8 @@ export default function App() {
     setActiveCompanyId(companyId);
     setActiveCompanyIdState(companyId);
     writeSuiteSettings(settings);
+    writeInventoryTrackingSetting(nextTrackInventory);
+    setTrackInventory(nextTrackInventory);
     localStorage.setItem(COMPANY_SETUP_KEY, "yes");
 
     try {
@@ -934,7 +1237,8 @@ export default function App() {
 
     setCompanies(getCompanyProfiles());
     setIsAddingCompany(false);
-    setSelectedModule(null);
+    navigateToModule(null);
+    setStockEntryTarget(null);
     return profile;
   }
 
@@ -945,7 +1249,8 @@ export default function App() {
     setUserRole("account");
     setActiveCompanyId("");
     setActiveCompanyIdState("");
-    setSelectedModule(null);
+    navigateToModule(null);
+    setStockEntryTarget(null);
   }
 
   function loginAsMaster(event: FormEvent<HTMLFormElement>) {
@@ -962,16 +1267,44 @@ export default function App() {
     setUserRole("master");
     setActiveCompanyId("");
     setActiveCompanyIdState("");
-    setSelectedModule(null);
+    navigateToModule(null);
+    setStockEntryTarget(null);
   }
 
   function logout() {
     setUserRole(null);
-    setSelectedModule(null);
+    navigateToModule(null);
     setActiveCompanyId("");
     setActiveCompanyIdState("");
+    setStockEntryTarget(null);
     setMasterPassword("");
     setLoginError("");
+  }
+
+  function openStockLineEntry(target: StockEntryTarget) {
+    if (!activeCompany || !activeFiscalYear || !trackInventory) {
+      return;
+    }
+
+    if (target.companyId && target.companyId !== activeCompany.id) {
+      setExportMessage("Inventory entry belongs to another company and was not opened.");
+      return;
+    }
+
+    if (target.fiscalYearId && target.fiscalYearId !== activeFiscalYear.id) {
+      setExportMessage("Inventory entry belongs to another fiscal year and was not opened.");
+      return;
+    }
+
+    setExportMessage("");
+    setStockEntryTarget({
+      ...target,
+      companyId: activeCompany.id,
+      fiscalYear: target.fiscalYear || activeCompany.fiscalYear,
+      fiscalYearId: activeFiscalYear.id,
+      readOnly: Boolean(target.readOnly || activeCompany.isLocked),
+    });
+    navigateToModule("stock");
   }
 
   if (!userRole) {
@@ -1071,7 +1404,7 @@ export default function App() {
                   <button
                     type="button"
                     className="ghost"
-                    onClick={() => setSelectedModule("settings")}
+                    onClick={() => navigateToModule("settings")}
                   >
                     Settings
                   </button>
@@ -1088,7 +1421,7 @@ export default function App() {
           <button
             type="button"
             className="module-card"
-            onClick={() => setSelectedModule("accounts")}
+            onClick={() => navigateToModule("accounts")}
           >
             <span>Sales & Receivables</span>
             <strong>Sales and Collection Module</strong>
@@ -1101,7 +1434,7 @@ export default function App() {
           <button
             type="button"
             className="module-card"
-            onClick={() => setSelectedModule("purchase")}
+            onClick={() => navigateToModule("purchase")}
           >
             <span>Purchase & Payables</span>
             <strong>Purchase and Payment Module</strong>
@@ -1111,10 +1444,24 @@ export default function App() {
             </small>
           </button>
 
+          {trackInventory && (
+            <button
+              type="button"
+              className="module-card"
+              onClick={() => navigateToModule("stock")}
+            >
+              <span>Inventory</span>
+              <strong>Stock Module</strong>
+              <small>
+                Item master, stock line entry, register, and stock summary for this company fiscal year.
+              </small>
+            </button>
+          )}
+
           <button
             type="button"
             className="module-card"
-            onClick={() => setSelectedModule("maskebari")}
+            onClick={() => navigateToModule("maskebari")}
           >
             <span>VAT Summary</span>
             <strong>Generate Maskebari</strong>
@@ -1158,7 +1505,7 @@ export default function App() {
               <button
                 type="button"
                 className="module-card"
-                onClick={() => setSelectedModule("yearEnd")}
+                onClick={() => navigateToModule("yearEnd")}
               >
                 <span>Fiscal Year</span>
                 <strong>Year End Lock</strong>
@@ -1180,8 +1527,30 @@ export default function App() {
       <AccountsApp
         initialUserRole={userRole}
         isReadOnly={activeCompany.isLocked}
+        onOpenStockLineEntry={openStockLineEntry}
         onBackToModules={backToModulesAfterWork}
         onLogout={logoutAfterWork}
+      />
+    );
+  }
+
+  if (selectedModule === "stock" && trackInventory && activeFiscalYear) {
+    return (
+      <StockApp
+        activeCompanyId={activeCompany.id}
+        activeFiscalYearId={activeFiscalYear.id}
+        companyInfo={{
+          companyId: activeCompany.id,
+          companyName: activeCompany.name,
+          fiscalYear: activeCompany.fiscalYear,
+          fiscalYearId: activeFiscalYear.id,
+        }}
+        initialTarget={stockEntryTarget ?? undefined}
+        initialUserRole={userRole === "master" ? "Master" : "Account"}
+        isReadOnly={activeCompany.isLocked || Boolean(stockEntryTarget?.readOnly)}
+        onBackToModules={backToModulesAfterWork}
+        onLogout={logoutAfterWork}
+        onTargetHandled={() => setStockEntryTarget(null)}
       />
     );
   }
@@ -1189,15 +1558,16 @@ export default function App() {
   if (selectedModule === "settings") {
     return (
       <SuiteSettings
-        onBack={() => setSelectedModule(null)}
+        onBack={() => navigateToModule(null)}
         onCompanySaved={refreshCompanies}
+        onInventorySettingChanged={setTrackInventory}
         onLogout={logout}
       />
     );
   }
 
   if (selectedModule === "maskebari") {
-    return <MaskebariGenerator onBack={() => setSelectedModule(null)} onLogout={logout} />;
+    return <MaskebariGenerator onBack={() => navigateToModule(null)} onLogout={logout} />;
   }
 
   if (selectedModule === "yearEnd" && userRole === "master") {
@@ -1205,7 +1575,7 @@ export default function App() {
       <YearEndManager
         company={activeCompany}
         companies={companies}
-        onBack={() => setSelectedModule(null)}
+        onBack={() => navigateToModule(null)}
         onCompaniesChanged={(nextActiveCompanyId) => {
           refreshCompanies();
           if (nextActiveCompanyId) {
@@ -1221,6 +1591,7 @@ export default function App() {
     <PurchaseApp
       initialUserRole={userRole === "master" ? "Master" : "Account"}
       isReadOnly={activeCompany.isLocked}
+      onOpenStockLineEntry={openStockLineEntry}
       onBackToModules={backToModulesAfterWork}
       onLogout={logoutAfterWork}
     />
@@ -1339,6 +1710,14 @@ function MaskebariGenerator({ onBack, onLogout }: MaskebariGeneratorProps) {
             <button
               type="button"
               onClick={() =>
+                downloadCombinedVatExcel(`maskebari-vat-${selectedMonthLabel}.xls`, selectedMonthLabel, summary)
+              }
+            >
+              Download Excel
+            </button>
+            <button
+              type="button"
+              onClick={() =>
                 downloadCombinedVatPdf(`maskebari-vat-${selectedMonthLabel}.pdf`, selectedMonthLabel, summary)
               }
             >
@@ -1404,7 +1783,7 @@ function MaskebariGenerator({ onBack, onLogout }: MaskebariGeneratorProps) {
           {visibleReport === "input" && (
             <ReportPreview
               title="Input VAT Report"
-              headers={["Date", "Source", "Party", "Reference", "Taxable Value", "VAT Credit"]}
+              headers={["Date", "Source", "Party", "PAN/VAT No.", "Reference", "Taxable Value", "VAT Credit"]}
               rows={summary.inputVatRows}
             />
           )}
@@ -1412,7 +1791,7 @@ function MaskebariGenerator({ onBack, onLogout }: MaskebariGeneratorProps) {
           {visibleReport === "output" && (
             <ReportPreview
               title="Output VAT Report"
-              headers={["Date", "Party", "Bill / CN", "Taxable Sales", "VAT Debit", "Remarks"]}
+              headers={["Date", "Party", "PAN/VAT No.", "Bill / CN", "Taxable Sales", "VAT Debit", "Remarks"]}
               rows={summary.outputVatRows}
             />
           )}
@@ -1483,9 +1862,11 @@ function buildMaskebariSummary({
   sales: Sale[];
 }) {
   const purchaseParties = new Map(
-    (purchaseData?.parties ?? []).map((party) => [party.id, party.name]),
+    (purchaseData?.parties ?? []).map((party) => [party.id, { name: party.name, panVatNo: party.panVatNo }]),
   );
-  const accountPartyMap = new Map(accountParties.map((party) => [party.id, party.name]));
+  const accountPartyMap = new Map(
+    accountParties.map((party) => [party.id, { name: party.name, panNo: party.panNo ?? "" }]),
+  );
   const purchaseVatRate = Math.max(0, Number(purchaseData?.settings.agentServiceVatRate ?? defaultSettings.agentServiceVatRate)) / 100;
   const taxableValueFromVat = (vatAmount: number) =>
     purchaseVatRate > 0 ? vatAmount / purchaseVatRate : 0;
@@ -1504,7 +1885,8 @@ function buildMaskebariSummary({
   const inputVatRows: PdfTableRow[] = [];
   const outputVatRows: PdfTableRow[] = monthSales.map((sale) => [
     sale.dateBs || "-",
-    accountPartyMap.get(sale.partyId) ?? "Unknown party",
+    accountPartyMap.get(sale.partyId)?.name ?? "Unknown party",
+    accountPartyMap.get(sale.partyId)?.panNo ?? "-",
     sale.billNo,
     money(sale.salesAmount),
     money(sale.vatAmount),
@@ -1514,7 +1896,8 @@ function buildMaskebariSummary({
   monthCreditNotes.forEach((creditNote) => {
     outputVatRows.push([
       creditNote.dateBs || "-",
-      accountPartyMap.get(creditNote.partyId) ?? "Unknown party",
+      accountPartyMap.get(creditNote.partyId)?.name ?? "Unknown party",
+      accountPartyMap.get(creditNote.partyId)?.panNo ?? "-",
       creditNote.creditNoteNo,
       money(-creditNote.amount),
       money(-creditNote.vatAmount),
@@ -1533,7 +1916,8 @@ function buildMaskebariSummary({
         inputVatRows.push([
           pragapanpatraDate || "-",
           "Terminal VAT",
-          purchaseParties.get(purchase.customAgentPartyId) ?? "-",
+          purchaseParties.get(purchase.customAgentPartyId)?.name ?? "-",
+          purchaseParties.get(purchase.customAgentPartyId)?.panVatNo ?? "-",
           purchase.debitNoteNumber || purchase.vendorBillNumber,
           money(purchase.terminalChargeWithoutVatNPR),
           money(terminalVat),
@@ -1547,7 +1931,8 @@ function buildMaskebariSummary({
         inputVatRows.push([
           pragapanpatraDate || "-",
           "Import VAT",
-          purchaseParties.get(purchase.vendorPartyId) ?? "-",
+          purchaseParties.get(purchase.vendorPartyId)?.name ?? "-",
+          purchaseParties.get(purchase.vendorPartyId)?.panVatNo ?? "-",
           purchase.debitNoteNumber || purchase.vendorBillNumber,
           money(importTaxableValue),
           money(purchase.importVatNPR),
@@ -1561,7 +1946,8 @@ function buildMaskebariSummary({
       inputVatRows.push([
         purchase.agentServiceBillDate || "-",
         "Custom agent service VAT",
-        purchaseParties.get(purchase.customAgentPartyId) ?? "-",
+        purchaseParties.get(purchase.customAgentPartyId)?.name ?? "-",
+        purchaseParties.get(purchase.customAgentPartyId)?.panVatNo ?? "-",
         purchase.agentServiceBillNumber || purchase.debitNoteNumber || "-",
         money(purchase.agentServiceAmountBeforeVatNPR),
         money(purchase.agentServiceVatNPR),
@@ -1579,7 +1965,8 @@ function buildMaskebariSummary({
     inputVatRows.push([
       localExpense.billDate || "-",
       "Local supplier VAT",
-      purchaseParties.get(localExpense.partyId) ?? "-",
+      purchaseParties.get(localExpense.partyId)?.name ?? "-",
+      purchaseParties.get(localExpense.partyId)?.panVatNo ?? "-",
       localExpense.billNumber,
       money(localExpense.amountBeforeVatNPR),
       money(localExpense.vatNPR),
@@ -1607,8 +1994,8 @@ function buildMaskebariSummary({
     ["Net payable / receivable", "-", "-", money(netPayableReceivable)],
   ];
 
-  outputVatRows.push(["Total", "-", "-", money(taxableSales), money(salesVatDebit), "-"]);
-  inputVatRows.push(["Total", "-", "-", "-", money(taxablePurchase + taxableImport), money(totalCredit)]);
+  outputVatRows.push(["Total", "-", "-", "-", money(taxableSales), money(salesVatDebit), "-"]);
+  inputVatRows.push(["Total", "-", "-", "-", "-", money(taxablePurchase + taxableImport), money(totalCredit)]);
 
   return {
     importVatCredit,
@@ -1658,12 +2045,12 @@ async function downloadCombinedVatPdf(
         },
         {
           title: `Output VAT Report - ${monthLabel}`,
-          headers: ["Date", "Party", "Bill / CN", "Taxable Sales", "VAT Debit", "Remarks"],
+          headers: ["Date", "Party", "PAN/VAT No.", "Bill / CN", "Taxable Sales", "VAT Debit", "Remarks"],
           rows: summary.outputVatRows,
         },
         {
           title: `Input VAT Report - ${monthLabel}`,
-          headers: ["Date", "Source", "Party", "Reference", "Taxable Value", "VAT Credit"],
+          headers: ["Date", "Source", "Party", "PAN/VAT No.", "Reference", "Taxable Value", "VAT Credit"],
           rows: summary.inputVatRows,
         },
       ]),
@@ -1674,6 +2061,45 @@ async function downloadCombinedVatPdf(
     description: "PDF Document",
     mimeType: "application/pdf",
     extensions: [".pdf"],
+  });
+}
+
+async function downloadCombinedVatExcel(
+  filename: string,
+  monthLabel: string,
+  summary: ReturnType<typeof buildMaskebariSummary>,
+) {
+  const sheets: WorkbookSheet[] = [
+    {
+      name: "Maskebari",
+      rows: [
+        [`Maskebari Summary - ${monthLabel}`, "", "", ""],
+        ["Particulars", "Turnover / Purchase", "Input VAT Credit", "Output VAT Debit"],
+        ...summary.maskebariRows,
+      ],
+    },
+    {
+      name: "Output VAT",
+      rows: [
+        [`Output VAT Report - ${monthLabel}`, "", "", "", "", "", ""],
+        ["Date", "Party", "PAN/VAT No.", "Bill / CN", "Taxable Sales", "VAT Debit", "Remarks"],
+        ...summary.outputVatRows,
+      ],
+    },
+    {
+      name: "Input VAT",
+      rows: [
+        [`Input VAT Report - ${monthLabel}`, "", "", "", "", "", ""],
+        ["Date", "Source", "Party", "PAN/VAT No.", "Reference", "Taxable Value", "VAT Credit"],
+        ...summary.inputVatRows,
+      ],
+    },
+  ];
+
+  await saveBlob(safePdfFilename(filename), new Blob([buildExcelXml(sheets)], { type: "application/vnd.ms-excel;charset=utf-8" }), {
+    description: "Excel Workbook",
+    mimeType: "application/vnd.ms-excel",
+    extensions: [".xls"],
   });
 }
 
@@ -1818,13 +2244,14 @@ function safePdfFilename(value: string) {
 type SuiteSettingsProps = {
   onBack: () => void;
   onCompanySaved: () => void;
+  onInventorySettingChanged: (enabled: boolean) => void;
   onLogout: () => void;
 };
 
 type CompanySetupProps = {
   existingCompanyNames: string[];
   onBack?: () => void;
-  onComplete: (settings: AppSettings) => Promise<CompanyProfile>;
+  onComplete: (settings: AppSettings, trackInventory: boolean) => Promise<CompanyProfile>;
 };
 
 type CompanySelectorProps = {
@@ -1996,7 +2423,17 @@ function YearEndManager({
         writeSuiteSettings(targetSettings);
         setActiveCompanyId(previousActiveCompanyId);
 
-        await carryForwardOpenings(company, nextCompany);
+        const carryForwardResult = await carryForwardOpenings(company, nextCompany);
+        const inventoryMessage = carryForwardResult.inventory.status === "completed"
+          ? ` Inventory: ${carryForwardResult.inventory.eligibleItemCount} item(s), ` +
+            `${carryForwardResult.inventory.created} created, ${carryForwardResult.inventory.updated} updated, ` +
+            `closing qty ${carryForwardResult.inventory.totalClosingQty.toLocaleString("en-IN")}, ` +
+            `value NPR ${carryForwardResult.inventory.totalClosingValue.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+          : ` Inventory: skipped (${carryForwardResult.inventory.warnings.join("; ")}).`;
+        setMessage(
+          `Opening balances refreshed. Receivables: ${carryForwardResult.accountParties} parties. ` +
+          `Payables: ${carryForwardResult.purchaseParties} parties.${inventoryMessage}`,
+        );
       }
 
       upsertCompanyProfile({
@@ -2017,11 +2454,9 @@ function YearEndManager({
 
       setLockPassword("");
       onCompaniesChanged(nextCompany?.id);
-      setMessage(
-        nextCompany
-          ? `Fiscal year locked. Opening balances were carried to ${nextCompany.fiscalYear}.`
-          : "Fiscal year locked in view-only mode.",
-      );
+      if (!carryForward || !nextCompany) {
+        setMessage("Fiscal year locked in view-only mode.");
+      }
     } catch (error) {
       console.error("Year-end lock error:", error);
       setMessage(error instanceof Error ? error.message : String(error || "Could not complete year end."));
@@ -2093,7 +2528,7 @@ function YearEndManager({
               checked={carryForward}
               onChange={(event) => setCarryForward(event.target.checked)}
             />
-            Carry sales receivable and purchase payable closing figures as next year opening figures
+            Carry sales receivable, purchase payable, and inventory closing figures as next year opening figures
           </label>
           <label>
             Additional Password
@@ -2150,6 +2585,7 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
     ...defaultSettings,
     companyName: "",
   }));
+  const [trackInventory, setTrackInventory] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -2212,7 +2648,7 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
     };
 
     try {
-      await onComplete(nextSettings);
+      await onComplete(nextSettings, trackInventory);
     } catch (error) {
       console.error("Initial company setup save error:", error);
       setMessage("Company was created locally, but storage could not be initialized. Reopen the app and try again.");
@@ -2317,6 +2753,15 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
               onChange={(event) => updateNumberField("agentServiceVatRate", event.target.value)}
             />
           </label>
+
+          <label className="suite-settings-wide checkbox-row">
+            <input
+              type="checkbox"
+              checked={trackInventory}
+              onChange={(event) => setTrackInventory(event.target.checked)}
+            />
+            Track inventory for this company
+          </label>
         </section>
 
         <div className="suite-settings-actions">
@@ -2329,8 +2774,9 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
   );
 }
 
-function SuiteSettings({ onBack, onCompanySaved, onLogout }: SuiteSettingsProps) {
+function SuiteSettings({ onBack, onCompanySaved, onInventorySettingChanged, onLogout }: SuiteSettingsProps) {
   const [settingsForm, setSettingsForm] = useState<AppSettings>(() => readSuiteSettings());
+  const [trackInventory, setTrackInventory] = useState(() => isInventoryTrackingEnabled());
   const [purchaseData, setPurchaseData] = useState<AppData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -2353,6 +2799,7 @@ function SuiteSettings({ onBack, onCompanySaved, onLogout }: SuiteSettingsProps)
 
         setPurchaseData(data);
         setSettingsForm(readSuiteSettings(data.settings));
+        setTrackInventory(isInventoryTrackingEnabled());
       } catch (error) {
         console.error("Settings load error:", error);
         if (active) {
@@ -2417,6 +2864,8 @@ function SuiteSettings({ onBack, onCompanySaved, onLogout }: SuiteSettingsProps)
     };
 
     writeSuiteSettings(nextSettings);
+    writeInventoryTrackingSetting(trackInventory);
+    onInventorySettingChanged(trackInventory);
 
     try {
       const repository = await createDataRepository();
@@ -2533,6 +2982,15 @@ function SuiteSettings({ onBack, onCompanySaved, onLogout }: SuiteSettingsProps)
               value={settingsForm.agentServiceVatRate}
               onChange={(event) => updateNumberField("agentServiceVatRate", event.target.value)}
             />
+          </label>
+
+          <label className="suite-settings-wide checkbox-row">
+            <input
+              type="checkbox"
+              checked={trackInventory}
+              onChange={(event) => setTrackInventory(event.target.checked)}
+            />
+            Track inventory for this company
           </label>
         </section>
 

@@ -18,7 +18,7 @@ export type PaymentType =
 export type PaymentMethod = 'Nabil Bank' | 'Kamana Sewa Bank' | 'Everest Bank'
 export type SupplierCurrency = 'INR' | 'USD'
 export type Currency = 'NPR' | 'INR' | 'USD' | 'INR/IC'
-export type LocalExpenseType = 'Fixed Asset' | 'Expense'
+export type LocalExpenseType = 'Fixed Asset' | 'Expense' | 'Stock'
 export type TransactionLifecycleStatus = import('../domain/lifecycle').TransactionLifecycleStatus
 
 export type Party = {
@@ -214,7 +214,7 @@ export const paymentMethods: PaymentMethod[] = ['Nabil Bank', 'Kamana Sewa Bank'
 export const supplierCurrencies: SupplierCurrency[] = ['INR', 'USD']
 
 export const currencies: Currency[] = ['NPR', 'INR/IC']
-export const localExpenseTypes: LocalExpenseType[] = ['Fixed Asset', 'Expense']
+export const localExpenseTypes: LocalExpenseType[] = ['Stock', 'Fixed Asset', 'Expense']
 
 export function normalizePartyCategory(value: unknown): PartyCategory {
   const category = String(value ?? '').trim()

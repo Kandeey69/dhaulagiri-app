@@ -42,7 +42,7 @@
   },
   "plugins": {
     "sql": {
-      "preload": ["sqlite:import-purchases.db", "sqlite:accounts.db"]
+      "preload": ["sqlite:import-purchases.db", "sqlite:accounts.db", "sqlite:inventorytracked-stock.db"]
     }
   }
 }

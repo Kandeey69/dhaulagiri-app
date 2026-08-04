@@ -46,7 +46,12 @@ export function activeFiscalYear(data: Pick<AppData, 'fiscalYears' | 'settings'>
 }
 
 const fiscalYearForDate = (date: string, data: Pick<AppData, 'fiscalYears' | 'settings'>) =>
-  findFiscalYearByBsDate(date, data.fiscalYears) ?? activeFiscalYear(data)
+  (date ? findFiscalYearByBsDate(date, data.fiscalYears) : undefined) ?? activeFiscalYear(data)
+
+const importPurchaseFiscalYearId = (
+  purchase: Pick<ImportPurchase, 'debitNoteDate' | 'agentServiceBillDate'>,
+  data: Pick<AppData, 'fiscalYears' | 'settings'>,
+) => fiscalYearForDate(purchase.debitNoteDate || purchase.agentServiceBillDate, data).id
 
 export function normalizeAppData(data: AppData): AppData {
   const fiscalYear = activeFiscalYear(data)
@@ -59,7 +64,7 @@ export function normalizeAppData(data: AppData): AppData {
     fiscalYears,
     purchases: data.purchases.map((purchase) => ({
       ...purchase,
-      fiscalYearId: purchase.fiscalYearId || fiscalYearForDate(purchase.billDate, { ...data, fiscalYears }).id,
+      fiscalYearId: purchase.fiscalYearId || importPurchaseFiscalYearId(purchase, { ...data, fiscalYears }),
       lifecycleStatus: purchase.lifecycleStatus ?? 'POSTED',
       supplierCurrency: normalizeSupplierCurrency(purchase.supplierCurrency),
       freightIndiaStatus: normalizeFreightIndiaStatus(purchase.freightIndiaStatus),

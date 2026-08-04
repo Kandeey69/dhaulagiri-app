@@ -8,6 +8,7 @@ import {
   getSales,
 } from "../data/storage";
 import { companyStorageKey } from "../../companyContext";
+import { scrollToPageTop } from "../../scroll";
 
 type DashboardTarget = "sales" | "collections" | "creditNotes" | "reports";
 
@@ -165,9 +166,7 @@ export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNa
             localStorage.setItem(companyStorageKey("accounts-report-view"), "Output VAT");
             localStorage.setItem(companyStorageKey("accounts-output-vat-month"), String(Number(row.month)));
             onNavigate("reports");
-            window.requestAnimationFrame(() => {
-              window.scrollTo({ top: 0, behavior: "smooth" });
-            });
+            scrollToPageTop("smooth");
           }}
         />
       </div>
@@ -182,9 +181,7 @@ export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNa
             localStorage.setItem(companyStorageKey("accounts-report-view"), "Party Ledger");
             localStorage.setItem(companyStorageKey("accounts-report-party-id"), slice.id);
             onNavigate("reports");
-            window.requestAnimationFrame(() => {
-              window.scrollTo({ top: 0, behavior: "smooth" });
-            });
+            scrollToPageTop("smooth");
           }}
         />
       </div>

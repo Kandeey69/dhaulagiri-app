@@ -9,6 +9,7 @@ import {
   updateCollection,
 } from "../data/storage";
 import { companyStorageKey } from "../../companyContext";
+import { scrollToPageTop } from "../../scroll";
 
 const bankSuggestions = [
   "Cash",
@@ -46,6 +47,9 @@ type CollectionsProps = {
   canEdit?: boolean;
 };
 
+type CollectionSortKey = "dateBs" | "party" | "bankName" | "receiptNo" | "amount" | "remarks";
+type SortDirection = "asc" | "desc";
+
 export default function Collections({ canManage, canEdit = canManage }: CollectionsProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
@@ -58,6 +62,10 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
   const [remarks, setRemarks] = useState("");
   const [message, setMessage] = useState("");
   const [registerSearch, setRegisterSearch] = useState("");
+  const [collectionSort, setCollectionSort] = useState<{ key: CollectionSortKey | null; direction: SortDirection }>({
+    key: null,
+    direction: "asc",
+  });
   const [receiptToCancel, setReceiptToCancel] = useState("");
   const [cancelledReceiptNumbersText, setCancelledReceiptNumbersText] = useState(() =>
     localStorage.getItem(companyStorageKey("accounts-cancelled-receipt-numbers")) ?? ""
@@ -85,6 +93,31 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
     const party = parties.find((item) => item.id === collection.partyId);
     return (party?.name ?? "").toLowerCase().includes(registerSearchText);
   });
+  const sortedCollections = collectionSort.key
+    ? [...filteredCollections].sort((left, right) => compareCollections(left, right, collectionSort.key as CollectionSortKey, collectionSort.direction, parties))
+    : filteredCollections;
+
+  function toggleCollectionSort(key: CollectionSortKey) {
+    setCollectionSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  }
+
+  function renderSortableHeader(key: CollectionSortKey, label: string) {
+    const isActive = collectionSort.key === key;
+    return (
+      <th aria-sort={isActive ? (collectionSort.direction === "asc" ? "ascending" : "descending") : "none"}>
+        <button type="button" className="sortable-table-header" onClick={() => toggleCollectionSort(key)}>
+          {label}
+          <span aria-hidden="true">{isActive ? (collectionSort.direction === "asc" ? " ↑" : " ↓") : " ↕"}</span>
+          <span className="sr-only">
+            {isActive ? ` sorted ${collectionSort.direction === "asc" ? "ascending" : "descending"}` : " sort column"}
+          </span>
+        </button>
+      </th>
+    );
+  }
 
   async function loadData() {
     const [loadedParties, loadedCollections] = await Promise.all([
@@ -141,7 +174,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
     setAmount(String(collection.amount));
     setReceiptNo(collection.receiptNo ?? "");
     setRemarks(collection.remarks ?? "");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollToPageTop("smooth");
   }
 
   async function handleSave(event?: FormEvent<HTMLFormElement>) {
@@ -398,18 +431,18 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
           <table>
             <thead>
               <tr>
-                <th>Date BS</th>
-                <th>Party</th>
-                <th>Bank / Cash</th>
-                <th>Receipt No.</th>
-                <th>Amount</th>
-                <th>Remarks</th>
+                {renderSortableHeader("dateBs", "Date BS")}
+                {renderSortableHeader("party", "Party")}
+                {renderSortableHeader("bankName", "Bank / Cash")}
+                {renderSortableHeader("receiptNo", "Receipt No.")}
+                {renderSortableHeader("amount", "Amount")}
+                {renderSortableHeader("remarks", "Remarks")}
                 {(canEdit || canManage) && <th>Actions</th>}
               </tr>
             </thead>
 
             <tbody>
-              {filteredCollections.map((collection) => {
+              {sortedCollections.map((collection) => {
                 const party = parties.find((item) => item.id === collection.partyId);
 
                 return (
@@ -447,7 +480,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
                   </tr>
                 );
               })}
-              {filteredCollections.length === 0 && (
+              {sortedCollections.length === 0 && (
                 <tr>
                   <td className="empty" colSpan={canEdit || canManage ? 7 : 6}>
                     {collections.length === 0
@@ -504,6 +537,31 @@ function parseNumberList(value: string) {
         .filter((item) => Number.isInteger(item) && item > 0)
     )
   ).sort((a, b) => a - b);
+}
+
+function compareCollections(
+  left: Collection,
+  right: Collection,
+  key: CollectionSortKey,
+  direction: SortDirection,
+  parties: Party[],
+) {
+  const directionMultiplier = direction === "asc" ? 1 : -1;
+  const partyName = (collection: Collection) => parties.find((party) => party.id === collection.partyId)?.name ?? "";
+
+  if (key === "amount" || key === "receiptNo") {
+    const leftValue = key === "amount" ? left.amount : Number(left.receiptNo || 0);
+    const rightValue = key === "amount" ? right.amount : Number(right.receiptNo || 0);
+    const compare = leftValue - rightValue;
+    if (compare !== 0) return compare * directionMultiplier;
+  } else {
+    const leftValue = key === "party" ? partyName(left) : String(left[key] ?? "");
+    const rightValue = key === "party" ? partyName(right) : String(right[key] ?? "");
+    const compare = leftValue.localeCompare(rightValue);
+    if (compare !== 0) return compare * directionMultiplier;
+  }
+
+  return Number(left.receiptNo || 0) - Number(right.receiptNo || 0) || left.createdAt.localeCompare(right.createdAt);
 }
 
 function formatMoney(value: number) {

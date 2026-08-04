@@ -12,6 +12,8 @@ import ActivityLogs from "./pages/ActivityLogs";
 import { MASTER_PASSWORD, type UserRole } from "./auth";
 import { getOutstanding } from "./data/storage";
 import { getActiveCompanyProfile, getCompanySetting } from "../companyContext";
+import { scrollToPageTop } from "../scroll";
+import type { StockEntryTarget } from "../stock/types";
 import "./App.css";
 
 type Page =
@@ -95,6 +97,7 @@ const moveEnterToNextField = (event: KeyboardEvent<HTMLElement>) => {
 type AccountsAppProps = {
   initialUserRole?: UserRole;
   isReadOnly?: boolean;
+  onOpenStockLineEntry?: (target: StockEntryTarget) => void;
   onBackToModules?: () => void;
   onLogout?: () => void;
 };
@@ -102,6 +105,7 @@ type AccountsAppProps = {
 export default function App({
   initialUserRole,
   isReadOnly = false,
+  onOpenStockLineEntry,
   onBackToModules,
   onLogout,
 }: AccountsAppProps = {}) {
@@ -151,6 +155,15 @@ export default function App({
       });
   }, [page, userRole]);
 
+  useEffect(() => {
+    scrollToPageTop();
+  }, [currentPage]);
+
+  function navigateToPage(nextPage: Page) {
+    setPage(nextPage);
+    scrollToPageTop();
+  }
+
   function updateUserRole(role: UserRole) {
     setUserRole(role);
   }
@@ -159,7 +172,7 @@ export default function App({
     setLoginMessage("");
     setLoginPassword("");
     setUserRole("account");
-    setPage("dashboard");
+    navigateToPage("dashboard");
   }
 
   function loginAsMaster() {
@@ -172,7 +185,7 @@ export default function App({
 
     setLoginPassword("");
     setUserRole("master");
-    setPage("dashboard");
+    navigateToPage("dashboard");
   }
 
   function logout() {
@@ -184,7 +197,7 @@ export default function App({
     setUserRole(null);
     setLoginPassword("");
     setLoginMessage("");
-    setPage("dashboard");
+    navigateToPage("dashboard");
   }
 
   const renderPage = (activeRole: UserRole) => {
@@ -195,12 +208,21 @@ export default function App({
         <Dashboard
           isReadOnly={isReadOnly}
           lockedMessage={`${companyName} ${fiscalYear ? `FY ${fiscalYear}` : ""} is closed. Entries cannot be added in a closed fiscal year.`}
-          onNavigate={(target) => setPage(target)}
+          onNavigate={navigateToPage}
         />
       );
     }
     if (currentPage === "parties") return <Parties canManage={canManage} />;
-    if (currentPage === "sales") return <Sales canManage={canManage} canEdit={!isReadOnly} />;
+    if (currentPage === "sales") {
+      return (
+        <Sales
+          canManage={canManage}
+          canEdit={!isReadOnly}
+          isReadOnly={isReadOnly}
+          onOpenStockLineEntry={onOpenStockLineEntry}
+        />
+      );
+    }
     if (currentPage === "collections") return <Collections canManage={canManage} canEdit={!isReadOnly} />;
     if (currentPage === "creditNotes") return <CreditNotes canManage={canManage} />;
     if (currentPage === "imports") return <Imports canManage={canManage} />;
@@ -282,7 +304,7 @@ export default function App({
               key={item}
               type="button"
               className={currentPage === item ? "active" : ""}
-              onClick={() => setPage(item)}
+              onClick={() => navigateToPage(item)}
             >
               {pageLabels[item]}
             </button>

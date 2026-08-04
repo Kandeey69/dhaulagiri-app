@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import type { Party } from "../data/types";
 import { deleteParty, getParties, saveParty, updateParty } from "../data/storage";
+import { scrollToPageTop } from "../../scroll";
 
 type PartiesProps = {
   canManage: boolean;
 };
+
+type PartySortKey = "name" | "phone" | "panNo" | "openingBalance" | "address";
+type SortDirection = "asc" | "desc";
 
 export default function Parties({ canManage }: PartiesProps) {
   const [parties, setParties] = useState<Party[]>([]);
@@ -16,6 +20,10 @@ export default function Parties({ canManage }: PartiesProps) {
   const [openingBalance, setOpeningBalance] = useState("0");
   const [search, setSearch] = useState("");
   const [message, setMessage] = useState("");
+  const [partySort, setPartySort] = useState<{ key: PartySortKey | null; direction: SortDirection }>({
+    key: null,
+    direction: "asc",
+  });
 
   async function loadParties() {
     setParties(await getParties());
@@ -47,7 +55,7 @@ export default function Parties({ canManage }: PartiesProps) {
     setPhone(party.phone ?? "");
     setPanNo(party.panNo ?? "");
     setOpeningBalance(String(party.openingBalance));
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollToPageTop("smooth");
   }
 
   async function handleSave() {
@@ -139,6 +147,31 @@ export default function Parties({ canManage }: PartiesProps) {
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(query));
   });
+  const sortedParties = partySort.key
+    ? [...filteredParties].sort((left, right) => compareParties(left, right, partySort.key as PartySortKey, partySort.direction))
+    : filteredParties;
+
+  function togglePartySort(key: PartySortKey) {
+    setPartySort((current) => ({
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  }
+
+  function renderSortableHeader(key: PartySortKey, label: string) {
+    const isActive = partySort.key === key;
+    return (
+      <th aria-sort={isActive ? (partySort.direction === "asc" ? "ascending" : "descending") : "none"}>
+        <button type="button" className="sortable-table-header" onClick={() => togglePartySort(key)}>
+          {label}
+          <span aria-hidden="true">{isActive ? (partySort.direction === "asc" ? " ↑" : " ↓") : " ↕"}</span>
+          <span className="sr-only">
+            {isActive ? ` sorted ${partySort.direction === "asc" ? "ascending" : "descending"}` : " sort column"}
+          </span>
+        </button>
+      </th>
+    );
+  }
 
   return (
     <>
@@ -210,16 +243,16 @@ export default function Parties({ canManage }: PartiesProps) {
         <table>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Phone</th>
-              <th>PAN/VAT</th>
-              <th>Opening Balance</th>
-              <th>Address</th>
+              {renderSortableHeader("name", "Name")}
+              {renderSortableHeader("phone", "Phone")}
+              {renderSortableHeader("panNo", "PAN/VAT")}
+              {renderSortableHeader("openingBalance", "Opening Balance")}
+              {renderSortableHeader("address", "Address")}
               {canManage && <th>Action</th>}
             </tr>
           </thead>
           <tbody>
-            {filteredParties.map((party) => (
+            {sortedParties.map((party) => (
               <tr key={party.id}>
                 <td>{party.name}</td>
                 <td>{party.phone}</td>
@@ -252,4 +285,18 @@ export default function Parties({ canManage }: PartiesProps) {
       </div>
     </>
   );
+}
+
+function compareParties(left: Party, right: Party, key: PartySortKey, direction: SortDirection) {
+  const directionMultiplier = direction === "asc" ? 1 : -1;
+
+  if (key === "openingBalance") {
+    const compare = Number(left.openingBalance || 0) - Number(right.openingBalance || 0);
+    if (compare !== 0) return compare * directionMultiplier;
+  } else {
+    const compare = String(left[key] ?? "").localeCompare(String(right[key] ?? ""));
+    if (compare !== 0) return compare * directionMultiplier;
+  }
+
+  return left.name.localeCompare(right.name);
 }

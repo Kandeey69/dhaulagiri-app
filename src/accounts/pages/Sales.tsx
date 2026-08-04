@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { Party, Sale } from "../data/types";
 import {
@@ -8,8 +8,20 @@ import {
   saveSale,
   updateSale,
 } from "../data/storage";
-import { companyStorageKey } from "../../companyContext";
+import { companyStorageKey, getActiveCompanyProfile } from "../../companyContext";
+import { createFiscalYearFromCode } from "../../domain/fiscalYear";
 import { calculateVatAmount, getSuiteVatRatePercent } from "../utils/settings";
+import LineItemPreviewModal from "../../stock/LineItemPreviewModal";
+import { scrollToPageTop } from "../../scroll";
+import { buildStockEntryTarget } from "../../stock/services/stockDocuments";
+import { buildStatuses } from "../../stock/services/stockCalculations";
+import { isInventoryTrackingEnabled } from "../../stock/settings";
+import {
+  deleteStockSalesLinesForDocument,
+  getStockItems,
+  getStockSalesBills,
+} from "../../stock/storage";
+import type { StockDocumentStatus, StockEntryTarget, StockItem, StockSalesBill } from "../../stock/types";
 
 function normalizeWholeNumber(value: string) {
   const onlyDigits = value.replace(/\D/g, "");
@@ -38,11 +50,24 @@ function normalizeBsDate(value: string) {
 type SalesProps = {
   canManage: boolean;
   canEdit?: boolean;
+  isReadOnly?: boolean;
+  onOpenStockLineEntry?: (target: StockEntryTarget) => void;
 };
 
-export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
+type SalesSortKey = "billNo" | "dateBs" | "party" | "salesAmount" | "vatAmount" | "totalAmount" | "remarks" | "inventory";
+type SortDirection = "asc" | "desc";
+
+export default function Sales({
+  canManage,
+  canEdit = canManage,
+  isReadOnly = false,
+  onOpenStockLineEntry,
+}: SalesProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
+  const [stockItems, setStockItems] = useState<StockItem[]>([]);
+  const [stockSalesBills, setStockSalesBills] = useState<StockSalesBill[]>([]);
+  const [previewSaleId, setPreviewSaleId] = useState("");
   const [editingSaleId, setEditingSaleId] = useState("");
   const [billNo, setBillNo] = useState("");
   const [dateBs, setDateBs] = useState("");
@@ -51,6 +76,10 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
   const [remarks, setRemarks] = useState("");
   const [message, setMessage] = useState("");
   const [registerSearch, setRegisterSearch] = useState("");
+  const [salesSort, setSalesSort] = useState<{ key: SalesSortKey | null; direction: SortDirection }>({
+    key: null,
+    direction: "asc",
+  });
   const [billToCancel, setBillToCancel] = useState("");
   const [cancelledBillNumbersText, setCancelledBillNumbersText] = useState(() =>
     localStorage.getItem(companyStorageKey("accounts-cancelled-bill-numbers")) ?? ""
@@ -58,6 +87,11 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
 
   const numericSalesAmount = Number(salesAmount || 0);
   const vatRatePercent = getSuiteVatRatePercent();
+  const inventoryEnabled = isInventoryTrackingEnabled();
+  const activeCompany = getActiveCompanyProfile();
+  const activeFiscalYear = activeCompany
+    ? createFiscalYearFromCode(activeCompany.id, activeCompany.fiscalYear || "")
+    : null;
   const vatAmount = calculateVatAmount(numericSalesAmount);
   const totalAmount = Number((numericSalesAmount + vatAmount).toFixed(2));
   const totalSalesBeforeVat = sales.reduce((sum, sale) => sum + sale.salesAmount, 0);
@@ -76,15 +110,28 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
     return (party?.name ?? "").toLowerCase().includes(registerSearchText);
   });
 
-  async function loadData() {
+  const loadData = useCallback(async () => {
     const [loadedParties, loadedSales] = await Promise.all([getParties(), getSales()]);
     setParties(loadedParties);
     setSales(loadedSales);
-  }
+
+    if (!inventoryEnabled) {
+      setStockItems([]);
+      setStockSalesBills([]);
+      return;
+    }
+
+    const [loadedStockItems, loadedStockSalesBills] = await Promise.all([
+      getStockItems(),
+      getStockSalesBills(),
+    ]);
+    setStockItems(loadedStockItems);
+    setStockSalesBills(loadedStockSalesBills);
+  }, [inventoryEnabled]);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    void loadData();
+  }, [loadData]);
 
   useEffect(() => {
     localStorage.setItem(companyStorageKey("accounts-cancelled-bill-numbers"), cancelledBillNumbersText);
@@ -126,7 +173,7 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
     setPartyId(sale.partyId);
     setSalesAmount(String(sale.salesAmount));
     setRemarks(sale.remarks ?? "");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollToPageTop("smooth");
   }
 
   async function handleSave(event?: FormEvent<HTMLFormElement>) {
@@ -214,6 +261,9 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
 
     try {
       await deleteSale(sale.id);
+      if (inventoryEnabled) {
+        await deleteStockSalesLinesForDocument(sale.id);
+      }
 
       if (editingSaleId === sale.id) {
         clearForm();
@@ -230,8 +280,124 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
     }
   }
 
+  function openStockEntryForSale(sale: Sale) {
+    if (!onOpenStockLineEntry || !activeCompany || !activeFiscalYear) {
+      setMessage("Inventory module is not available for this company.");
+      return;
+    }
+
+    const party = parties.find((item) => item.id === sale.partyId);
+    onOpenStockLineEntry(buildStockEntryTarget({
+      amount: sale.salesAmount,
+      amountCurrency: "NPR",
+      amountNpr: sale.salesAmount,
+      billNo: sale.billNo,
+      companyId: activeCompany.id,
+      date: sale.dateBs,
+      documentId: sale.id,
+      exchangeRate: 1,
+      fiscalYear: activeCompany.fiscalYear,
+      fiscalYearId: sale.fiscalYearId || activeFiscalYear.id,
+      grandTotal: sale.totalAmount,
+      lifecycleStatus: sale.lifecycleStatus,
+      partyName: party?.name || "Unknown",
+      readOnly: isReadOnly,
+      remarks: sale.remarks ?? "",
+      type: "Sale",
+      vatAmount: sale.vatAmount,
+    }));
+  }
+
+  const stockSalesBillById = new Map(stockSalesBills.map((bill) => [bill.id, bill]));
+  const stockStatusBySaleId = useMemo(() => {
+    const statusRows = buildStatuses(
+      sales.map((sale) => {
+        const party = parties.find((item) => item.id === sale.partyId);
+        return {
+          amount: sale.salesAmount,
+          amountCurrency: "NPR" as const,
+          amountNpr: sale.salesAmount,
+          billNo: sale.billNo,
+          date: sale.dateBs,
+          documentId: sale.id,
+          fiscalYearId: sale.fiscalYearId,
+          grandTotal: sale.totalAmount,
+          lifecycleStatus: sale.lifecycleStatus,
+          partyName: party?.name || "Unknown",
+          type: "Sale" as const,
+          vatAmount: sale.vatAmount,
+        };
+      }),
+      [],
+      stockSalesBills,
+    );
+    return new Map(statusRows.map((status) => [status.documentId, status] as const));
+  }, [parties, sales, stockSalesBills]);
+  const sortedSales = useMemo(
+    () => salesSort.key
+      ? [...filteredSales].sort((left, right) => compareSales(
+        left,
+        right,
+        salesSort.key as SalesSortKey,
+        salesSort.direction,
+        parties,
+        stockStatusBySaleId,
+      ))
+      : filteredSales,
+    [filteredSales, parties, salesSort.direction, salesSort.key, stockStatusBySaleId],
+  );
+  const previewSale = sales.find((sale) => sale.id === previewSaleId) ?? null;
+  const previewStockBill = previewSale ? stockSalesBillById.get(previewSale.id) : null;
+  const previewParty = previewSale ? parties.find((party) => party.id === previewSale.partyId) : null;
+
+  function toggleSalesSort(key: SalesSortKey) {
+    setSalesSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  }
+
+  function renderSortableHeader(key: SalesSortKey, label: string) {
+    const isActive = salesSort.key === key;
+    return (
+      <th aria-sort={isActive ? (salesSort.direction === "asc" ? "ascending" : "descending") : "none"}>
+        <button
+          type="button"
+          className="sortable-table-header"
+          onClick={() => toggleSalesSort(key)}
+        >
+          {label}
+          <span aria-hidden="true">{isActive ? (salesSort.direction === "asc" ? " ↑" : " ↓") : " ↕"}</span>
+          <span className="sr-only">
+            {isActive ? ` sorted ${salesSort.direction === "asc" ? "ascending" : "descending"}` : " sort column"}
+          </span>
+        </button>
+      </th>
+    );
+  }
+
   return (
     <div className="stack">
+      {previewSale && previewStockBill && (
+        <LineItemPreviewModal
+          billAmount={previewSale.salesAmount}
+          billNumber={previewSale.billNo}
+          companyName={activeCompany?.name || "Company"}
+          counterpartyLabel="Customer"
+          counterpartyName={previewParty?.name || previewStockBill.customerName}
+          currency="NPR"
+          date={previewSale.dateBs || previewStockBill.dateBs}
+          documentKind="sales"
+          fiscalYear={activeCompany?.fiscalYear || ""}
+          grandTotal={previewSale.totalAmount}
+          items={stockItems}
+          lines={previewStockBill.items}
+          onClose={() => setPreviewSaleId("")}
+          panNumber={previewParty?.panNo}
+          title="Sales Inventory Lines"
+          vatAmount={previewSale.vatAmount}
+        />
+      )}
       {message && <p className="status-message">{message}</p>}
 
       <form className="stack" onSubmit={handleSave}>
@@ -374,20 +540,23 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
           <table>
             <thead>
               <tr>
-                <th>Bill No.</th>
-                <th>Date BS</th>
-                <th>Party</th>
-                <th>Sales Amount</th>
-                <th>VAT {vatRatePercent}%</th>
-                <th>Total Amount</th>
-                <th>Remarks</th>
+                {renderSortableHeader("billNo", "Bill No.")}
+                {renderSortableHeader("dateBs", "Date BS")}
+                {renderSortableHeader("party", "Party")}
+                {renderSortableHeader("salesAmount", "Sales Amount")}
+                {renderSortableHeader("vatAmount", `VAT ${vatRatePercent}%`)}
+                {renderSortableHeader("totalAmount", "Total Amount")}
+                {renderSortableHeader("remarks", "Remarks")}
+                {inventoryEnabled && renderSortableHeader("inventory", "Inventory")}
                 {(canEdit || canManage) && <th>Actions</th>}
               </tr>
             </thead>
 
             <tbody>
-              {filteredSales.map((sale) => {
+              {sortedSales.map((sale) => {
                 const party = parties.find((item) => item.id === sale.partyId);
+                const stockBill = stockSalesBillById.get(sale.id);
+                const stockStatus = stockStatusBySaleId.get(sale.id);
 
                 return (
                   <tr key={sale.id}>
@@ -400,6 +569,17 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
                       <strong>{formatMoney(sale.totalAmount)}</strong>
                     </td>
                     <td>{sale.remarks || "-"}</td>
+                    {inventoryEnabled && (
+                      <td>
+                        <InventoryRegisterCell
+                          isReadOnly={isReadOnly}
+                          onAdd={() => openStockEntryForSale(sale)}
+                          onPreview={() => setPreviewSaleId(sale.id)}
+                          status={stockStatus}
+                          stockBill={stockBill}
+                        />
+                      </td>
+                    )}
                     {(canEdit || canManage) && (
                       <td className="row-actions">
                         {canEdit && (
@@ -425,9 +605,9 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
                   </tr>
                 );
               })}
-              {filteredSales.length === 0 && (
+              {sortedSales.length === 0 && (
                 <tr>
-                  <td className="empty" colSpan={canEdit || canManage ? 8 : 7}>
+                  <td className="empty" colSpan={7 + (inventoryEnabled ? 1 : 0) + (canEdit || canManage ? 1 : 0)}>
                     {sales.length === 0 ? "No sales yet." : "No sales match the party search."}
                   </td>
                 </tr>
@@ -436,6 +616,58 @@ export default function Sales({ canManage, canEdit = canManage }: SalesProps) {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+function InventoryRegisterCell({
+  isReadOnly,
+  onAdd,
+  onPreview,
+  status,
+  stockBill,
+}: {
+  isReadOnly: boolean;
+  onAdd: () => void;
+  onPreview: () => void;
+  status?: StockDocumentStatus;
+  stockBill?: StockSalesBill;
+}) {
+  if (status?.status === "Mismatch") {
+    return (
+      <div className="inventory-register-cell">
+        <span className="inventory-mismatch" title={status.statusReason || "Inventory lines need review."}>
+          Mismatch
+        </span>
+        {!isReadOnly && (
+          <button className="danger small" type="button" onClick={onAdd}>
+            Fix
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (stockBill) {
+    return (
+      <div className="inventory-register-cell">
+        <button className="small" type="button" onClick={onPreview}>
+          Preview
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="inventory-register-cell">
+      <span>Pending</span>
+      {isReadOnly ? (
+        <span className="muted">No inventory</span>
+      ) : (
+        <button className="danger small" type="button" onClick={onAdd}>
+          Add
+        </button>
+      )}
     </div>
   );
 }
@@ -480,6 +712,49 @@ function parseNumberList(value: string) {
         .filter((item) => Number.isInteger(item) && item > 0)
     )
   ).sort((a, b) => a - b);
+}
+
+function compareSales(
+  left: Sale,
+  right: Sale,
+  key: SalesSortKey,
+  direction: SortDirection,
+  parties: Party[],
+  stockStatusBySaleId: Map<string, StockDocumentStatus>,
+) {
+  const partyName = (sale: Sale) => parties.find((party) => party.id === sale.partyId)?.name ?? "";
+  const inventoryStatus = (sale: Sale) => stockStatusBySaleId.get(sale.id)?.status ?? "Pending";
+  const directionMultiplier = direction === "asc" ? 1 : -1;
+
+  if (key === "billNo" || key === "salesAmount" || key === "vatAmount" || key === "totalAmount") {
+    const leftValue = salesNumericSortValue(left, key);
+    const rightValue = salesNumericSortValue(right, key);
+    const numericCompare = leftValue - rightValue;
+    if (numericCompare !== 0) return numericCompare * directionMultiplier;
+  } else {
+    const leftValue = salesTextSortValue(left, key, partyName, inventoryStatus);
+    const rightValue = salesTextSortValue(right, key, partyName, inventoryStatus);
+    const textCompare = leftValue.localeCompare(rightValue);
+    if (textCompare !== 0) return textCompare * directionMultiplier;
+  }
+
+  return Number(left.billNo || 0) - Number(right.billNo || 0) || left.createdAt.localeCompare(right.createdAt);
+}
+
+function salesNumericSortValue(sale: Sale, key: "billNo" | "salesAmount" | "vatAmount" | "totalAmount") {
+  if (key === "billNo") return Number(sale.billNo || 0);
+  return Number(sale[key] || 0);
+}
+
+function salesTextSortValue(
+  sale: Sale,
+  key: "dateBs" | "party" | "remarks" | "inventory",
+  partyName: (sale: Sale) => string,
+  inventoryStatus: (sale: Sale) => string,
+) {
+  if (key === "party") return partyName(sale);
+  if (key === "inventory") return inventoryStatus(sale);
+  return String(sale[key] ?? "");
 }
 
 function formatMoney(value: number) {

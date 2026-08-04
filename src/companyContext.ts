@@ -199,3 +199,30 @@ export function getActivePurchaseDatabaseUrl() {
     ? `sqlite:import-purchases-${companyId}.db`
     : 'sqlite:import-purchases.db'
 }
+
+export const LEGACY_STOCK_DATABASE_URL = 'sqlite:inventorytracked-stock.db'
+
+export function encodeCompanyIdForStockFilename(companyId: string) {
+  const normalized = String(companyId ?? '').trim()
+
+  if (!normalized || normalized === 'default') {
+    return ''
+  }
+
+  return Array.from(normalized)
+    .map((character) => character.codePointAt(0)?.toString(16).padStart(4, '0') ?? '')
+    .join('-')
+}
+
+export function getStockDatabaseUrlForCompanyId(companyId: string) {
+  const encodedCompanyId = encodeCompanyIdForStockFilename(companyId)
+
+  // The unscoped stock database remains the intentional legacy/default fallback.
+  return encodedCompanyId
+    ? `sqlite:inventorytracked-stock-${encodedCompanyId}.db`
+    : LEGACY_STOCK_DATABASE_URL
+}
+
+export function getActiveStockDatabaseUrl() {
+  return getStockDatabaseUrlForCompanyId(getActiveCompanyId())
+}

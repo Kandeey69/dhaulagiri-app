@@ -14,7 +14,7 @@ import {
 import {
   createFiscalYearFromCode,
   ensureFiscalYearEditable,
-  findFiscalYearByBsDate,
+  isBsDateInFiscalYear,
   validateDateInFiscalYear,
 } from '../domain/fiscalYear'
 import { validatePaymentDomain, type FieldError } from '../domain/validation'
@@ -34,6 +34,7 @@ import { FreightTreatmentExplanation } from '../features/purchases/FreightTreatm
 import { PurchaseCalculationSummary } from '../features/purchases/PurchaseCalculationSummary'
 import { useDraftAutosave } from '../hooks/useDraftAutosave'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+import { scrollToPageTop } from '../scroll'
 import {
   countries,
   defaultSettings,
@@ -74,6 +75,16 @@ import {
   withUpdatedPurchase,
 } from './storage'
 import { getActiveCompanyId, getActiveCompanyProfile } from '../companyContext'
+import LineItemPreviewModal from '../stock/LineItemPreviewModal'
+import { buildStatuses } from '../stock/services/stockCalculations'
+import { buildStockEntryTarget } from '../stock/services/stockDocuments'
+import { isInventoryTrackingEnabled } from '../stock/settings'
+import {
+  deleteStockPurchaseLinesForDocument,
+  getStockItems,
+  getStockPurchaseBills,
+} from '../stock/storage'
+import type { StockDocumentStatus, StockEntryTarget, StockItem, StockPurchaseBill } from '../stock/types'
 
 type View =
   | 'Dashboard'
@@ -94,6 +105,13 @@ type ReportView =
   | 'Party Ledger'
   | 'Input VAT'
   | 'Landed Cost'
+
+type SortDirection = 'asc' | 'desc'
+type SortState<T extends string> = { key: T | null; direction: SortDirection }
+type PurchasePartySortKey = 'name' | 'category' | 'country' | 'phone' | 'panVatNo' | 'openingPayable' | 'status'
+type ImportPurchaseSortKey = 'vendor' | 'bill' | 'supplierAmount' | 'pragapanpatra' | 'inputVat' | 'landedCost' | 'status' | 'inventory'
+type PaymentSortKey = 'date' | 'party' | 'currency' | 'amount' | 'amountNpr' | 'bank' | 'reference' | 'status'
+type LocalExpenseSortKey = 'date' | 'supplier' | 'bill' | 'heading' | 'kind' | 'beforeVat' | 'vat' | 'total' | 'inventory'
 
 type PartyForm = Omit<Party, 'createdAt' | 'updatedAt'> & {
   createdAt?: string
@@ -361,6 +379,140 @@ const importPurchaseSortDate = (purchase: ImportPurchase) =>
   purchase.debitNoteDate || purchase.billDate
 const latestImportPurchaseFirst = (left: ImportPurchase, right: ImportPurchase) =>
   latestDateFirst(importPurchaseSortDate(left), importPurchaseSortDate(right))
+const sortFactor = (direction: SortDirection) => (direction === 'asc' ? 1 : -1)
+const compareText = (left: unknown, right: unknown, direction: SortDirection) =>
+  String(left ?? '').localeCompare(String(right ?? ''), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  }) * sortFactor(direction)
+const compareNumber = (left: unknown, right: unknown, direction: SortDirection) =>
+  (n(left) - n(right)) * sortFactor(direction)
+const comparePurchaseParties = (
+  left: Party,
+  right: Party,
+  key: PurchasePartySortKey,
+  direction: SortDirection,
+) => {
+  switch (key) {
+    case 'name':
+      return compareText(left.name, right.name, direction)
+    case 'category':
+      return compareText(left.category, right.category, direction)
+    case 'country':
+      return compareText(left.country, right.country, direction)
+    case 'phone':
+      return compareText(left.phone, right.phone, direction)
+    case 'panVatNo':
+      return compareText(left.panVatNo, right.panVatNo, direction)
+    case 'openingPayable':
+      return compareNumber(left.openingPayable, right.openingPayable, direction)
+    case 'status':
+      return compareText(left.isActive ? 'Active' : 'Inactive', right.isActive ? 'Active' : 'Inactive', direction)
+    default:
+      return 0
+  }
+}
+const compareImportPurchases = (
+  left: ImportPurchase,
+  right: ImportPurchase,
+  key: ImportPurchaseSortKey,
+  direction: SortDirection,
+  partyName: (id: string) => string,
+  stockStatuses: Map<string, StockDocumentStatus>,
+  stockKey: (documentId: string, sourceType: 'Import Purchase' | 'Local Purchase') => string,
+) => {
+  switch (key) {
+    case 'vendor':
+      return compareText(partyName(left.vendorPartyId), partyName(right.vendorPartyId), direction)
+    case 'bill':
+      return compareText(left.vendorBillNumber, right.vendorBillNumber, direction)
+    case 'supplierAmount':
+      return compareNumber(left.amountIC, right.amountIC, direction)
+    case 'pragapanpatra':
+      return compareText(left.debitNoteNumber, right.debitNoteNumber, direction)
+    case 'inputVat':
+      return compareNumber(left.totalInputVatNPR, right.totalInputVatNPR, direction)
+    case 'landedCost':
+      return compareNumber(left.landedCostNPR, right.landedCostNPR, direction)
+    case 'status':
+      return compareText(left.lifecycleStatus ?? 'POSTED', right.lifecycleStatus ?? 'POSTED', direction)
+    case 'inventory':
+      return compareText(
+        stockStatuses.get(stockKey(left.id, 'Import Purchase'))?.status ?? 'Pending',
+        stockStatuses.get(stockKey(right.id, 'Import Purchase'))?.status ?? 'Pending',
+        direction,
+      )
+    default:
+      return 0
+  }
+}
+const comparePayments = (
+  left: Payment,
+  right: Payment,
+  key: PaymentSortKey,
+  direction: SortDirection,
+  partyName: (id: string) => string,
+) => {
+  switch (key) {
+    case 'date':
+      return compareText(left.paymentDate, right.paymentDate, direction)
+    case 'party':
+      return compareText(partyName(left.partyId), partyName(right.partyId), direction)
+    case 'currency':
+      return compareText(left.currency, right.currency, direction)
+    case 'amount':
+      return compareNumber(left.amount, right.amount, direction)
+    case 'amountNpr':
+      return compareNumber(left.amountNPR, right.amountNPR, direction)
+    case 'bank':
+      return compareText(left.paymentMethod, right.paymentMethod, direction)
+    case 'reference':
+      return compareText(left.referenceNumber, right.referenceNumber, direction)
+    case 'status':
+      return compareText(left.lifecycleStatus ?? 'POSTED', right.lifecycleStatus ?? 'POSTED', direction)
+    default:
+      return 0
+  }
+}
+const compareLocalExpenses = (
+  left: LocalPurchaseExpense,
+  right: LocalPurchaseExpense,
+  key: LocalExpenseSortKey,
+  direction: SortDirection,
+  partyName: (id: string) => string,
+  stockStatuses: Map<string, StockDocumentStatus>,
+  stockKey: (documentId: string, sourceType: 'Import Purchase' | 'Local Purchase') => string,
+) => {
+  switch (key) {
+    case 'date':
+      return compareText(left.billDate, right.billDate, direction)
+    case 'supplier':
+      return compareText(partyName(left.partyId), partyName(right.partyId), direction)
+    case 'bill':
+      return compareText(left.billNumber, right.billNumber, direction)
+    case 'heading':
+      return compareText(left.expenseType ?? 'Expense', right.expenseType ?? 'Expense', direction)
+    case 'kind':
+      return compareText(left.expenseHead, right.expenseHead, direction)
+    case 'beforeVat':
+      return compareNumber(left.amountBeforeVatNPR, right.amountBeforeVatNPR, direction)
+    case 'vat':
+      return compareNumber(left.vatNPR, right.vatNPR, direction)
+    case 'total':
+      return compareNumber(left.totalAmountNPR, right.totalAmountNPR, direction)
+    case 'inventory':
+      return compareText(
+        stockStatuses.get(stockKey(left.id, 'Local Purchase'))?.status ?? 'Pending',
+        stockStatuses.get(stockKey(right.id, 'Local Purchase'))?.status ?? 'Pending',
+        direction,
+      )
+    default:
+      return 0
+  }
+}
+
+const isLocalPurchaseStock = (localExpense: LocalPurchaseExpense) => localExpense.expenseType === 'Stock'
+
 const ledgerDateFirst = (
   left: { date: string; type: string },
   right: { date: string; type: string },
@@ -780,6 +932,7 @@ const columns = [
 type PurchaseAppProps = {
   initialUserRole?: UserRole;
   isReadOnly?: boolean;
+  onOpenStockLineEntry?: (target: StockEntryTarget) => void;
   onBackToModules?: () => void;
   onLogout?: () => void;
 };
@@ -787,6 +940,7 @@ type PurchaseAppProps = {
 function App({
   initialUserRole,
   isReadOnly = false,
+  onOpenStockLineEntry,
   onBackToModules,
   onLogout,
 }: PurchaseAppProps = {}) {
@@ -800,6 +954,16 @@ function App({
   const [reportView, setReportView] = useState<ReportView>('Party Ledger')
   const [globalSearch, setGlobalSearch] = useState('')
   const [dashboardEntryMessage, setDashboardEntryMessage] = useState('')
+  const [stockItems, setStockItems] = useState<StockItem[]>([])
+  const [stockPurchaseBills, setStockPurchaseBills] = useState<StockPurchaseBill[]>([])
+  const [partySort, setPartySort] = useState<SortState<PurchasePartySortKey>>({ key: null, direction: 'asc' })
+  const [importPurchaseSort, setImportPurchaseSort] = useState<SortState<ImportPurchaseSortKey>>({ key: null, direction: 'asc' })
+  const [paymentSort, setPaymentSort] = useState<SortState<PaymentSortKey>>({ key: null, direction: 'asc' })
+  const [localExpenseSort, setLocalExpenseSort] = useState<SortState<LocalExpenseSortKey>>({ key: null, direction: 'asc' })
+  const [previewStockPurchase, setPreviewStockPurchase] = useState<{
+    documentId: string
+    sourceType: 'Import Purchase' | 'Local Purchase'
+  } | null>(null)
   const [partyForm, setPartyForm] = useState<PartyForm>(emptyParty)
   const [partySearch, setPartySearch] = useState('')
   const [partyCategoryFilter, setPartyCategoryFilter] = useState<'All' | PartyCategory>('All')
@@ -846,6 +1010,15 @@ function App({
   }, [initialUserRole])
 
   useEffect(() => {
+    scrollToPageTop()
+  }, [view])
+
+  function navigateToView(nextView: View) {
+    setView(nextView)
+    scrollToPageTop()
+  }
+
+  useEffect(() => {
     let cancelled = false
 
     createDataRepository()
@@ -882,11 +1055,11 @@ function App({
         return
       }
 
-      repository.saveData(data).catch((error) => {
+      repository.saveData(data).then(() => {
+        lastSavedSnapshotRef.current = nextSnapshot
+      }).catch((error) => {
         console.error('Could not save app data.', error)
         window.alert(`Could not save data: ${errorMessage(error)}`)
-      }).then(() => {
-        lastSavedSnapshotRef.current = nextSnapshot
       })
     }, 600)
 
@@ -925,6 +1098,22 @@ function App({
   const isClosedFiscalYear = activeFiscalYear.status === 'CLOSED'
   const canEditOrDelete = userRole === 'Master' && !isReadOnly && !isClosedFiscalYear
   const canEditPurchase = !isReadOnly && !isClosedFiscalYear && (userRole === 'Master' || userRole === 'Account')
+  const importPurchaseFiscalDate = useCallback((purchase: ImportPurchase) =>
+    normalizeBsDate(purchase.debitNoteDate) || normalizeBsDate(purchase.agentServiceBillDate), [])
+  const purchaseBelongsToActiveBsFiscalYear = useCallback((purchase: ImportPurchase) => {
+    const fiscalDate = importPurchaseFiscalDate(purchase)
+    return fiscalDate
+      ? isBsDateInFiscalYear(fiscalDate, activeFiscalYear)
+      : purchase.fiscalYearId === activeFiscalYear.id
+  }, [activeFiscalYear, importPurchaseFiscalDate])
+  const paymentBelongsToActiveBsFiscalYear = useCallback(
+    (payment: Payment) => isBsDateInFiscalYear(payment.paymentDate, activeFiscalYear),
+    [activeFiscalYear],
+  )
+  const localExpenseBelongsToActiveBsFiscalYear = useCallback(
+    (localExpense: LocalPurchaseExpense) => isBsDateInFiscalYear(localExpense.billDate, activeFiscalYear),
+    [activeFiscalYear],
+  )
 
   useEffect(() => {
     if (!activeFiscalYear.id) {
@@ -1010,19 +1199,70 @@ function App({
       localExpense.expenseType ?? 'Expense',
       localExpense.expenseHead || 'Local purchase/expense bill',
     ].join(' - '), [])
+  const inventoryEnabled = isInventoryTrackingEnabled()
+  const activeCompanyProfile = getActiveCompanyProfile()
+  const stockPurchaseKey = useCallback(
+    (documentId: string, sourceType: 'Import Purchase' | 'Local Purchase') => `${sourceType}:${documentId}`,
+    [],
+  )
+  const stockPurchaseBillByKey = useMemo(() => {
+    const map = new Map<string, StockPurchaseBill>()
+    stockPurchaseBills.forEach((bill) => {
+      map.set(stockPurchaseKey(bill.id, bill.sourceType ?? (bill.source === 'Importation' ? 'Import Purchase' : 'Local Purchase')), bill)
+    })
+    return map
+  }, [stockPurchaseBills, stockPurchaseKey])
+  const stockPurchaseStatusByKey = useMemo(() => {
+    const sourceDocs = [
+      ...data.purchases.map((purchase) => ({
+        amount: purchase.amountIC,
+        amountCurrency: purchase.supplierCurrency,
+        amountNpr: purchase.supplierAmountNPR,
+        billNo: purchase.vendorBillNumber,
+        date: purchase.debitNoteDate || purchase.billDate,
+        documentId: purchase.id,
+        exchangeRate: purchase.supplierExchangeRate,
+        fiscalYearId: purchase.fiscalYearId,
+        grandTotal: purchase.amountIC,
+        landedCostNpr: purchase.landedCostNPR,
+        lifecycleStatus: purchase.lifecycleStatus,
+        partyName: partyName(purchase.vendorPartyId),
+        type: 'Import Purchase' as const,
+      })),
+      ...data.localExpenses
+        .filter(isLocalPurchaseStock)
+        .map((localExpense) => ({
+          amount: localExpense.amountBeforeVatNPR,
+          amountCurrency: 'NPR' as const,
+          amountNpr: localExpense.amountBeforeVatNPR,
+          billNo: localExpense.billNumber,
+          date: localExpense.billDate,
+          documentId: localExpense.id,
+          exchangeRate: 1,
+          fiscalYearId: localExpense.fiscalYearId,
+          grandTotal: localExpense.totalAmountNPR,
+          landedCostNpr: localExpense.amountBeforeVatNPR,
+          lifecycleStatus: localExpense.lifecycleStatus,
+          partyName: partyName(localExpense.partyId),
+          type: 'Local Purchase' as const,
+        })),
+    ]
+    const statuses = buildStatuses(sourceDocs, stockPurchaseBills, [])
+    return new Map(statuses.map((status) => [stockPurchaseKey(status.documentId, status.type as 'Import Purchase' | 'Local Purchase'), status] as const))
+  }, [data.localExpenses, data.purchases, partyName, stockPurchaseBills, stockPurchaseKey])
   const sortedPurchases = useMemo(
     () =>
       data.purchases
-        .filter((purchase) => purchase.fiscalYearId === activeFiscalYear.id)
+        .filter(purchaseBelongsToActiveBsFiscalYear)
         .sort(latestImportPurchaseFirst),
-    [activeFiscalYear.id, data.purchases],
+    [data.purchases, purchaseBelongsToActiveBsFiscalYear],
   )
   const sortedPayments = useMemo(
     () =>
       data.payments
-        .filter((payment) => payment.fiscalYearId === activeFiscalYear.id)
+        .filter(paymentBelongsToActiveBsFiscalYear)
         .sort((left, right) => latestDateFirst(left.paymentDate, right.paymentDate)),
-    [activeFiscalYear.id, data.payments],
+    [data.payments, paymentBelongsToActiveBsFiscalYear],
   )
   const filteredPayments = useMemo(
     () =>
@@ -1034,10 +1274,78 @@ function App({
   const sortedLocalExpenses = useMemo(
     () =>
       data.localExpenses
-        .filter((localExpense) => localExpense.fiscalYearId === activeFiscalYear.id)
+        .filter(localExpenseBelongsToActiveBsFiscalYear)
         .sort((left, right) => latestDateFirst(left.billDate, right.billDate)),
-    [activeFiscalYear.id, data.localExpenses],
+    [data.localExpenses, localExpenseBelongsToActiveBsFiscalYear],
   )
+  const displayedPurchases = useMemo(() => {
+    if (!importPurchaseSort.key) {
+      return sortedPurchases
+    }
+
+    return [...sortedPurchases].sort((left, right) =>
+      compareImportPurchases(
+        left,
+        right,
+        importPurchaseSort.key as ImportPurchaseSortKey,
+        importPurchaseSort.direction,
+        partyName,
+        stockPurchaseStatusByKey,
+        stockPurchaseKey,
+      ) || latestImportPurchaseFirst(left, right),
+    )
+  }, [importPurchaseSort.direction, importPurchaseSort.key, partyName, sortedPurchases, stockPurchaseKey, stockPurchaseStatusByKey])
+  const displayedPayments = useMemo(() => {
+    if (!paymentSort.key) {
+      return filteredPayments
+    }
+
+    return [...filteredPayments].sort((left, right) =>
+      comparePayments(left, right, paymentSort.key as PaymentSortKey, paymentSort.direction, partyName) ||
+      latestDateFirst(left.paymentDate, right.paymentDate),
+    )
+  }, [filteredPayments, partyName, paymentSort.direction, paymentSort.key])
+  const displayedLocalExpenses = useMemo(() => {
+    if (!localExpenseSort.key) {
+      return sortedLocalExpenses
+    }
+
+    return [...sortedLocalExpenses].sort((left, right) =>
+      compareLocalExpenses(
+        left,
+        right,
+        localExpenseSort.key as LocalExpenseSortKey,
+        localExpenseSort.direction,
+        partyName,
+        stockPurchaseStatusByKey,
+        stockPurchaseKey,
+      ) || latestDateFirst(left.billDate, right.billDate),
+    )
+  }, [localExpenseSort.direction, localExpenseSort.key, partyName, sortedLocalExpenses, stockPurchaseKey, stockPurchaseStatusByKey])
+  const refreshPurchaseStock = useCallback(async () => {
+    if (!inventoryEnabled) {
+      setStockItems([])
+      setStockPurchaseBills([])
+      setPreviewStockPurchase(null)
+      return
+    }
+
+    try {
+      const [loadedItems, loadedBills] = await Promise.all([
+        getStockItems(),
+        getStockPurchaseBills(),
+      ])
+      setStockItems(loadedItems)
+      setStockPurchaseBills(loadedBills)
+    } catch (error) {
+      console.error('Could not load purchase stock lines.', error)
+      setDashboardEntryMessage('Inventory lines could not be loaded. Purchase data is still available.')
+    }
+  }, [inventoryEnabled])
+
+  useEffect(() => {
+    void refreshPurchaseStock()
+  }, [refreshPurchaseStock, activeCompanyId, activeFiscalYear.id])
   const vendorOptions = includeSelectedParty(indianSuppliers, purchaseForm.vendorPartyId, partyById)
   const agentOptions = includeSelectedParty(customAgents, purchaseForm.customAgentPartyId, partyById)
   const transportOptions = includeSelectedParty(indianTransportParties, purchaseForm.freightIndiaPartyId, partyById)
@@ -1075,7 +1383,7 @@ function App({
       }
     })
 
-    data.purchases.forEach((purchase) => {
+    sortedPurchases.forEach((purchase) => {
       const haystack = [
         partyName(purchase.vendorPartyId),
         partyName(purchase.customAgentPartyId),
@@ -1097,7 +1405,7 @@ function App({
       }
     })
 
-    data.payments.forEach((payment) => {
+    sortedPayments.forEach((payment) => {
       const haystack = [
         partyName(payment.partyId),
         payment.referenceNumber,
@@ -1119,7 +1427,7 @@ function App({
     })
 
     return results.slice(0, 15)
-  }, [data.parties, data.payments, data.purchases, globalSearch, partyName])
+  }, [data.parties, globalSearch, partyName, sortedPayments, sortedPurchases])
 
   const setDataWithLog = (
     next: AppData,
@@ -1156,7 +1464,7 @@ function App({
   const loginAsAccount = () => {
     setUserRole('Account')
     setLoginError('')
-    setView('Dashboard')
+    navigateToView('Dashboard')
   }
 
   const loginAsMaster = (event: FormEvent) => {
@@ -1170,7 +1478,7 @@ function App({
     setUserRole('Master')
     setMasterPassword('')
     setLoginError('')
-    setView('Dashboard')
+    navigateToView('Dashboard')
   }
 
   const logout = () => {
@@ -1182,7 +1490,7 @@ function App({
     setUserRole(null)
     setMasterPassword('')
     setLoginError('')
-    setView('Dashboard')
+    navigateToView('Dashboard')
   }
 
   const openNewPurchaseEntry = () => {
@@ -1193,7 +1501,7 @@ function App({
 
     setDashboardEntryMessage('')
     setPurchaseForm(createEmptyPurchase(data.settings))
-    setView('Import Purchase Entry')
+    navigateToView('Import Purchase Entry')
   }
 
   const openNewPaymentEntry = () => {
@@ -1208,7 +1516,7 @@ function App({
     setPaymentBillYear('Current')
     resetSupplierPaymentCurrency()
     setBankOutflowNPR(0)
-    setView('Payment Entry')
+    navigateToView('Payment Entry')
   }
 
   const openNewLocalExpenseEntry = () => {
@@ -1219,7 +1527,7 @@ function App({
 
     setDashboardEntryMessage('')
     setLocalExpenseForm(createEmptyLocalExpense())
-    setView('Local Purchase / Expense')
+    navigateToView('Local Purchase / Expense')
   }
 
   const dashboard = useMemo(() => {
@@ -1801,6 +2109,12 @@ function App({
       partyCategoryFilter === 'All' || party.category === partyCategoryFilter
     return matchesSearch && matchesCategory
   })
+  const displayedParties = partySort.key
+    ? [...filteredParties].sort((left, right) =>
+        comparePurchaseParties(left, right, partySort.key as PurchasePartySortKey, partySort.direction) ||
+        compareText(left.name, right.name, 'asc'),
+      )
+    : filteredParties
 
   const updatePartyField = <K extends keyof PartyForm>(key: K, value: PartyForm[K]) => {
     setPartyForm((current) => ({ ...current, [key]: value }))
@@ -1842,7 +2156,11 @@ function App({
     key: K,
     value: LocalPurchaseExpense[K],
   ) => {
-    setLocalExpenseForm((current) => ({ ...current, [key]: value }))
+    setLocalExpenseForm((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === 'expenseType' && value === 'Stock' ? { expenseHead: '' } : {}),
+    }))
   }
 
   const updateQuickLocalSupplierField = <K extends keyof QuickLocalSupplierForm>(
@@ -2330,11 +2648,35 @@ function App({
         return
       }
 
+      const importFiscalDate = pragapanpatraDate || agentServiceBillDate
+      if (importFiscalDate) {
+        const validation = validateDateInFiscalYear(importFiscalDate, activeFiscalYear, 'Pragapanpatra/service date')
+        if (!validation.valid) {
+          const reason = validation.error ?? `Date is outside fiscal year ${activeFiscalYear.code}.`
+          errors.push(`Line ${line}: ${reason}`)
+          importedDetails.push({
+            status: 'Skipped',
+            line,
+            vendor: vendorName,
+            billNumber: vendorBillNumber,
+            billDate,
+            supplierAmountNPR: 0,
+            customAgent: customAgentName || '-',
+            indianTransport: indianTransportName || '-',
+            pragapanpatraNumber,
+            debitNoteTotalNPR: 0,
+            agentServiceTotalNPR: 0,
+            totalInputVatNPR: 0,
+            landedCostNPR: 0,
+            remarks: reason,
+          })
+          return
+        }
+      }
+
       const purchase = {
         ...draft,
-        fiscalYearId:
-          findFiscalYearByBsDate(pragapanpatraDate || agentServiceBillDate, data.fiscalYears)?.id ??
-          activeFiscalYear.id,
+        fiscalYearId: activeFiscalYear.id,
         vendorPartyId: vendor.id,
         vendorBillNumber,
         billDate,
@@ -2498,6 +2840,14 @@ function App({
         return
       }
 
+      {
+        const validation = validateDateInFiscalYear(paymentDate, activeFiscalYear, 'Payment date')
+        if (!validation.valid) {
+          skip(validation.error ?? `Payment date is outside fiscal year ${activeFiscalYear.code}.`)
+          return
+        }
+      }
+
       if (amount <= 0) {
         skip('Amount IC/LC is required.')
         return
@@ -2643,6 +2993,14 @@ function App({
         return
       }
 
+      {
+        const validation = validateDateInFiscalYear(paymentDate, activeFiscalYear, 'Payment date')
+        if (!validation.valid) {
+          skip(validation.error ?? `Payment date is outside fiscal year ${activeFiscalYear.code}.`)
+          return
+        }
+      }
+
       if (amount <= 0) {
         skip('Amount NPR is required.')
         return
@@ -2751,7 +3109,7 @@ function App({
 
   const editParty = (party: Party) => {
     setPartyForm(party)
-    setView('Party Master')
+    navigateToView('Party Master')
   }
 
   const hardDeleteParty = (party: Party) => {
@@ -2846,9 +3204,18 @@ function App({
     const fiscalDate =
       normalizeBsDate(purchaseForm.debitNoteDate) ||
       normalizeBsDate(purchaseForm.agentServiceBillDate)
-    const transactionFiscalYear =
-      (fiscalDate ? findFiscalYearByBsDate(fiscalDate, data.fiscalYears) : undefined) ?? activeFiscalYear
+    const transactionFiscalYear = activeFiscalYear
     const manualErrors: FieldError[] = []
+
+    if (fiscalDate) {
+      const fiscalDateValidation = validateDateInFiscalYear(fiscalDate, activeFiscalYear, 'Pragapanpatra/service date')
+      if (!fiscalDateValidation.valid) {
+        manualErrors.push({
+          field: purchaseForm.debitNoteDate ? 'debitNoteDate' : 'agentServiceBillDate',
+          message: fiscalDateValidation.error ?? `Date is outside fiscal year ${activeFiscalYear.code}.`,
+        })
+      }
+    }
 
     if (!purchaseForm.billDate) {
       manualErrors.push({ field: 'billDate', message: 'Bill date is required.' })
@@ -2987,10 +3354,95 @@ function App({
 
   const editPurchase = (purchase: ImportPurchase) => {
     setPurchaseForm(purchase)
-    setView('Import Purchase Entry')
-    window.requestAnimationFrame(() => {
-      window.scrollTo({ top: 0, behavior: 'smooth' })
-    })
+    navigateToView('Import Purchase Entry')
+  }
+
+  const isStockEntryReadOnly = (status?: ImportPurchase['lifecycleStatus']) =>
+    isReadOnly || isClosedFiscalYear || ['VOID', 'REVERSED'].includes(status ?? 'POSTED')
+
+  const cleanupLinkedPurchaseStock = async (
+    documentId: string,
+    sourceType: 'Import Purchase' | 'Local Purchase',
+    label: string,
+  ) => {
+    if (!inventoryEnabled) {
+      return
+    }
+
+    try {
+      await deleteStockPurchaseLinesForDocument(documentId, sourceType)
+      await refreshPurchaseStock()
+    } catch (error) {
+      console.error('Could not delete linked inventory lines.', error)
+      setDashboardEntryMessage(`Deleted ${label}, but linked inventory lines could not be removed.`)
+    }
+  }
+
+  const openStockEntryForPurchase = (purchase: ImportPurchase) => {
+    if (!onOpenStockLineEntry || !activeCompanyProfile) {
+      setDashboardEntryMessage('Inventory module is not available for this company.')
+      return
+    }
+
+    onOpenStockLineEntry(buildStockEntryTarget({
+      amount: purchase.amountIC,
+      amountCurrency: purchase.supplierCurrency,
+      amountNpr: purchase.supplierAmountNPR,
+      billNo: purchase.vendorBillNumber,
+      calculatedAt: purchase.calculatedAt,
+      calculationVersion: purchase.calculationVersion,
+      companyId: activeCompanyProfile.id,
+      date: purchase.debitNoteDate || purchase.billDate || purchase.agentServiceBillDate,
+      documentId: purchase.id,
+      exchangeRate: purchase.supplierExchangeRate,
+      fiscalYear: activeCompanyProfile.fiscalYear,
+      fiscalYearId: purchase.fiscalYearId || activeFiscalYear.id,
+      grandTotal: purchase.amountIC,
+      landedCostNpr: purchase.landedCostNPR,
+      lifecycleStatus: purchase.lifecycleStatus,
+      partyName: partyName(purchase.vendorPartyId),
+      readOnly: isStockEntryReadOnly(purchase.lifecycleStatus),
+      referenceNo: purchase.debitNoteNumber,
+      remarks: purchase.remarks,
+      source: 'Importation',
+      type: 'Import Purchase',
+      vatAmount: 0,
+    }))
+  }
+
+  const openStockEntryForLocalExpense = (localExpense: LocalPurchaseExpense) => {
+    if (!isLocalPurchaseStock(localExpense)) {
+      setDashboardEntryMessage('Only local purchase entries with Stock heading can use inventory line entry.')
+      return
+    }
+
+    if (!onOpenStockLineEntry || !activeCompanyProfile) {
+      setDashboardEntryMessage('Inventory module is not available for this company.')
+      return
+    }
+
+    onOpenStockLineEntry(buildStockEntryTarget({
+      amount: localExpense.amountBeforeVatNPR,
+      amountCurrency: 'NPR',
+      amountNpr: localExpense.amountBeforeVatNPR,
+      billNo: localExpense.billNumber,
+      companyId: activeCompanyProfile.id,
+      date: localExpense.billDate,
+      documentId: localExpense.id,
+      exchangeRate: 1,
+      fiscalYear: activeCompanyProfile.fiscalYear,
+      fiscalYearId: localExpense.fiscalYearId || activeFiscalYear.id,
+      grandTotal: localExpense.totalAmountNPR,
+      landedCostNpr: localExpense.amountBeforeVatNPR,
+      lifecycleStatus: localExpense.lifecycleStatus,
+      partyName: partyName(localExpense.partyId),
+      readOnly: isStockEntryReadOnly(localExpense.lifecycleStatus),
+      referenceNo: localExpense.expenseHead,
+      remarks: localExpense.remarks,
+      source: 'Local Purchase',
+      type: 'Local Purchase',
+      vatAmount: localExpense.vatNPR,
+    }))
   }
 
   const deletePurchase = (purchase: ImportPurchase) => {
@@ -3003,6 +3455,7 @@ function App({
       purchases: data.purchases.filter((item) => item.id !== purchase.id),
     }
     setDataWithLog(next, 'Deleted import purchase', purchase.vendorBillNumber, auditValue(purchase), 'Deleted')
+    void cleanupLinkedPurchaseStock(purchase.id, 'Import Purchase', `purchase bill ${purchase.vendorBillNumber}`)
   }
 
   const otherPaymentTypeForParty = (party: Party | undefined): Payment['paymentType'] => {
@@ -3185,7 +3638,7 @@ function App({
     setSupplierPaymentExchangeRate(payment.exchangeRate || data.settings.defaultExchangeRate)
     setPaymentBillYear(payment.remarks.includes('Last year') ? 'Last year' : 'Current')
     setBankOutflowNPR(payment.amountNPR)
-    setView('Payment Entry')
+    navigateToView('Payment Entry')
   }
 
   const deletePayment = (payment: Payment) => {
@@ -3235,6 +3688,7 @@ function App({
 
     const localExpenseToSave = {
       ...localExpenseForm,
+      expenseHead: isLocalPurchaseStock(localExpenseForm) ? '' : localExpenseForm.expenseHead,
       fiscalYearId: activeFiscalYear.id,
       billDate: normalizeBsDate(localExpenseForm.billDate),
       vatNPR: localExpenseVatNPR,
@@ -3325,7 +3779,7 @@ function App({
 
   const editLocalExpense = (localExpense: LocalPurchaseExpense) => {
     setLocalExpenseForm(localExpense)
-    setView('Local Purchase / Expense')
+    navigateToView('Local Purchase / Expense')
   }
 
   const deleteLocalExpense = (localExpense: LocalPurchaseExpense) => {
@@ -3344,6 +3798,7 @@ function App({
       auditValue(localExpense),
       'Deleted',
     )
+    void cleanupLinkedPurchaseStock(localExpense.id, 'Local Purchase', `local purchase/expense ${localExpense.billNumber}`)
   }
 
   const openGlobalSearchResult = (result: (typeof globalSearchResults)[number]) => {
@@ -3453,6 +3908,54 @@ function App({
     )
   }
 
+  const togglePartySort = (key: PurchasePartySortKey) => {
+    setPartySort((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }))
+  }
+
+  const toggleImportPurchaseSort = (key: ImportPurchaseSortKey) => {
+    setImportPurchaseSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }))
+  }
+
+  const togglePaymentSort = (key: PaymentSortKey) => {
+    setPaymentSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }))
+  }
+
+  const toggleLocalExpenseSort = (key: LocalExpenseSortKey) => {
+    setLocalExpenseSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }))
+  }
+
+  const renderSortableHeader = <T extends string,>(
+    sort: SortState<T>,
+    key: T,
+    label: string,
+    onToggle: (key: T) => void,
+  ) => {
+    const isActive = sort.key === key
+    const marker = isActive ? (sort.direction === 'asc' ? '↑' : '↓') : '↕'
+
+    return (
+      <button type="button" className="sortable-table-header" onClick={() => onToggle(key)}>
+        <span>{label}</span>
+        <span aria-hidden="true">{marker}</span>
+        <span className="sr-only">
+          {isActive ? `Sorted ${sort.direction === 'asc' ? 'ascending' : 'descending'}` : `Sort by ${label}`}
+        </span>
+      </button>
+    )
+  }
+
   const renderDashboard = () => (
     <div className="stack">
       <Panel title="New Entry">
@@ -3486,10 +3989,7 @@ function App({
           onSelect={(row) => {
             setVatFilters({ month: row.month })
             setReportView('Input VAT')
-            setView('Reports')
-            window.requestAnimationFrame(() => {
-              window.scrollTo({ top: 0, behavior: 'smooth' })
-            })
+            navigateToView('Reports')
           }}
         />
       </Panel>
@@ -3502,10 +4002,7 @@ function App({
             if (!slice.id) return
             setLedgerPartyId(slice.id)
             setReportView('Party Ledger')
-            setView('Reports')
-            window.requestAnimationFrame(() => {
-              window.scrollTo({ top: 0, behavior: 'smooth' })
-            })
+            navigateToView('Reports')
           }}
         />
       </Panel>
@@ -3616,18 +4113,18 @@ function App({
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Category</th>
-                <th>Country</th>
-                <th>Phone</th>
-                <th>PAN/VAT</th>
-                <th>Opening</th>
-                <th>Status</th>
+                <th>{renderSortableHeader(partySort, 'name', 'Name', togglePartySort)}</th>
+                <th>{renderSortableHeader(partySort, 'category', 'Category', togglePartySort)}</th>
+                <th>{renderSortableHeader(partySort, 'country', 'Country', togglePartySort)}</th>
+                <th>{renderSortableHeader(partySort, 'phone', 'Phone', togglePartySort)}</th>
+                <th>{renderSortableHeader(partySort, 'panVatNo', 'PAN/VAT', togglePartySort)}</th>
+                <th>{renderSortableHeader(partySort, 'openingPayable', 'Opening', togglePartySort)}</th>
+                <th>{renderSortableHeader(partySort, 'status', 'Status', togglePartySort)}</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filteredParties.map((party) => (
+              {displayedParties.map((party) => (
                 <tr key={party.id}>
                   <td>{party.name}</td>
                   <td>{party.category}</td>
@@ -3652,7 +4149,7 @@ function App({
                   </td>
                 </tr>
               ))}
-              {!filteredParties.length && <EmptyRow columns={8} />}
+              {!displayedParties.length && <EmptyRow columns={8} />}
             </tbody>
           </table>
         </div>
@@ -3863,18 +4360,22 @@ function App({
           <table>
             <thead>
               <tr>
-                <th>Vendor</th>
-                <th>Bill</th>
-                <th>Supplier INR</th>
-                <th>Pragapanpatra</th>
-                <th>Input VAT</th>
-                <th>Landed Cost</th>
-                <th>Status</th>
+                <th>{renderSortableHeader(importPurchaseSort, 'vendor', 'Vendor', toggleImportPurchaseSort)}</th>
+                <th>{renderSortableHeader(importPurchaseSort, 'bill', 'Bill', toggleImportPurchaseSort)}</th>
+                <th>{renderSortableHeader(importPurchaseSort, 'supplierAmount', 'Supplier Amount', toggleImportPurchaseSort)}</th>
+                <th>{renderSortableHeader(importPurchaseSort, 'pragapanpatra', 'Pragapanpatra', toggleImportPurchaseSort)}</th>
+                <th>{renderSortableHeader(importPurchaseSort, 'inputVat', 'Input VAT', toggleImportPurchaseSort)}</th>
+                <th>{renderSortableHeader(importPurchaseSort, 'landedCost', 'Landed Cost', toggleImportPurchaseSort)}</th>
+                <th>{renderSortableHeader(importPurchaseSort, 'status', 'Status', toggleImportPurchaseSort)}</th>
+                {inventoryEnabled && <th>{renderSortableHeader(importPurchaseSort, 'inventory', 'Inventory', toggleImportPurchaseSort)}</th>}
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {sortedPurchases.map((purchase) => {
+              {displayedPurchases.map((purchase) => {
+                const purchaseStockKey = stockPurchaseKey(purchase.id, 'Import Purchase')
+                const stockBill = stockPurchaseBillByKey.get(purchaseStockKey)
+                const stockStatus = stockPurchaseStatusByKey.get(purchaseStockKey)
                 const actions = availableTransactionActions({
                   status: purchase.lifecycleStatus ?? 'POSTED',
                   fiscalYearStatus: activeFiscalYear.status,
@@ -3886,6 +4387,12 @@ function App({
                   canEditPurchase &&
                   activeFiscalYear.status === 'OPEN' &&
                   !['VOID', 'REVERSED'].includes(purchase.lifecycleStatus ?? 'POSTED')
+                const canDeleteOpenYearPurchase =
+                  canEditOrDelete &&
+                  activeFiscalYear.status === 'OPEN' &&
+                  !['VOID', 'REVERSED'].includes(purchase.lifecycleStatus ?? 'POSTED')
+                const showEditPurchase = actions.includes('EDIT') || canEditOpenYearPurchase
+                const showDeletePurchase = actions.includes('DELETE') || canDeleteOpenYearPurchase
 
                 return (
                   <tr key={purchase.id}>
@@ -3898,23 +4405,34 @@ function App({
                     <td>
                       <TransactionStatusBadge status={purchase.lifecycleStatus} fiscalYearStatus={activeFiscalYear.status} />
                     </td>
+                    {inventoryEnabled && (
+                      <td>
+                        <InventoryRegisterCell
+                          isReadOnly={isStockEntryReadOnly(purchase.lifecycleStatus)}
+                          onAdd={() => openStockEntryForPurchase(purchase)}
+                          onPreview={() => setPreviewStockPurchase({ documentId: purchase.id, sourceType: 'Import Purchase' })}
+                          status={stockStatus}
+                          stockBill={stockBill}
+                        />
+                      </td>
+                    )}
                     <td className="row-actions">
-                      {(actions.includes('EDIT') || canEditOpenYearPurchase) && (
+                      {showEditPurchase && (
                         <button type="button" className="small" onClick={() => editPurchase(purchase)}>
                           Edit
                         </button>
                       )}
-                      {actions.includes('DELETE') && (
+                      {showDeletePurchase && (
                         <button type="button" className="small danger" onClick={() => deletePurchase(purchase)}>
                           Delete
                         </button>
                       )}
-                      {!actions.includes('EDIT') && !actions.includes('DELETE') && 'View / Print only'}
+                      {!showEditPurchase && !showDeletePurchase && '-'}
                     </td>
                   </tr>
                 )
               })}
-              {!sortedPurchases.length && <EmptyRow columns={8} />}
+              {!displayedPurchases.length && <EmptyRow columns={inventoryEnabled ? 9 : 8} />}
             </tbody>
           </table>
         </div>
@@ -4095,19 +4613,19 @@ function App({
           <table>
             <thead>
               <tr>
-                <th>Date</th>
-                <th>Party</th>
-                <th>Currency</th>
-                <th>Amount</th>
-                <th>Amount NPR</th>
-                <th>Bank</th>
-                <th>Bill / Reference</th>
-                <th>Status</th>
+                <th>{renderSortableHeader(paymentSort, 'date', 'Date', togglePaymentSort)}</th>
+                <th>{renderSortableHeader(paymentSort, 'party', 'Party', togglePaymentSort)}</th>
+                <th>{renderSortableHeader(paymentSort, 'currency', 'Currency', togglePaymentSort)}</th>
+                <th>{renderSortableHeader(paymentSort, 'amount', 'Amount', togglePaymentSort)}</th>
+                <th>{renderSortableHeader(paymentSort, 'amountNpr', 'Amount NPR', togglePaymentSort)}</th>
+                <th>{renderSortableHeader(paymentSort, 'bank', 'Bank', togglePaymentSort)}</th>
+                <th>{renderSortableHeader(paymentSort, 'reference', 'Bill / Reference', togglePaymentSort)}</th>
+                <th>{renderSortableHeader(paymentSort, 'status', 'Status', togglePaymentSort)}</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filteredPayments.map((payment) => (
+              {displayedPayments.map((payment) => (
                 <tr key={payment.id}>
                   <td>{dateText(payment.paymentDate)}</td>
                   <td>{partyName(payment.partyId)}</td>
@@ -4135,7 +4653,7 @@ function App({
                   </td>
                 </tr>
               ))}
-              {!filteredPayments.length && <EmptyRow columns={9} />}
+              {!displayedPayments.length && <EmptyRow columns={9} />}
             </tbody>
           </table>
         </div>
@@ -4215,11 +4733,13 @@ function App({
               ))}
             </select>
           </Field>
-          <TextField
-            label="Kind of expense / fixed asset"
-            value={localExpenseForm.expenseHead}
-            onChange={(value) => updateLocalExpenseField('expenseHead', value)}
-          />
+          {!isLocalPurchaseStock(localExpenseForm) && (
+            <TextField
+              label="Kind of expense / fixed asset"
+              value={localExpenseForm.expenseHead}
+              onChange={(value) => updateLocalExpenseField('expenseHead', value)}
+            />
+          )}
           <NumberField
             label="Amount before VAT NPR"
             value={localExpenseForm.amountBeforeVatNPR}
@@ -4246,45 +4766,68 @@ function App({
           <table>
             <thead>
               <tr>
-                <th>Date</th>
-                <th>Supplier</th>
-                <th>Bill</th>
-                <th>Heading</th>
-                <th>Kind</th>
-                <th>Before VAT</th>
-                <th>VAT</th>
-                <th>Total</th>
+                <th>{renderSortableHeader(localExpenseSort, 'date', 'Date', toggleLocalExpenseSort)}</th>
+                <th>{renderSortableHeader(localExpenseSort, 'supplier', 'Supplier', toggleLocalExpenseSort)}</th>
+                <th>{renderSortableHeader(localExpenseSort, 'bill', 'Bill', toggleLocalExpenseSort)}</th>
+                <th>{renderSortableHeader(localExpenseSort, 'heading', 'Heading', toggleLocalExpenseSort)}</th>
+                <th>{renderSortableHeader(localExpenseSort, 'kind', 'Kind', toggleLocalExpenseSort)}</th>
+                <th>{renderSortableHeader(localExpenseSort, 'beforeVat', 'Before VAT', toggleLocalExpenseSort)}</th>
+                <th>{renderSortableHeader(localExpenseSort, 'vat', 'VAT', toggleLocalExpenseSort)}</th>
+                <th>{renderSortableHeader(localExpenseSort, 'total', 'Total', toggleLocalExpenseSort)}</th>
+                {inventoryEnabled && <th>{renderSortableHeader(localExpenseSort, 'inventory', 'Inventory', toggleLocalExpenseSort)}</th>}
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {sortedLocalExpenses.map((localExpense) => (
-                <tr key={localExpense.id}>
-                  <td>{dateText(localExpense.billDate)}</td>
-                  <td>{partyName(localExpense.partyId)}</td>
-                  <td>{localExpense.billNumber}</td>
-                  <td>{localExpense.expenseType ?? 'Expense'}</td>
-                  <td>{localExpense.expenseHead || '-'}</td>
-                  <td>{npr(localExpense.amountBeforeVatNPR)}</td>
-                  <td>{npr(localExpense.vatNPR)}</td>
-                  <td>{npr(localExpense.totalAmountNPR)}</td>
-                  <td className="row-actions">
-                    {canEditOrDelete ? (
-                      <>
-                        <button type="button" className="small" onClick={() => editLocalExpense(localExpense)}>
-                          Edit
-                        </button>
-                        <button type="button" className="small danger" onClick={() => deleteLocalExpense(localExpense)}>
-                          Delete
-                        </button>
-                      </>
-                    ) : (
-                      '-'
+              {displayedLocalExpenses.map((localExpense) => {
+                const localStockKey = stockPurchaseKey(localExpense.id, 'Local Purchase')
+                const stockBill = stockPurchaseBillByKey.get(localStockKey)
+                const stockStatus = stockPurchaseStatusByKey.get(localStockKey)
+                const isStockLocalExpense = isLocalPurchaseStock(localExpense)
+
+                return (
+                  <tr key={localExpense.id}>
+                    <td>{dateText(localExpense.billDate)}</td>
+                    <td>{partyName(localExpense.partyId)}</td>
+                    <td>{localExpense.billNumber}</td>
+                    <td>{localExpense.expenseType ?? 'Expense'}</td>
+                    <td>{localExpense.expenseHead || '-'}</td>
+                    <td>{npr(localExpense.amountBeforeVatNPR)}</td>
+                    <td>{npr(localExpense.vatNPR)}</td>
+                    <td>{npr(localExpense.totalAmountNPR)}</td>
+                    {inventoryEnabled && (
+                      <td>
+                        {isStockLocalExpense ? (
+                          <InventoryRegisterCell
+                            isReadOnly={isStockEntryReadOnly(localExpense.lifecycleStatus)}
+                            onAdd={() => openStockEntryForLocalExpense(localExpense)}
+                            onPreview={() => setPreviewStockPurchase({ documentId: localExpense.id, sourceType: 'Local Purchase' })}
+                            status={stockStatus}
+                            stockBill={stockBill}
+                          />
+                        ) : (
+                          '-'
+                        )}
+                      </td>
                     )}
-                  </td>
-                </tr>
-              ))}
-              {!data.localExpenses.length && <EmptyRow columns={9} />}
+                    <td className="row-actions">
+                      {canEditOrDelete ? (
+                        <>
+                          <button type="button" className="small" onClick={() => editLocalExpense(localExpense)}>
+                            Edit
+                          </button>
+                          <button type="button" className="small danger" onClick={() => deleteLocalExpense(localExpense)}>
+                            Delete
+                          </button>
+                        </>
+                      ) : (
+                        '-'
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+              {!displayedLocalExpenses.length && <EmptyRow columns={inventoryEnabled ? 10 : 9} />}
             </tbody>
           </table>
         </div>
@@ -4830,9 +5373,53 @@ function App({
       ? viewItems
       : accountViewItems
   const currentView = allowedViewItems.includes(view) ? view : 'Dashboard'
+  const previewStockBill = previewStockPurchase
+    ? stockPurchaseBillByKey.get(stockPurchaseKey(previewStockPurchase.documentId, previewStockPurchase.sourceType))
+    : null
+  const previewImportPurchase = previewStockPurchase?.sourceType === 'Import Purchase'
+    ? data.purchases.find((purchase) => purchase.id === previewStockPurchase.documentId) ?? null
+    : null
+  const previewLocalExpense = previewStockPurchase?.sourceType === 'Local Purchase'
+    ? data.localExpenses.find((localExpense) => localExpense.id === previewStockPurchase.documentId) ?? null
+    : null
+  const previewPurchaseCurrency = previewImportPurchase?.supplierCurrency ?? 'NPR'
+  const previewPurchaseExchangeRate = previewImportPurchase?.supplierExchangeRate ?? 1
+  const previewPurchaseBillAmount = previewImportPurchase
+    ? previewImportPurchase.amountIC
+    : previewLocalExpense?.amountBeforeVatNPR ?? 0
+  const previewPurchaseVatAmount = previewLocalExpense?.vatNPR ?? 0
+  const previewPurchaseGrandTotal = previewLocalExpense?.totalAmountNPR
+  const previewCounterpartyName = previewImportPurchase
+    ? partyName(previewImportPurchase.vendorPartyId)
+    : previewLocalExpense
+      ? partyName(previewLocalExpense.partyId)
+      : previewStockBill?.supplierName ?? '-'
+  const previewPurchaseDate = previewImportPurchase
+    ? previewImportPurchase.debitNoteDate || previewImportPurchase.billDate || previewImportPurchase.agentServiceBillDate
+    : previewLocalExpense?.billDate ?? previewStockBill?.dateBs ?? ''
 
   return (
     <div className="app-shell" onKeyDown={moveEnterToNextField}>
+      {previewStockBill && (
+        <LineItemPreviewModal
+          billAmount={previewPurchaseBillAmount}
+          billNumber={previewImportPurchase?.vendorBillNumber ?? previewLocalExpense?.billNumber ?? previewStockBill.billNo}
+          companyName={activeCompanyProfile?.name || data.settings.companyName || 'Company'}
+          counterpartyLabel="Supplier"
+          counterpartyName={previewCounterpartyName}
+          currency={previewPurchaseCurrency}
+          date={previewPurchaseDate}
+          documentKind="purchase"
+          exchangeRate={previewPurchaseExchangeRate}
+          fiscalYear={activeFiscalYear.code || activeCompanyProfile?.fiscalYear || ''}
+          grandTotal={previewPurchaseGrandTotal}
+          items={stockItems}
+          lines={previewStockBill.items}
+          onClose={() => setPreviewStockPurchase(null)}
+          title={`${previewStockPurchase?.sourceType ?? 'Purchase'} Inventory Lines`}
+          vatAmount={previewPurchaseVatAmount}
+        />
+      )}
       <aside className="sidebar">
         <div>
           <p className="company-name-display compact inverse">{data.settings.companyName || 'Company'}</p>
@@ -4847,7 +5434,7 @@ function App({
               type="button"
               key={item}
               className={currentView === item ? 'active' : ''}
-              onClick={() => setView(item)}
+              onClick={() => navigateToView(item)}
             >
               {item}
             </button>
@@ -4907,7 +5494,7 @@ function App({
             setPaymentForm(createEmptyPayment())
             setPaymentBillYear('Current')
             setLocalExpenseForm(createEmptyLocalExpense())
-            window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
+            scrollToPageTop()
           }}
         />
         {isClosedFiscalYear && (
@@ -5114,6 +5701,58 @@ function InlineMessages({
         </em>
       ))}
     </span>
+  )
+}
+
+function InventoryRegisterCell({
+  isReadOnly,
+  onAdd,
+  onPreview,
+  status,
+  stockBill,
+}: {
+  isReadOnly: boolean
+  onAdd: () => void
+  onPreview: () => void
+  status?: StockDocumentStatus
+  stockBill?: StockPurchaseBill
+}) {
+  if (status?.status === 'Mismatch') {
+    return (
+      <div className="inventory-register-cell">
+        <span className="inventory-mismatch" title={status.statusReason || 'Inventory lines need review.'}>
+          Mismatch
+        </span>
+        {!isReadOnly && (
+          <button type="button" className="small danger" onClick={onAdd}>
+            Fix
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  if (stockBill) {
+    return (
+      <div className="inventory-register-cell">
+        <button type="button" className="small" onClick={onPreview}>
+          Preview
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="inventory-register-cell">
+      <span>Pending</span>
+      {isReadOnly ? (
+        <span className="muted">No inventory</span>
+      ) : (
+        <button type="button" className="small danger" onClick={onAdd}>
+          Add
+        </button>
+      )}
+    </div>
   )
 }
 

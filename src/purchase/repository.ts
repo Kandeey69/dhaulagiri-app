@@ -37,15 +37,15 @@ function isDatabaseLockedError(error: unknown) {
 }
 
 async function beginImmediateTransaction(db: SqlDatabase) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     try {
-      await db.execute('BEGIN TRANSACTION')
+      await db.execute('BEGIN IMMEDIATE TRANSACTION')
       return
     } catch (error) {
-      if (!isDatabaseLockedError(error) || attempt === 7) {
+      if (!isDatabaseLockedError(error) || attempt === 11) {
         throw error
       }
-      await wait(250 * (attempt + 1))
+      await wait(350 * (attempt + 1))
     }
   }
 }
@@ -89,8 +89,17 @@ const fiscalYearForDate = (
   fiscalYears: FiscalYear[],
   settings?: AppSettings,
 ) =>
-  findFiscalYearByBsDate(date, fiscalYears) ??
+  (date ? findFiscalYearByBsDate(date, fiscalYears) : undefined) ??
   getOrCreateMigrationFiscalYear(activeCompanyId(), fiscalYears, activeFiscalYearCode(settings))
+
+const importPurchaseFiscalDateFromDb = (row: Record<string, unknown>) =>
+  String(row.debitNoteDate ?? '') || String(row.agentServiceBillDate ?? '')
+
+const importPurchaseFiscalYearId = (
+  purchase: Pick<ImportPurchase, 'debitNoteDate' | 'agentServiceBillDate'>,
+  fiscalYears: FiscalYear[],
+  settings?: AppSettings,
+) => fiscalYearForDate(purchase.debitNoteDate || purchase.agentServiceBillDate, fiscalYears, settings).id
 
 const fiscalYearFromDb = (row: Record<string, unknown>): FiscalYear => ({
   id: String(row.id ?? ''),
@@ -125,7 +134,7 @@ const purchaseFromDb = (
   settings: AppSettings,
 ): ImportPurchase => ({
   id: String(row.id ?? ''),
-  fiscalYearId: String(row.fiscalYearId ?? '') || fiscalYearForDate(String(row.billDate ?? ''), fiscalYears, settings).id,
+  fiscalYearId: String(row.fiscalYearId ?? '') || fiscalYearForDate(importPurchaseFiscalDateFromDb(row), fiscalYears, settings).id,
   lifecycleStatus: lifecycleStatusFromDb(row.lifecycleStatus),
   vendorPartyId: String(row.vendorPartyId ?? ''),
   vendorBillNumber: String(row.vendorBillNumber ?? ''),
@@ -359,11 +368,24 @@ async function ensureColumn(
   const columns = await db.select<Record<string, unknown>[]>(
     `PRAGMA table_info(${tableName})`,
   )
-  const hasColumn = columns.some((column) => String(column.name ?? '') === columnName)
+  const normalizedColumnName = columnName.toLowerCase()
+  const hasColumn = columns.some((column) => String(column.name ?? '').toLowerCase() === normalizedColumnName)
 
   if (!hasColumn) {
-    await db.execute(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`)
+    try {
+      await db.execute(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`)
+    } catch (error) {
+      if (!isDuplicateColumnError(error)) {
+        throw error
+      }
+    }
   }
+}
+
+function isDuplicateColumnError(error: unknown) {
+  return String(error instanceof Error ? error.message : error)
+    .toLowerCase()
+    .includes('duplicate column name')
 }
 
 async function ensureAccountingModel(db: SqlDatabase) {
@@ -596,7 +618,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
         )`,
         [
           purchase.id,
-          purchase.fiscalYearId || fiscalYearForDate(purchase.billDate, fiscalYears, data.settings).id,
+          purchase.fiscalYearId || importPurchaseFiscalYearId(purchase, fiscalYears, data.settings),
           purchase.lifecycleStatus ?? 'POSTED',
           purchase.vendorPartyId,
           purchase.vendorBillNumber,
@@ -784,15 +806,15 @@ async function createSqliteRepository(): Promise<DataRepository> {
   }
 
   const saveSnapshotWithRetry = async (data: AppData) => {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
         await saveSnapshot(data)
         return
       } catch (error) {
-        if (!isDatabaseLockedError(error) || attempt === 4) {
+        if (!isDatabaseLockedError(error) || attempt === 7) {
           throw error
         }
-        await wait(300 * (attempt + 1))
+        await wait(500 * (attempt + 1))
       }
     }
   }

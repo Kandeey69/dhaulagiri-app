@@ -10,6 +10,7 @@ const outRoot = path.join(os.tmpdir(), 'easysolution-domain-tests')
 
 const files = [
   'src/domain/fiscalYear.ts',
+  'src/companyContext.ts',
   'src/domain/accountingPolicy.ts',
   'src/domain/allocations.ts',
   'src/domain/validation.ts',
@@ -23,6 +24,13 @@ const files = [
   'src/application/reportFilters.ts',
   'src/application/transactionActions.ts',
   'src/purchase/calculations.ts',
+  'src/stock/settings.ts',
+  'src/stock/services/stockCalculations.ts',
+  'src/stock/services/stockCarryForward.ts',
+  'src/stock/services/stockDocuments.ts',
+  'src/stock/services/stockLandedCost.ts',
+  'src/stock/services/stockLedger.ts',
+  'src/stock/services/stockTransactions.ts',
   'tests/domain.test.ts',
 ]
 

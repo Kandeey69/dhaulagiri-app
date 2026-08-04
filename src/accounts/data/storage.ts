@@ -19,6 +19,8 @@ import {
   createFiscalYearFromCode,
   findFiscalYearByBsDate,
   getOrCreateMigrationFiscalYear,
+  isBsDateInFiscalYear,
+  validateDateInFiscalYear,
   type FiscalYear,
 } from "../../domain/fiscalYear";
 import { createSequentialAllocations, validateAllocations } from "../../domain/allocations";
@@ -61,17 +63,30 @@ async function ensureColumn(
   columnName: string,
   columnDefinition: string
 ) {
-  const columns = await db.select<{ name: string }[]>(
+  const columns = await db.select<Record<string, unknown>[]>(
     `PRAGMA table_info(${tableName})`
   );
 
-  const exists = columns.some((column) => column.name === columnName);
+  const normalizedColumnName = columnName.toLowerCase();
+  const exists = columns.some((column) => String(column.name ?? "").toLowerCase() === normalizedColumnName);
 
   if (!exists) {
-    await db.execute(
-      `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`
-    );
+    try {
+      await db.execute(
+        `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`
+      );
+    } catch (error) {
+      if (!isDuplicateColumnError(error)) {
+        throw error;
+      }
+    }
   }
+}
+
+function isDuplicateColumnError(error: unknown) {
+  return String(error instanceof Error ? error.message : error)
+    .toLowerCase()
+    .includes("duplicate column name");
 }
 
 async function ensureUniqueWholeNumberIndex(
@@ -150,14 +165,27 @@ async function getFiscalYears(db: Database) {
 
 async function resolveFiscalYearId(db: Database, dateBs: string) {
   const fiscalYears = await getFiscalYears(db);
-  return (
-    findFiscalYearByBsDate(dateBs, fiscalYears)?.id ??
-    getOrCreateMigrationFiscalYear(
-      getActiveCompanyId() || "default",
-      fiscalYears,
-      getActiveFiscalYearCode()
-    ).id
+  const activeFiscalYear = getOrCreateMigrationFiscalYear(
+    getActiveCompanyId() || "default",
+    fiscalYears,
+    getActiveFiscalYearCode()
   );
+  const validation = validateDateInFiscalYear(dateBs, activeFiscalYear, "Date BS");
+
+  if (!validation.valid) {
+    throw new Error(validation.error ?? `Date BS is outside fiscal year ${activeFiscalYear.code}.`);
+  }
+
+  return findFiscalYearByBsDate(dateBs, fiscalYears)?.id ?? activeFiscalYear.id;
+}
+
+function activeFiscalYearForFiltering() {
+  return createFiscalYearFromCode(getActiveCompanyId() || "default", getActiveFiscalYearCode());
+}
+
+function filterByActiveBsFiscalYear<T>(rows: T[], dateOf: (row: T) => string) {
+  const fiscalYear = activeFiscalYearForFiltering();
+  return rows.filter((row) => isBsDateInFiscalYear(dateOf(row), fiscalYear));
 }
 
 async function ensureAccountingModel(db: Database) {
@@ -1223,7 +1251,7 @@ export async function getSales(): Promise<Sale[]> {
     ORDER BY CAST(bill_no AS INTEGER) ASC
   `);
 
-  return rows.map(mapSale);
+  return filterByActiveBsFiscalYear(rows.map(mapSale), (sale) => sale.dateBs);
 }
 
 export async function saveSale(
@@ -1498,7 +1526,7 @@ export async function getCollections(): Promise<Collection[]> {
     ORDER BY CAST(reference_no AS INTEGER) ASC
   `);
 
-  return rows.map(mapCollection);
+  return filterByActiveBsFiscalYear(rows.map(mapCollection), (collection) => collection.dateBs);
 }
 
 export async function saveCollection(
@@ -1817,7 +1845,7 @@ export async function getCreditNotes(): Promise<CreditNote[]> {
     ORDER BY CAST(credit_note_no AS INTEGER) ASC
   `);
 
-  return rows.map(mapCreditNote);
+  return filterByActiveBsFiscalYear(rows.map(mapCreditNote), (creditNote) => creditNote.dateBs);
 }
 
 export async function saveCreditNote(

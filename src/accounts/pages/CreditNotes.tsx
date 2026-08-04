@@ -7,6 +7,7 @@ import {
   saveCreditNote,
   updateCreditNote,
 } from "../data/storage";
+import { scrollToPageTop } from "../../scroll";
 import { calculateVatAmount, getSuiteVatRatePercent } from "../utils/settings";
 
 function normalizeWholeNumber(value: string) {
@@ -37,6 +38,9 @@ type CreditNotesProps = {
   canManage: boolean;
 };
 
+type CreditNoteSortKey = "creditNoteNo" | "dateBs" | "party" | "amount" | "vatAmount" | "totalAmount" | "remarks";
+type SortDirection = "asc" | "desc";
+
 export default function CreditNotes({ canManage }: CreditNotesProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [creditNotes, setCreditNotes] = useState<CreditNote[]>([]);
@@ -47,6 +51,10 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
   const [amount, setAmount] = useState("");
   const [remarks, setRemarks] = useState("");
   const [message, setMessage] = useState("");
+  const [creditNoteSort, setCreditNoteSort] = useState<{ key: CreditNoteSortKey | null; direction: SortDirection }>({
+    key: null,
+    direction: "asc",
+  });
 
   const numericAmount = Number(amount || 0);
   const vatRatePercent = getSuiteVatRatePercent();
@@ -84,7 +92,7 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
     setPartyId(creditNote.partyId);
     setAmount(String(creditNote.amount));
     setRemarks(creditNote.remarks ?? "");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollToPageTop("smooth");
   }
 
   async function handleSave() {
@@ -195,6 +203,31 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
     (sum, creditNote) => sum + creditNote.vatAmount,
     0
   );
+  const sortedCreditNotes = creditNoteSort.key
+    ? [...creditNotes].sort((left, right) => compareCreditNotes(left, right, creditNoteSort.key as CreditNoteSortKey, creditNoteSort.direction, parties))
+    : creditNotes;
+
+  function toggleCreditNoteSort(key: CreditNoteSortKey) {
+    setCreditNoteSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  }
+
+  function renderSortableHeader(key: CreditNoteSortKey, label: string) {
+    const isActive = creditNoteSort.key === key;
+    return (
+      <th aria-sort={isActive ? (creditNoteSort.direction === "asc" ? "ascending" : "descending") : "none"}>
+        <button type="button" className="sortable-table-header" onClick={() => toggleCreditNoteSort(key)}>
+          {label}
+          <span aria-hidden="true">{isActive ? (creditNoteSort.direction === "asc" ? " ↑" : " ↓") : " ↕"}</span>
+          <span className="sr-only">
+            {isActive ? ` sorted ${creditNoteSort.direction === "asc" ? "ascending" : "descending"}` : " sort column"}
+          </span>
+        </button>
+      </th>
+    );
+  }
 
   return (
     <>
@@ -296,19 +329,19 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
         <table>
           <thead>
             <tr>
-              <th>Credit Note No.</th>
-              <th>Date BS</th>
-              <th>Party</th>
-              <th>Amount</th>
-              <th>VAT</th>
-              <th>Total Adjustment</th>
-              <th>Remarks</th>
+              {renderSortableHeader("creditNoteNo", "Credit Note No.")}
+              {renderSortableHeader("dateBs", "Date BS")}
+              {renderSortableHeader("party", "Party")}
+              {renderSortableHeader("amount", "Amount")}
+              {renderSortableHeader("vatAmount", "VAT")}
+              {renderSortableHeader("totalAmount", "Total Adjustment")}
+              {renderSortableHeader("remarks", "Remarks")}
               {canManage && <th>Action</th>}
             </tr>
           </thead>
 
           <tbody>
-            {creditNotes.map((creditNote) => {
+            {sortedCreditNotes.map((creditNote) => {
               const party = parties.find((item) => item.id === creditNote.partyId);
 
               return (
@@ -354,4 +387,29 @@ function formatMoney(value: number) {
   return Number(value || 0).toLocaleString("en-US", {
     maximumFractionDigits: 2,
   });
+}
+
+function compareCreditNotes(
+  left: CreditNote,
+  right: CreditNote,
+  key: CreditNoteSortKey,
+  direction: SortDirection,
+  parties: Party[],
+) {
+  const directionMultiplier = direction === "asc" ? 1 : -1;
+  const partyName = (creditNote: CreditNote) => parties.find((party) => party.id === creditNote.partyId)?.name ?? "";
+
+  if (key === "creditNoteNo" || key === "amount" || key === "vatAmount" || key === "totalAmount") {
+    const leftValue = key === "creditNoteNo" ? Number(left.creditNoteNo || 0) : Number(left[key] || 0);
+    const rightValue = key === "creditNoteNo" ? Number(right.creditNoteNo || 0) : Number(right[key] || 0);
+    const compare = leftValue - rightValue;
+    if (compare !== 0) return compare * directionMultiplier;
+  } else {
+    const leftValue = key === "party" ? partyName(left) : String(left[key] ?? "");
+    const rightValue = key === "party" ? partyName(right) : String(right[key] ?? "");
+    const compare = leftValue.localeCompare(rightValue);
+    if (compare !== 0) return compare * directionMultiplier;
+  }
+
+  return Number(left.creditNoteNo || 0) - Number(right.creditNoteNo || 0) || left.createdAt.localeCompare(right.createdAt);
 }
