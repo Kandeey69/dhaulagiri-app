@@ -99,7 +99,7 @@ export function buildSourceDocs({
       exchangeRate: purchase.supplierExchangeRate,
       companyId,
       fiscalYearId: purchase.fiscalYearId,
-      grandTotal: purchase.amountIC,
+      grandTotal: purchase.landedCostNPR,
       landedCostNpr: purchase.landedCostNPR,
       calculationVersion: purchase.calculationVersion,
       calculatedAt: purchase.calculatedAt,
@@ -315,6 +315,11 @@ function optionalAmountMatches(snapshotValue: number | undefined, currentValue: 
   return snapshotValue === undefined || amountMatchesNumber(snapshotValue, Number(currentValue || 0), tolerance);
 }
 
+function optionalAmountMatchesAny(snapshotValue: number | undefined, currentValues: Array<number | undefined>, tolerance = 0.5) {
+  return snapshotValue === undefined ||
+    currentValues.some((currentValue) => amountMatchesNumber(snapshotValue, Number(currentValue || 0), tolerance));
+}
+
 function optionalTextMatches(snapshotValue: string | undefined, currentValue: string | undefined) {
   return snapshotValue === undefined || comparableText(snapshotValue) === comparableText(currentValue);
 }
@@ -343,8 +348,11 @@ function snapshotMatches(doc: StockDocumentReference, snapshot: StockSourceSnaps
   }
 
   const current = snapshotFromDoc(doc);
+  const sourceAmountMatches = doc.type === "Import Purchase"
+    ? optionalAmountMatchesAny(snapshot?.sourceAmount, [current.sourceAmount, current.sourceAmountNpr])
+    : optionalAmountMatches(snapshot?.sourceAmount, current.sourceAmount);
   const checks = [
-    optionalAmountMatches(snapshot?.sourceAmount, current.sourceAmount),
+    sourceAmountMatches,
     optionalAmountMatches(snapshot?.sourceAmountNpr, current.sourceAmountNpr),
     optionalAmountMatches(snapshot?.sourceGrandTotal, current.sourceGrandTotal),
     optionalAmountMatches(snapshot?.sourceLandedCostNpr, current.sourceLandedCostNpr),
@@ -368,7 +376,9 @@ function metadataMatches(
   const storedDate = "dateBs" in stored ? stored.dateBs : "";
   const storedParty = "customerName" in stored ? stored.customerName : stored.supplierName;
 
-  if (comparableText(storedBillNo) !== comparableText(doc.billNo)) {
+  const storedBillKey = comparableText(storedBillNo);
+  const sourceBillKeys = new Set([comparableText(doc.billNo), comparableText(doc.documentId)]);
+  if (!sourceBillKeys.has(storedBillKey)) {
     return { matches: false, reason: "Bill number changed after inventory lines were saved." };
   }
   if (comparableDate(storedDate) !== comparableDate(doc.date)) {
@@ -411,8 +421,12 @@ function validateStoredStockDocument(
     };
   }
 
-  const entryTarget = doc.type === "Sale" ? doc.amount : doc.amount;
-  if (!amountMatchesNumber(lineValue, entryTarget)) {
+  const entryTargets = doc.type === "Sale"
+    ? [doc.amount]
+    : doc.type === "Import Purchase"
+      ? [doc.amount, doc.amountNpr]
+      : [doc.amountNpr ?? doc.amount];
+  if (!entryTargets.some((entryTarget) => amountMatchesNumber(lineValue, Number(entryTarget || 0)))) {
     return {
       isFinal: false,
       lineValue,

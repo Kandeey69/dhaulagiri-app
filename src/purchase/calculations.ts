@@ -1,8 +1,8 @@
 import type { Currency, FreightIndiaStatus, ImportPurchase, Payment } from './domain'
 import {
+  calculateImportLandedCostBreakdown,
   createPurchaseCalculationPolicy,
   freightCreatesCustomAgentPayable,
-  freightTreatmentForStatus,
   type PurchaseCalculationPolicy,
   type PurchaseComputedTotals,
   type PurchaseInputs,
@@ -48,55 +48,20 @@ export function calculatePurchaseComputedTotals(
   input: PurchaseInputs,
   policy: PurchaseCalculationPolicy,
 ): PurchaseComputedTotals {
-  const vatRate = Math.max(0, policy.vatRatePercent) / 100
-  const freightTreatment = freightTreatmentForStatus(input.freightIndiaStatus)
-  const supplierAmountNPR = money(input.amountIC * input.supplierExchangeRate)
-  const terminalVatNPR = money(input.terminalChargeWithoutVatNPR * vatRate)
-  const totalTerminalChargeNPR = money(input.terminalChargeWithoutVatNPR + terminalVatNPR)
-  const freightIndiaAmountNPR = money(input.freightIndiaAmountIC * input.freightIndiaExchangeRate)
-  const loadingUnloadingChargeNPR = money(input.totalKg * input.loadingUnloadingChargePerKg)
-  const agentServiceVatNPR = money(input.agentServiceAmountBeforeVatNPR * vatRate)
-  const debitFreight = freightTreatment.createsCustomAgentPayable ? freightIndiaAmountNPR : 0
-  const landedFreight = freightTreatment.includedInLandedCost ? freightIndiaAmountNPR : 0
-
-  const debitNoteTotalNPR = money(
-    input.importDutyNPR +
-      input.customServiceNPR +
-      input.importVatNPR +
-      totalTerminalChargeNPR +
-      debitFreight +
-      input.otherChargesNPR,
-  )
-  const agentServiceTotalNPR = money(
-    input.agentServiceAmountBeforeVatNPR + agentServiceVatNPR,
-  )
-  const totalAgentPayableNPR = money(debitNoteTotalNPR + agentServiceTotalNPR)
-  const totalInputVatNPR = money(
-    input.importVatNPR + terminalVatNPR + agentServiceVatNPR,
-  )
-  const landedCostNPR = money(
-    supplierAmountNPR +
-      input.importDutyNPR +
-      input.customServiceNPR +
-      input.terminalChargeWithoutVatNPR +
-      landedFreight +
-      loadingUnloadingChargeNPR +
-      input.otherChargesNPR +
-      input.agentServiceAmountBeforeVatNPR,
-  )
+  const breakdown = calculateImportLandedCostBreakdown(input, policy)
 
   return {
-    supplierAmountNPR,
-    terminalVatNPR,
-    totalTerminalChargeNPR,
-    freightIndiaAmountNPR,
-    loadingUnloadingChargeNPR,
-    agentServiceVatNPR,
-    debitNoteTotalNPR,
-    agentServiceTotalNPR,
-    totalAgentPayableNPR,
-    totalInputVatNPR,
-    landedCostNPR,
+    supplierAmountNPR: breakdown.supplierAmountNPR,
+    terminalVatNPR: breakdown.terminalVatNPR,
+    totalTerminalChargeNPR: breakdown.totalTerminalChargeNPR,
+    freightIndiaAmountNPR: breakdown.freightNPR,
+    loadingUnloadingChargeNPR: breakdown.loadingUnloadingNPR,
+    agentServiceVatNPR: breakdown.agentServiceVatNPR,
+    debitNoteTotalNPR: breakdown.debitNoteTotalNPR,
+    agentServiceTotalNPR: breakdown.agentServiceTotalNPR,
+    totalAgentPayableNPR: breakdown.customsAgentPayableNPR,
+    totalInputVatNPR: breakdown.recoverableInputVatNPR,
+    landedCostNPR: breakdown.landedCostNPR,
   }
 }
 
@@ -112,6 +77,8 @@ export function hasAgentValues(purchase: Partial<ImportPurchase>) {
     purchase.terminalChargeWithoutVatNPR,
     purchase.terminalVatNPR,
     purchase.freightIndiaAmountIC,
+    money(Number(purchase.totalKg ?? 0) * Number(purchase.loadingUnloadingChargePerKg ?? 0)),
+    purchase.loadingUnloadingChargeNPR,
     purchase.otherChargesNPR,
     purchase.agentServiceAmountBeforeVatNPR,
     purchase.agentServiceVatNPR,

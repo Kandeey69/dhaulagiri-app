@@ -74,7 +74,7 @@ import {
   withUpdatedPayment,
   withUpdatedPurchase,
 } from './storage'
-import { getActiveCompanyId, getActiveCompanyProfile } from '../companyContext'
+import { getActiveCompanyId, getActiveCompanyProfile, getActivePurchaseDatabaseUrl } from '../companyContext'
 import LineItemPreviewModal from '../stock/LineItemPreviewModal'
 import { buildStatuses } from '../stock/services/stockCalculations'
 import { buildStockEntryTarget } from '../stock/services/stockDocuments'
@@ -349,6 +349,7 @@ const auditValue = (value: unknown) => {
   const text = JSON.stringify(value ?? '', null, 0)
   return text.length > 900 ? `${text.slice(0, 897)}...` : text
 }
+const sqliteFilenameFromUrl = (databaseUrl: string) => databaseUrl.replace(/^sqlite:/, '')
 const normalizeBsDate = (value: string, keepHyphen = false) => {
   const raw = String(value ?? '').trim()
   const match = raw.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/)
@@ -998,8 +999,10 @@ function App({
   })
   const [ledgerPartyId, setLedgerPartyId] = useState('')
   const [vatFilters, setVatFilters] = useState({ month: '' })
+  const activeCompanyId = getActiveCompanyId() || 'default'
+  const purchaseFiscalYearStorageKey = `purchase-selected-fiscal-year:${activeCompanyId}`
   const [selectedFiscalYearId, setSelectedFiscalYearId] = useState(() =>
-    window.localStorage.getItem('purchase-selected-fiscal-year') ?? '',
+    window.localStorage.getItem(purchaseFiscalYearStorageKey) ?? '',
   )
   const lastSavedSnapshotRef = useRef('')
 
@@ -1008,6 +1011,10 @@ function App({
       setUserRole(initialUserRole)
     }
   }, [initialUserRole])
+
+  useEffect(() => {
+    setSelectedFiscalYearId(window.localStorage.getItem(purchaseFiscalYearStorageKey) ?? '')
+  }, [purchaseFiscalYearStorageKey])
 
   useEffect(() => {
     scrollToPageTop()
@@ -1073,7 +1080,6 @@ function App({
   const indianSupplierPaymentParties = [...indianSuppliers, ...indianTransportParties]
   const localSuppliers = activeParties.filter((party) => party.category === 'Local Suppliers')
   const otherPaymentParties = activeParties.filter((party) => !isIndianSupplierCategory(party))
-  const activeCompanyId = getActiveCompanyId() || 'default'
   const fiscalYearOptions = useMemo(() => {
     const profile = getActiveCompanyProfile()
     const code = profile?.fiscalYear || data.settings.fiscalYear || defaultSettings.fiscalYear
@@ -1122,8 +1128,8 @@ function App({
     if (selectedFiscalYearId !== activeFiscalYear.id) {
       setSelectedFiscalYearId(activeFiscalYear.id)
     }
-    window.localStorage.setItem('purchase-selected-fiscal-year', activeFiscalYear.id)
-  }, [activeFiscalYear.id, selectedFiscalYearId])
+    window.localStorage.setItem(purchaseFiscalYearStorageKey, activeFiscalYear.id)
+  }, [activeFiscalYear.id, purchaseFiscalYearStorageKey, selectedFiscalYearId])
   const isUsdSupplierMode = data.settings.supplierPurchaseCurrency === 'USD'
   const selectedSupplierCurrency: SupplierCurrency = isUsdSupplierMode
     ? normalizeSupplierCurrency(purchaseForm.supplierCurrency)
@@ -1223,7 +1229,7 @@ function App({
         documentId: purchase.id,
         exchangeRate: purchase.supplierExchangeRate,
         fiscalYearId: purchase.fiscalYearId,
-        grandTotal: purchase.amountIC,
+        grandTotal: purchase.landedCostNPR,
         landedCostNpr: purchase.landedCostNPR,
         lifecycleStatus: purchase.lifecycleStatus,
         partyName: partyName(purchase.vendorPartyId),
@@ -1436,14 +1442,128 @@ function App({
     oldValue = '',
     newValue = '',
   ) => {
+    setData(buildDataWithLog(next, action, details, oldValue, newValue))
+  }
+
+  const buildDataWithLog = (
+    next: AppData,
+    action: string,
+    details: string,
+    oldValue = '',
+    newValue = '',
+  ) => {
     const fiscalYears = next.fiscalYears.some((fiscalYear) => fiscalYear.id === activeFiscalYear.id)
       ? next.fiscalYears
       : [activeFiscalYear, ...next.fiscalYears]
-    setData({
+
+    return {
       ...next,
       fiscalYears,
       activityLogs: [createActivity(action, details, userRole ?? 'Unknown', oldValue, newValue), ...next.activityLogs],
-    })
+    }
+  }
+
+  const persistDataWithLog = async (
+    next: AppData,
+    action: string,
+    details: string,
+    options: {
+      operationId?: string
+      oldValue?: string
+      newValue?: string
+      importPurchaseId?: string
+      deletedImportPurchaseId?: string
+      localExpenseId?: string
+      deletedLocalExpenseId?: string
+    } = {},
+  ) => {
+    if (!repository) {
+      window.alert('Storage is still loading. Please try again.')
+      return false
+    }
+
+    const persisted = buildDataWithLog(next, action, details, options.oldValue ?? '', options.newValue ?? '')
+    const importPurchaseId = options.importPurchaseId ?? options.deletedImportPurchaseId ?? ''
+    const localExpenseId = options.localExpenseId ?? options.deletedLocalExpenseId ?? ''
+    const canUseNativePurchaseWrite = repository.kind === 'sqlite' && (importPurchaseId || localExpenseId)
+
+    try {
+      console.info('[purchase-persistence]', {
+        operationId: options.operationId ?? 'PURCHASE-SAVE',
+        action: 'save-start',
+        companyId: getActiveCompanyId() || 'default',
+        databaseUrl: getActivePurchaseDatabaseUrl(),
+        importPurchaseId: options.importPurchaseId,
+        deletedImportPurchaseId: options.deletedImportPurchaseId,
+        localExpenseId: options.localExpenseId,
+        deletedLocalExpenseId: options.deletedLocalExpenseId,
+      })
+
+      if (canUseNativePurchaseWrite) {
+        const { invoke } = await import('@tauri-apps/api/core')
+        const purchaseFilename = sqliteFilenameFromUrl(getActivePurchaseDatabaseUrl())
+        const activityLog = persisted.activityLogs[0]
+
+        if (importPurchaseId) {
+          await invoke('write_import_purchase_transaction', {
+            purchaseFilename,
+            mode: options.deletedImportPurchaseId ? 'delete' : 'upsert',
+            purchaseId: importPurchaseId,
+            purchase: persisted.purchases.find((item) => item.id === importPurchaseId) ?? null,
+            ledgerEntries: persisted.ledgerEntries.filter(
+              (entry) => entry.sourceType === 'PURCHASE' && entry.sourceId === importPurchaseId,
+            ),
+            activityLog,
+          })
+        } else {
+          await invoke('write_local_purchase_transaction', {
+            purchaseFilename,
+            mode: options.deletedLocalExpenseId ? 'delete' : 'upsert',
+            localExpenseId,
+            localExpense: persisted.localExpenses.find((item) => item.id === localExpenseId) ?? null,
+            ledgerEntries: persisted.ledgerEntries.filter(
+              (entry) => entry.sourceType === 'LOCAL_EXPENSE' && entry.sourceId === localExpenseId,
+            ),
+            activityLog,
+          })
+        }
+      } else {
+        await repository.saveData(persisted)
+      }
+
+      const reloaded = await repository.loadData()
+
+      if (options.importPurchaseId && !reloaded.purchases.some((item) => item.id === options.importPurchaseId)) {
+        throw new Error(`Saved import purchase ${options.importPurchaseId} was not found after reload.`)
+      }
+
+      if (options.deletedImportPurchaseId && reloaded.purchases.some((item) => item.id === options.deletedImportPurchaseId)) {
+        throw new Error(`Deleted import purchase ${options.deletedImportPurchaseId} was still present after reload.`)
+      }
+
+      if (options.localExpenseId && !reloaded.localExpenses.some((item) => item.id === options.localExpenseId)) {
+        throw new Error(`Saved local purchase ${options.localExpenseId} was not found after reload.`)
+      }
+
+      if (options.deletedLocalExpenseId && reloaded.localExpenses.some((item) => item.id === options.deletedLocalExpenseId)) {
+        throw new Error(`Deleted local purchase ${options.deletedLocalExpenseId} was still present after reload.`)
+      }
+
+      lastSavedSnapshotRef.current = JSON.stringify(reloaded)
+      setData(reloaded)
+      console.info('[purchase-persistence]', {
+        operationId: options.operationId,
+        action: 'save-readback-ok',
+        importPurchases: reloaded.purchases.length,
+        localExpenses: reloaded.localExpenses.length,
+        ledgerEntries: reloaded.ledgerEntries.length,
+      })
+      return true
+    } catch (error) {
+      console.error('Purchase data persistence failed.', error)
+      window.alert(`Could not save purchase data: ${errorMessage(error)}`)
+      return false
+    }
   }
 
   const postingContext = (fiscalYearId: string) => ({
@@ -1460,6 +1580,33 @@ function App({
 
   const appendLedgerEntries = (entries: LedgerEntry[]) =>
     [...data.ledgerEntries, ...entries]
+
+  const replaceLedgerEntriesForSource = (
+    sourceType: LedgerEntry['sourceType'],
+    sourceId: string,
+    entries: LedgerEntry[],
+  ) => [
+    ...data.ledgerEntries.filter((entry) => entry.sourceType !== sourceType || entry.sourceId !== sourceId),
+    ...entries,
+  ]
+
+  const buildImportPurchaseLedgerEntries = (purchase: ImportPurchase) =>
+    postPurchase({
+      id: purchase.id,
+      lifecycleStatus: 'DRAFT',
+      fiscalYearId: purchase.fiscalYearId,
+      date: normalizeBsDate(purchase.debitNoteDate) || normalizeBsDate(purchase.agentServiceBillDate) || activeFiscalYear.startBs,
+      vendorPartyId: purchase.vendorPartyId,
+      customAgentPartyId: purchase.customAgentPartyId,
+      freightIndiaPartyId: purchase.freightIndiaPartyId,
+      freightIndiaStatus: purchase.freightIndiaStatus,
+      supplierAmountNPR: purchase.supplierAmountNPR,
+      totalAgentPayableNPR: purchase.totalAgentPayableNPR,
+      freightIndiaAmountNPR: purchase.freightIndiaAmountNPR,
+      landedCostNPR: purchase.landedCostNPR,
+      totalInputVatNPR: purchase.totalInputVatNPR,
+      reference: purchase.vendorBillNumber,
+    }, postingContext(purchase.fiscalYearId))
 
   const loginAsAccount = () => {
     setUserRole('Account')
@@ -1702,6 +1849,10 @@ function App({
           (sum, purchase) => sum + purchase.agentServiceTotalNPR,
           0,
         )
+        const totalAgentPayable = agentPurchases.reduce(
+          (sum, purchase) => sum + purchase.totalAgentPayableNPR,
+          0,
+        )
         const totalPayments = sortedPayments
           .filter((payment) => payment.partyId === party.id && isAgentPayment(payment))
           .reduce((sum, payment) => sum + payment.amountNPR, 0)
@@ -1710,9 +1861,10 @@ function App({
           party,
           totalDebitNotes,
           totalServiceBills,
+          totalAgentPayable,
           totalPayments,
           outstanding:
-            party.openingPayable + totalDebitNotes + totalServiceBills - totalPayments,
+            party.openingPayable + totalAgentPayable - totalPayments,
         }
       })
   }, [data.parties, sortedPayments, sortedPurchases])
@@ -3182,8 +3334,18 @@ function App({
     }
   }
 
-  const savePurchase = (event: FormEvent) => {
+  const savePurchase = async (event: FormEvent) => {
     event.preventDefault()
+    const operationId = `PURCHASE-SAVE-${createId()}`
+    console.info('[purchase-persistence]', {
+      operationId,
+      action: purchaseForm.id ? 'update-import-purchase' : 'create-import-purchase',
+      companyId: getActiveCompanyId() || 'default',
+      fiscalYearId: activeFiscalYear.id,
+      fiscalYear: activeFiscalYear.code,
+      databaseUrl: getActivePurchaseDatabaseUrl(),
+      billNumber: purchaseForm.vendorBillNumber,
+    })
 
     try {
       ensureFiscalYearEditable(activeFiscalYear)
@@ -3259,6 +3421,11 @@ function App({
     setPurchaseValidationWarnings([])
 
     if (validationErrors.length) {
+      console.warn('[purchase-persistence]', {
+        operationId,
+        action: 'validation-failed',
+        errors: validationErrors,
+      })
       focusFirstInvalidField(validationErrors)
       return
     }
@@ -3309,13 +3476,38 @@ function App({
     if (purchaseForm.id) {
       const previous = data.purchases.find((purchase) => purchase.id === purchaseForm.id)
       const updated = withUpdatedPurchase(purchaseToSave)
+      let ledgerEntries: LedgerEntry[]
+
+      try {
+        ledgerEntries = buildImportPurchaseLedgerEntries(updated)
+      } catch (error) {
+        console.error('[purchase-persistence]', {
+          operationId,
+          action: 'posting-update-failed',
+          error: errorMessage(error),
+        })
+        const errors = [{ field: 'vendorBillNumber', message: errorMessage(error) }]
+        setPurchaseValidationErrors(errors)
+        focusFirstInvalidField(errors)
+        return
+      }
+
       const next = {
         ...data,
         purchases: data.purchases.map((purchase) =>
           purchase.id === updated.id ? updated : purchase,
         ),
+        ledgerEntries: replaceLedgerEntriesForSource('PURCHASE', updated.id, ledgerEntries),
       }
-      setDataWithLog(next, 'Updated import purchase', updated.vendorBillNumber, auditValue(previous), auditValue(updated))
+      const saved = await persistDataWithLog(next, 'Updated import purchase', updated.vendorBillNumber, {
+        operationId,
+        oldValue: auditValue(previous),
+        newValue: auditValue(updated),
+        importPurchaseId: updated.id,
+      })
+      if (!saved) {
+        return
+      }
     } else {
       const created = withNewPurchase({
         ...purchaseToSave,
@@ -3323,27 +3515,39 @@ function App({
         postedAt: new Date().toISOString(),
         postedBy: userRole ?? 'Unknown',
       })
-      const ledgerEntries = postPurchase({
-        id: created.id,
-        lifecycleStatus: 'DRAFT',
-        fiscalYearId: created.fiscalYearId,
-        date: normalizeBsDate(created.debitNoteDate) || normalizeBsDate(created.agentServiceBillDate) || activeFiscalYear.startBs,
-        vendorPartyId: created.vendorPartyId,
-        customAgentPartyId: created.customAgentPartyId,
-        freightIndiaPartyId: created.freightIndiaPartyId,
-        freightIndiaStatus: created.freightIndiaStatus,
-        supplierAmountNPR: created.supplierAmountNPR,
-        totalAgentPayableNPR: created.totalAgentPayableNPR,
-        freightIndiaAmountNPR: created.freightIndiaAmountNPR,
-        landedCostNPR: created.landedCostNPR,
-        totalInputVatNPR: created.totalInputVatNPR,
-        reference: created.vendorBillNumber,
-      }, postingContext(created.fiscalYearId))
-      setDataWithLog(
-        { ...data, purchases: [created, ...data.purchases], ledgerEntries: appendLedgerEntries(ledgerEntries) },
+      let ledgerEntries: LedgerEntry[]
+
+      try {
+        console.info('[purchase-persistence]', {
+          operationId,
+          action: 'posting-import-purchase',
+          landedCostNPR: created.landedCostNPR,
+          supplierAmountNPR: created.supplierAmountNPR,
+          totalAgentPayableNPR: created.totalAgentPayableNPR,
+          totalInputVatNPR: created.totalInputVatNPR,
+        })
+        ledgerEntries = buildImportPurchaseLedgerEntries(created)
+      } catch (error) {
+        console.error('[purchase-persistence]', {
+          operationId,
+          action: 'posting-failed',
+          error: errorMessage(error),
+        })
+        const errors = [{ field: 'vendorBillNumber', message: errorMessage(error) }]
+        setPurchaseValidationErrors(errors)
+        focusFirstInvalidField(errors)
+        return
+      }
+
+      const saved = await persistDataWithLog(
+        { ...data, purchases: [created, ...data.purchases], ledgerEntries: replaceLedgerEntriesForSource('PURCHASE', created.id, ledgerEntries) },
         'Created import purchase',
         `${partyName(created.vendorPartyId)} - ${created.vendorBillNumber}`,
+        { operationId, importPurchaseId: created.id },
       )
+      if (!saved) {
+        return
+      }
     }
 
     setPurchaseValidationErrors([])
@@ -3445,7 +3649,7 @@ function App({
     }))
   }
 
-  const deletePurchase = (purchase: ImportPurchase) => {
+  const deletePurchase = async (purchase: ImportPurchase) => {
     if (!window.confirm(`Delete purchase bill ${purchase.vendorBillNumber}?`)) {
       return
     }
@@ -3454,7 +3658,14 @@ function App({
       ...data,
       purchases: data.purchases.filter((item) => item.id !== purchase.id),
     }
-    setDataWithLog(next, 'Deleted import purchase', purchase.vendorBillNumber, auditValue(purchase), 'Deleted')
+    const saved = await persistDataWithLog(next, 'Deleted import purchase', purchase.vendorBillNumber, {
+      oldValue: auditValue(purchase),
+      newValue: 'Deleted',
+      deletedImportPurchaseId: purchase.id,
+    })
+    if (!saved) {
+      return
+    }
     void cleanupLinkedPurchaseStock(purchase.id, 'Import Purchase', `purchase bill ${purchase.vendorBillNumber}`)
   }
 
@@ -3660,7 +3871,7 @@ function App({
     )
   }
 
-  const saveLocalExpense = (event: FormEvent) => {
+  const saveLocalExpense = async (event: FormEvent) => {
     event.preventDefault()
 
     try {
@@ -3704,13 +3915,19 @@ function App({
           localExpense.id === updated.id ? updated : localExpense,
         ),
       }
-      setDataWithLog(
+      const saved = await persistDataWithLog(
         next,
         'Updated local purchase/expense',
         updated.billNumber,
-        auditValue(previous),
-        auditValue(updated),
+        {
+          oldValue: auditValue(previous),
+          newValue: auditValue(updated),
+          localExpenseId: updated.id,
+        },
       )
+      if (!saved) {
+        return
+      }
     } else {
       const created = withNewLocalExpense({
         ...localExpenseToSave,
@@ -3718,23 +3935,35 @@ function App({
         postedAt: new Date().toISOString(),
         postedBy: userRole ?? 'Unknown',
       })
-      const ledgerEntries = postLocalExpense({
-        id: created.id,
-        lifecycleStatus: 'DRAFT',
-        fiscalYearId: created.fiscalYearId,
-        date: created.billDate,
-        partyId: created.partyId,
-        expenseType: created.expenseType,
-        amountBeforeVatNPR: created.amountBeforeVatNPR,
-        vatNPR: created.vatNPR,
-        totalAmountNPR: created.totalAmountNPR,
-        reference: created.billNumber,
-      }, postingContext(created.fiscalYearId))
-      setDataWithLog(
+      let ledgerEntries: LedgerEntry[]
+
+      try {
+        ledgerEntries = postLocalExpense({
+          id: created.id,
+          lifecycleStatus: 'DRAFT',
+          fiscalYearId: created.fiscalYearId,
+          date: created.billDate,
+          partyId: created.partyId,
+          expenseType: created.expenseType,
+          amountBeforeVatNPR: created.amountBeforeVatNPR,
+          vatNPR: created.vatNPR,
+          totalAmountNPR: created.totalAmountNPR,
+          reference: created.billNumber,
+        }, postingContext(created.fiscalYearId))
+      } catch (error) {
+        window.alert(errorMessage(error))
+        return
+      }
+
+      const saved = await persistDataWithLog(
         { ...data, localExpenses: [created, ...data.localExpenses], ledgerEntries: appendLedgerEntries(ledgerEntries) },
         'Created local purchase/expense',
         `${partyName(created.partyId)} - ${created.billNumber}`,
+        { localExpenseId: created.id },
       )
+      if (!saved) {
+        return
+      }
     }
 
     setLocalExpenseForm(createEmptyLocalExpense())
@@ -3782,7 +4011,7 @@ function App({
     navigateToView('Local Purchase / Expense')
   }
 
-  const deleteLocalExpense = (localExpense: LocalPurchaseExpense) => {
+  const deleteLocalExpense = async (localExpense: LocalPurchaseExpense) => {
     if (!window.confirm(`Delete local purchase/expense ${localExpense.billNumber}?`)) {
       return
     }
@@ -3791,13 +4020,19 @@ function App({
       ...data,
       localExpenses: data.localExpenses.filter((item) => item.id !== localExpense.id),
     }
-    setDataWithLog(
+    const saved = await persistDataWithLog(
       next,
       'Deleted local purchase/expense',
       `${partyName(localExpense.partyId)} - ${localExpense.billNumber}`,
-      auditValue(localExpense),
-      'Deleted',
+      {
+        oldValue: auditValue(localExpense),
+        newValue: 'Deleted',
+        deletedLocalExpenseId: localExpense.id,
+      },
     )
+    if (!saved) {
+      return
+    }
     void cleanupLinkedPurchaseStock(localExpense.id, 'Local Purchase', `local purchase/expense ${localExpense.billNumber}`)
   }
 

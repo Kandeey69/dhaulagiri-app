@@ -1,5 +1,13 @@
 import Database from "@tauri-apps/plugin-sql";
-import { getActiveStockDatabaseUrl, getStockDatabaseUrlForCompanyId } from "../companyContext";
+import {
+  assertActiveCompanyWritable,
+  assertCompanyWritable,
+  getActiveCompanyId,
+  getActiveStockDatabaseUrl,
+  getLegacyStockDatabaseFilenameForCompanyId,
+  getStockDatabaseFilenameForCompanyId,
+  getStockDatabaseUrlForCompanyId,
+} from "../companyContext";
 import { prepareStockPurchaseLinesForDocument } from "./services/stockLandedCost";
 import { runStockDbTransaction } from "./services/stockTransactions";
 import type {
@@ -18,7 +26,10 @@ import type {
 
 const dbPromises = new Map<string, Promise<Database>>();
 const stockOperationQueues = new Map<string, Promise<void>>();
+const stockMigrationPromises = new Map<string, Promise<void>>();
 const wait = (milliseconds: number) => new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds));
+const isTauriRuntime = () =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function isDatabaseLockedError(error: unknown) {
   const text = String(error instanceof Error ? error.message : error).toLowerCase();
@@ -63,7 +74,34 @@ async function runSerializedStockOperation<T>(stockDbUrl: string, work: () => Pr
   }
 }
 
-async function getDb(stockDbUrl = getActiveStockDatabaseUrl()) {
+async function prepareCompanyStockDatabase(companyId = getActiveCompanyId()) {
+  const normalizedCompanyId = String(companyId ?? "").trim();
+
+  if (!normalizedCompanyId || normalizedCompanyId === "default" || !isTauriRuntime()) {
+    return;
+  }
+
+  let migrationPromise = stockMigrationPromises.get(normalizedCompanyId);
+
+  if (!migrationPromise) {
+    migrationPromise = import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("migrate_stock_database", {
+        canonicalFilename: getStockDatabaseFilenameForCompanyId(normalizedCompanyId),
+        legacyFilenames: [getLegacyStockDatabaseFilenameForCompanyId(normalizedCompanyId)],
+      }))
+      .then(() => undefined)
+      .catch((error) => {
+        stockMigrationPromises.delete(normalizedCompanyId);
+        throw error;
+      });
+    stockMigrationPromises.set(normalizedCompanyId, migrationPromise);
+  }
+
+  return migrationPromise;
+}
+
+async function getDb(stockDbUrl = getActiveStockDatabaseUrl(), companyId = getActiveCompanyId()) {
+  await prepareCompanyStockDatabase(companyId);
   let dbPromise = dbPromises.get(stockDbUrl);
 
   if (!dbPromise) {
@@ -681,6 +719,7 @@ export async function getStockItems(): Promise<StockItem[]> {
 }
 
 export async function saveStockItem(input: Omit<StockItem, "id" | "createdAt">) {
+  assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
   const code = normalizeStockItemCode(input.code);
@@ -739,6 +778,7 @@ export async function saveStockItem(input: Omit<StockItem, "id" | "createdAt">) 
 }
 
 export async function upsertOpeningStockItem(input: Omit<StockItem, "id" | "createdAt">) {
+  assertActiveCompanyWritable();
   const code = normalizeStockItemCode(input.code);
   const items = await getStockItems();
   const existing = items.find(
@@ -759,6 +799,7 @@ export async function upsertOpeningStockItem(input: Omit<StockItem, "id" | "crea
 }
 
 export async function updateStockItem(input: Omit<StockItem, "createdAt">) {
+  assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
   const code = normalizeStockItemCode(input.code);
@@ -806,6 +847,7 @@ export async function updateStockItem(input: Omit<StockItem, "createdAt">) {
 }
 
 export async function deleteStockItem(itemId: string) {
+  assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
 
@@ -1032,6 +1074,7 @@ async function restoreSalesDocumentSnapshot(db: Database, snapshot: SalesDocumen
 }
 
 export async function setStockPurchaseLinesForDocument(input: StockPurchaseDocumentInput) {
+  assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
   const documentId = input.documentId.trim();
@@ -1164,6 +1207,7 @@ export async function setStockPurchaseLinesForDocument(input: StockPurchaseDocum
 }
 
 export async function setStockSalesLinesForDocument(input: StockSalesDocumentInput) {
+  assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
   const documentId = input.documentId.trim();
@@ -1318,7 +1362,7 @@ export async function getStockSalesBills(): Promise<StockSalesBill[]> {
 }
 
 async function getStockItemsFromDb(db: Database): Promise<StockItem[]> {
-  const rows = await db.select<ItemRow[]>(`
+  const rows = await selectWithRetry<ItemRow[]>(db, `
     SELECT *
     FROM stock_items
     ORDER BY name ASC
@@ -1328,12 +1372,12 @@ async function getStockItemsFromDb(db: Database): Promise<StockItem[]> {
 }
 
 async function getStockPurchaseBillsFromDb(db: Database): Promise<StockPurchaseBill[]> {
-  const billRows = await db.select<PurchaseBillRow[]>(`
+  const billRows = await selectWithRetry<PurchaseBillRow[]>(db, `
     SELECT *
     FROM stock_purchase_bills
     ORDER BY date_bs DESC, bill_no DESC
   `);
-  const lineRows = await db.select<PurchaseLineRow[]>(`
+  const lineRows = await selectWithRetry<PurchaseLineRow[]>(db, `
     SELECT *
     FROM stock_purchase_lines
   `);
@@ -1347,12 +1391,12 @@ async function getStockPurchaseBillsFromDb(db: Database): Promise<StockPurchaseB
 }
 
 async function getStockSalesBillsFromDb(db: Database): Promise<StockSalesBill[]> {
-  const billRows = await db.select<SalesBillRow[]>(`
+  const billRows = await selectWithRetry<SalesBillRow[]>(db, `
     SELECT *
     FROM stock_sales_bills
     ORDER BY date_bs DESC, bill_no DESC
   `);
-  const lineRows = await db.select<SalesLineRow[]>(`
+  const lineRows = await selectWithRetry<SalesLineRow[]>(db, `
     SELECT *
     FROM stock_sales_lines
   `);
@@ -1367,7 +1411,7 @@ async function getStockSalesBillsFromDb(db: Database): Promise<StockSalesBill[]>
 
 export async function getStockBackupDataForCompany(companyId: string): Promise<StockBackupData> {
   const stockDbUrl = getStockDatabaseUrlForCompanyId(companyId);
-  const db = await getDb(stockDbUrl);
+  const db = await getDb(stockDbUrl, companyId);
 
   return runSerializedStockOperation(stockDbUrl, async () => {
     const items = await getStockItemsFromDb(db);
@@ -1425,9 +1469,10 @@ function validateStockBackupData(data: StockBackupData) {
 }
 
 export async function replaceStockBackupDataForCompany(companyId: string, data: StockBackupData) {
+  assertCompanyWritable(companyId);
   validateStockBackupData(data);
   const stockDbUrl = getStockDatabaseUrlForCompanyId(companyId);
-  const db = await getDb(stockDbUrl);
+  const db = await getDb(stockDbUrl, companyId);
 
   await runSerializedStockOperation(stockDbUrl, () => runStockDbTransaction(db, async () => {
     await db.execute("DELETE FROM stock_purchase_lines");
@@ -1600,9 +1645,10 @@ export async function upsertStockOpeningItemsForCompany(
   companyId: string,
   items: StockOpeningCarryForwardInput[],
 ): Promise<StockOpeningCarryForwardWriteSummary> {
+  assertCompanyWritable(companyId);
   const stockDbUrl = getStockDatabaseUrlForCompanyId(companyId);
   const summary: StockOpeningCarryForwardWriteSummary = { created: 0, updated: 0 };
-  const db = await getDb(stockDbUrl);
+  const db = await getDb(stockDbUrl, companyId);
 
   await runSerializedStockOperation(stockDbUrl, async () => {
     const existingItems = await getStockItemsFromDb(db);

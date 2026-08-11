@@ -1,8 +1,10 @@
 import Database from "@tauri-apps/plugin-sql";
 import {
+  assertActiveCompanyWritable,
   getActiveAccountsDatabaseUrl,
   getActiveCompanyId,
   getActiveCompanyProfile,
+  getActiveStockDatabaseUrl,
 } from "../../companyContext";
 import type {
   ActivityLog,
@@ -43,6 +45,23 @@ export type AccountsBackupData = {
 
 let dbPromise: Promise<Database> | null = null;
 let dbUrl = "";
+const dbInitPromises = new Map<string, Promise<void>>();
+const dbTransactionQueues = new Map<string, Promise<void>>();
+
+const isTauriRuntime = () =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+function sqliteFilenameFromUrl(databaseUrl: string) {
+  const prefix = "sqlite:";
+  if (!databaseUrl.startsWith(prefix)) {
+    throw new Error(`Unsupported SQLite database URL ${databaseUrl}.`);
+  }
+  const filename = databaseUrl.slice(prefix.length).trim();
+  if (!filename || filename.includes("/") || filename.includes("\\") || filename.includes("..")) {
+    throw new Error(`Unsafe SQLite database filename ${filename}.`);
+  }
+  return filename;
+}
 
 async function getDb() {
   const activeDbUrl = getActiveAccountsDatabaseUrl();
@@ -53,8 +72,22 @@ async function getDb() {
   }
 
   const db = await dbPromise;
-  await initDb(db);
+  await ensureDbInitialized(db, activeDbUrl);
   return db;
+}
+
+async function ensureDbInitialized(db: Database, activeDbUrl: string) {
+  let initPromise = dbInitPromises.get(activeDbUrl);
+
+  if (!initPromise) {
+    initPromise = initDb(db).catch((error) => {
+      dbInitPromises.delete(activeDbUrl);
+      throw error;
+    });
+    dbInitPromises.set(activeDbUrl, initPromise);
+  }
+
+  await initPromise;
 }
 
 async function ensureColumn(
@@ -299,6 +332,10 @@ async function ensureLifecycleColumns(db: Database, tableName: string) {
 }
 
 async function initDb(db: Database) {
+  await db.execute("PRAGMA busy_timeout = 10000");
+  await db.execute("PRAGMA journal_mode = WAL");
+  await db.execute("PRAGMA synchronous = NORMAL");
+
   await db.execute(`
     CREATE TABLE IF NOT EXISTS parties (
       id TEXT PRIMARY KEY,
@@ -599,15 +636,141 @@ function mapCreditNote(row: CreditNoteRow): CreditNote {
   };
 }
 
-async function runDbTransaction<T>(db: Database, work: () => Promise<T>) {
-  await db.execute("BEGIN IMMEDIATE TRANSACTION");
+const wait = (milliseconds: number) => new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds));
+const TRANSACTION_QUEUE_TIMEOUT_MS = 15000;
+
+function databaseErrorText(error: unknown) {
+  return String(error instanceof Error ? error.message : error);
+}
+
+function isDatabaseLockedError(error: unknown) {
+  const text = databaseErrorText(error).toLowerCase();
+  return text.includes("database is locked") || text.includes("database locked") || text.includes("code: 5");
+}
+
+function isOpenTransactionError(error: unknown) {
+  return databaseErrorText(error).toLowerCase().includes("cannot start a transaction within a transaction");
+}
+
+function debugAccountsOperation(operationId: string, event: string, details: Record<string, unknown> = {}) {
+  if (typeof console === "undefined") return;
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+  console.debug(`[accounts-db] ${operationId} ${event}`, details);
+}
+
+async function waitForQueuedTransaction(previousTransaction: Promise<void>, operationId: string) {
+  let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
   try {
-    const result = await work();
-    await db.execute("COMMIT");
-    return result;
-  } catch (error) {
-    await db.execute("ROLLBACK");
-    throw error;
+    await Promise.race([
+      previousTransaction.catch(() => undefined),
+      new Promise<never>((_, reject) => {
+        timeoutId = globalThis.setTimeout(() => {
+          reject(new Error(`Timed out waiting for previous accounts transaction to finish for ${operationId}.`));
+        }, TRANSACTION_QUEUE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      globalThis.clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function beginTransaction(db: Database, operationId: string) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      debugAccountsOperation(operationId, "transaction-begin-start", { attempt: attempt + 1 });
+      await db.execute("BEGIN TRANSACTION");
+      debugAccountsOperation(operationId, "transaction-begin-complete", { attempt: attempt + 1 });
+      return;
+    } catch (error) {
+      const canRetry = isDatabaseLockedError(error) || isOpenTransactionError(error);
+      debugAccountsOperation(operationId, "transaction-begin-error", {
+        attempt: attempt + 1,
+        error: databaseErrorText(error),
+      });
+      if (!canRetry || attempt === 11) {
+        throw error;
+      }
+
+      if (isOpenTransactionError(error)) {
+        await db.execute("ROLLBACK").catch(() => undefined);
+      }
+
+      await wait(Math.min(2500, 200 * (attempt + 1)));
+    }
+  }
+}
+
+type DbTransactionOptions = {
+  operationId?: string;
+};
+
+export async function runDbTransaction<T>(
+  db: Database,
+  work: () => Promise<T>,
+  options: DbTransactionOptions = {},
+) {
+  const transactionQueueKey = getActiveAccountsDatabaseUrl();
+  const operationId = options.operationId ?? `ACCOUNTS-TX-${Date.now()}`;
+  const previousTransaction = dbTransactionQueues.get(transactionQueueKey) ?? Promise.resolve();
+  let releaseCurrentTransaction!: () => void;
+  const currentTransactionToken = new Promise<void>((resolve) => {
+    releaseCurrentTransaction = resolve;
+  });
+  const currentTransaction = previousTransaction.catch(() => undefined).then(() => currentTransactionToken);
+
+  dbTransactionQueues.set(transactionQueueKey, currentTransaction);
+  debugAccountsOperation(operationId, "queue-wait-start", { dbUrl: transactionQueueKey });
+  await waitForQueuedTransaction(previousTransaction, operationId);
+  debugAccountsOperation(operationId, "queue-wait-complete", { dbUrl: transactionQueueKey });
+
+  try {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      let transactionStarted = false;
+
+      try {
+        await beginTransaction(db, operationId);
+        transactionStarted = true;
+        const result = await work();
+        debugAccountsOperation(operationId, "transaction-commit-start", { attempt: attempt + 1 });
+        await db.execute("COMMIT");
+        debugAccountsOperation(operationId, "transaction-commit-complete", { attempt: attempt + 1 });
+        transactionStarted = false;
+        return result;
+      } catch (error) {
+        if (transactionStarted) {
+          debugAccountsOperation(operationId, "transaction-rollback-start", { attempt: attempt + 1 });
+          await db.execute("ROLLBACK").catch((rollbackError) => {
+            debugAccountsOperation(operationId, "transaction-rollback-error", {
+              attempt: attempt + 1,
+              error: databaseErrorText(rollbackError),
+            });
+          });
+          debugAccountsOperation(operationId, "transaction-rollback-complete", { attempt: attempt + 1 });
+        }
+
+        const canRetry = isDatabaseLockedError(error) || isOpenTransactionError(error);
+        debugAccountsOperation(operationId, "transaction-error", {
+          attempt: attempt + 1,
+          error: databaseErrorText(error),
+          retry: canRetry && attempt < 7,
+        });
+        if (!canRetry || attempt === 7) {
+          throw error;
+        }
+
+        await wait(Math.min(3000, 300 * (attempt + 1)));
+      }
+    }
+
+    throw new Error("Database transaction failed.");
+  } finally {
+    releaseCurrentTransaction();
+    debugAccountsOperation(operationId, "queue-release", { dbUrl: transactionQueueKey });
+    if (dbTransactionQueues.get(transactionQueueKey) === currentTransaction) {
+      dbTransactionQueues.delete(transactionQueueKey);
+    }
   }
 }
 
@@ -737,6 +900,37 @@ async function replaceLedgerPosting(db: Database, sourceType: string, sourceId: 
   await insertLedgerEntries(db, entries);
 }
 
+async function writeCollectionTransactionWithTauri(input: {
+  mode: "create" | "update" | "delete";
+  collectionId: string;
+  collection?: Collection;
+  allocations?: ReceiptAllocation[];
+  ledgerEntries?: LedgerEntry[];
+  activityAction: string;
+  activityDetail: string;
+}) {
+  if (!isTauriRuntime()) return false;
+
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke<string>("write_collection_transaction", {
+    accountsFilename: sqliteFilenameFromUrl(getActiveAccountsDatabaseUrl()),
+    mode: input.mode,
+    collectionId: input.collectionId,
+    collection: input.collection ?? null,
+    allocations: input.allocations ?? [],
+    ledgerEntries: (input.ledgerEntries ?? []).map((entry) => ({
+      ...entry,
+      partyId: entry.partyId ?? "",
+      reversalOfEntryId: entry.reversalOfEntryId ?? "",
+    })),
+    activityId: crypto.randomUUID(),
+    activityAction: input.activityAction,
+    activityDetail: input.activityDetail,
+    activityCreatedAt: new Date().toISOString(),
+  });
+  return true;
+}
+
 export async function getAccountsBackupData(): Promise<AccountsBackupData> {
   const [parties, sales, collections, creditNotes, activityLogs, receiptAllocations] = await Promise.all([
     getParties(),
@@ -773,7 +967,11 @@ export async function getReceiptAllocations(): Promise<ReceiptAllocation[]> {
   }));
 }
 
-export async function restoreAccountsBackupData(data: Partial<AccountsBackupData>): Promise<void> {
+export async function restoreAccountsBackupData(
+  data: Partial<AccountsBackupData>,
+  options: { fiscalYears?: FiscalYear[] } = {},
+): Promise<void> {
+  assertActiveCompanyWritable();
   const db = await getDb();
   const parties = data.parties ?? [];
   const sales = data.sales ?? [];
@@ -788,6 +986,31 @@ export async function restoreAccountsBackupData(data: Partial<AccountsBackupData
   await db.execute("DELETE FROM collections");
   await db.execute("DELETE FROM sales");
   await db.execute("DELETE FROM parties");
+
+  if (options.fiscalYears) {
+    await db.execute("DELETE FROM fiscal_years");
+    for (const fiscalYear of options.fiscalYears) {
+      await db.execute(
+        `
+        INSERT INTO fiscal_years (
+          id, companyId, code, startBs, endBs, startAd, endAd, status, createdAt, updatedAt
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `,
+        [
+          fiscalYear.id,
+          fiscalYear.companyId,
+          fiscalYear.code,
+          fiscalYear.startBs,
+          fiscalYear.endBs,
+          fiscalYear.startAd ?? "",
+          fiscalYear.endAd ?? "",
+          fiscalYear.status,
+          fiscalYear.createdAt,
+          fiscalYear.updatedAt,
+        ]
+      );
+    }
+  }
 
   for (const party of parties) {
     await db.execute(
@@ -977,6 +1200,7 @@ export async function getParties(): Promise<Party[]> {
 export async function saveParty(
   input: Omit<Party, "id" | "createdAt">
 ): Promise<Party> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   const name = input.name.trim();
@@ -1046,6 +1270,7 @@ function mapActivityLog(row: ActivityLogRow): ActivityLog {
 }
 
 export async function logActivity(action: string, detail: string): Promise<void> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   await db.execute(
@@ -1073,6 +1298,7 @@ export async function getActivityLogs(limit = 50): Promise<ActivityLog[]> {
 }
 
 export async function updateParty(input: Omit<Party, "createdAt">): Promise<Party> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   if (!input.id) {
@@ -1133,6 +1359,7 @@ export async function updateParty(input: Omit<Party, "createdAt">): Promise<Part
 }
 
 export async function upsertPartiesForCarryForward(parties: Party[]): Promise<void> {
+  assertActiveCompanyWritable();
   const db = await getDb();
   const now = new Date().toISOString();
 
@@ -1205,6 +1432,7 @@ function normalizeDateDisplay(value: string) {
 }
 
 export async function deleteParty(partyId: string): Promise<void> {
+  assertActiveCompanyWritable();
   if (!partyId) {
     throw new Error("Party ID is required.");
   }
@@ -1257,6 +1485,7 @@ export async function getSales(): Promise<Sale[]> {
 export async function saveSale(
   input: Omit<Sale, "id" | "createdAt">
 ): Promise<Sale> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   const billNo = normalizeWholeNumber(input.billNo, "Bill number");
@@ -1374,6 +1603,7 @@ export async function saveSale(
 }
 
 export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   if (!input.id) {
@@ -1485,16 +1715,51 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
   };
 }
 
-export async function deleteSale(saleId: string): Promise<void> {
+type DeleteSaleOptions = {
+  deleteLinkedStock?: boolean;
+};
+
+export async function deleteSale(saleId: string, options: DeleteSaleOptions = {}): Promise<void> {
+  const operationId = `SALE-DELETE-${Date.now()}`;
+  const activeCompany = getActiveCompanyProfile();
+  const activeCompanyId = getActiveCompanyId();
+  const activeDbUrl = getActiveAccountsDatabaseUrl();
+  debugAccountsOperation(operationId, "start", {
+    companyId: activeCompanyId,
+    fiscalYear: activeCompany?.fiscalYear ?? "",
+    dbUrl: activeDbUrl,
+  });
+  assertActiveCompanyWritable();
   if (!saleId) {
     throw new Error("Sale ID is required.");
+  }
+
+  if (isTauriRuntime()) {
+    const stockDbUrl = options.deleteLinkedStock ? getActiveStockDatabaseUrl() : "";
+    debugAccountsOperation(operationId, "backend-delete-start", {
+      accountsDbUrl: activeDbUrl,
+      stockDbUrl,
+    });
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<string>("delete_sale_with_stock_cleanup", {
+      accountsFilename: sqliteFilenameFromUrl(activeDbUrl),
+      stockFilename: stockDbUrl ? sqliteFilenameFromUrl(stockDbUrl) : "",
+      saleId,
+    });
+    debugAccountsOperation(operationId, "backend-delete-complete", { result });
+    return;
   }
 
   const db = await getDb();
 
   await runDbTransaction(db, async () => {
+    debugAccountsOperation(operationId, "delete-receipt-allocations-start", { dbUrl: activeDbUrl });
     await db.execute("DELETE FROM receipt_allocations WHERE sale_id = $1", [saleId]);
+    debugAccountsOperation(operationId, "delete-receipt-allocations-complete");
+    debugAccountsOperation(operationId, "delete-ledger-start");
     await db.execute("DELETE FROM ledger_entries WHERE source_type = 'SALE' AND source_id = $1", [saleId]);
+    debugAccountsOperation(operationId, "delete-ledger-complete");
+    debugAccountsOperation(operationId, "delete-sale-start");
     await db.execute(
       `
       DELETE FROM sales
@@ -1502,19 +1767,14 @@ export async function deleteSale(saleId: string): Promise<void> {
       `,
       [saleId]
     );
-    await db.execute(
-      `
-      INSERT INTO activity_logs (id, action, detail, created_at)
-      VALUES ($1, $2, $3, $4)
-      `,
-      [
-        crypto.randomUUID(),
-        "Sale Deleted",
-        `Deleted sale ${saleId}.`,
-        new Date().toISOString(),
-      ]
-    );
+    debugAccountsOperation(operationId, "delete-sale-complete");
+  }, { operationId });
+
+  debugAccountsOperation(operationId, "activity-log-start");
+  await logActivity("Sale Deleted", `Deleted sale ${saleId}.`).catch((error) => {
+    console.error("Could not log sale deletion.", error);
   });
+  debugAccountsOperation(operationId, "complete");
 }
 
 export async function getCollections(): Promise<Collection[]> {
@@ -1532,6 +1792,7 @@ export async function getCollections(): Promise<Collection[]> {
 export async function saveCollection(
   input: Omit<Collection, "id" | "createdAt">
 ): Promise<Collection> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   const receiptNo = normalizeWholeNumber(
@@ -1581,6 +1842,32 @@ export async function saveCollection(
     createdAt: new Date().toISOString(),
   };
 
+  const allocations = await createReceiptAllocations(db, collection);
+  const ledgerEntries = postCustomerReceipt(
+    {
+      id: collection.id,
+      lifecycleStatus: "DRAFT",
+      fiscalYearId: collection.fiscalYearId ?? "",
+      date: collection.dateBs,
+      partyId: collection.partyId,
+      amountNPR: collection.amount,
+      reference: collection.receiptNo ?? collection.id,
+    },
+    accountPostingContext(collection.fiscalYearId ?? "")
+  );
+
+  if (await writeCollectionTransactionWithTauri({
+    mode: "create",
+    collectionId: collection.id,
+    collection,
+    allocations,
+    ledgerEntries,
+    activityAction: "Collection Created",
+    activityDetail: `Created collection receipt no. ${collection.receiptNo}.`,
+  })) {
+    return collection;
+  }
+
   await runDbTransaction(db, async () => {
     await db.execute(
       `
@@ -1612,7 +1899,6 @@ export async function saveCollection(
       ]
     );
 
-    const allocations = await createReceiptAllocations(db, collection);
     for (const allocation of allocations) {
       await db.execute(
         `
@@ -1635,18 +1921,7 @@ export async function saveCollection(
       db,
       "CUSTOMER_RECEIPT",
       collection.id,
-      postCustomerReceipt(
-        {
-          id: collection.id,
-          lifecycleStatus: "DRAFT",
-          fiscalYearId: collection.fiscalYearId ?? "",
-          date: collection.dateBs,
-          partyId: collection.partyId,
-          amountNPR: collection.amount,
-          reference: collection.receiptNo ?? collection.id,
-        },
-        accountPostingContext(collection.fiscalYearId ?? "")
-      )
+      ledgerEntries
     );
 
     await db.execute(
@@ -1668,6 +1943,7 @@ export async function saveCollection(
 export async function updateCollection(
   input: Omit<Collection, "createdAt">
 ): Promise<Collection> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   if (!input.id) {
@@ -1721,6 +1997,32 @@ export async function updateCollection(
     createdAt: "",
   };
 
+  const allocations = await createReceiptAllocations(db, collection, input.id);
+  const ledgerEntries = postCustomerReceipt(
+    {
+      id: collection.id,
+      lifecycleStatus: "DRAFT",
+      fiscalYearId: collection.fiscalYearId ?? "",
+      date: collection.dateBs,
+      partyId: collection.partyId,
+      amountNPR: collection.amount,
+      reference: collection.receiptNo ?? collection.id,
+    },
+    accountPostingContext(collection.fiscalYearId ?? "")
+  );
+
+  if (await writeCollectionTransactionWithTauri({
+    mode: "update",
+    collectionId: collection.id,
+    collection,
+    allocations,
+    ledgerEntries,
+    activityAction: "Collection Updated",
+    activityDetail: `Updated collection receipt no. ${receiptNo}.`,
+  })) {
+    return collection;
+  }
+
   await runDbTransaction(db, async () => {
     await db.execute(
       `
@@ -1750,7 +2052,6 @@ export async function updateCollection(
     );
 
     await db.execute("DELETE FROM receipt_allocations WHERE receipt_id = $1", [input.id]);
-    const allocations = await createReceiptAllocations(db, collection, input.id);
     for (const allocation of allocations) {
       await db.execute(
         `
@@ -1773,18 +2074,7 @@ export async function updateCollection(
       db,
       "CUSTOMER_RECEIPT",
       collection.id,
-      postCustomerReceipt(
-        {
-          id: collection.id,
-          lifecycleStatus: "DRAFT",
-          fiscalYearId: collection.fiscalYearId ?? "",
-          date: collection.dateBs,
-          partyId: collection.partyId,
-          amountNPR: collection.amount,
-          reference: collection.receiptNo ?? collection.id,
-        },
-        accountPostingContext(collection.fiscalYearId ?? "")
-      )
+      ledgerEntries
     );
 
     await db.execute(
@@ -1805,11 +2095,21 @@ export async function updateCollection(
 }
 
 export async function deleteCollection(collectionId: string): Promise<void> {
+  assertActiveCompanyWritable();
   if (!collectionId) {
     throw new Error("Collection ID is required.");
   }
 
   const db = await getDb();
+
+  if (await writeCollectionTransactionWithTauri({
+    mode: "delete",
+    collectionId,
+    activityAction: "Collection Deleted",
+    activityDetail: `Deleted collection ${collectionId}.`,
+  })) {
+    return;
+  }
 
   await runDbTransaction(db, async () => {
     await db.execute("DELETE FROM receipt_allocations WHERE receipt_id = $1", [collectionId]);
@@ -1851,6 +2151,7 @@ export async function getCreditNotes(): Promise<CreditNote[]> {
 export async function saveCreditNote(
   input: Omit<CreditNote, "id" | "createdAt">
 ): Promise<CreditNote> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   const creditNoteNo = normalizeWholeNumber(
@@ -1965,6 +2266,7 @@ export async function saveCreditNote(
 export async function updateCreditNote(
   input: Omit<CreditNote, "createdAt">
 ): Promise<CreditNote> {
+  assertActiveCompanyWritable();
   const db = await getDb();
 
   if (!input.id) {
@@ -2078,6 +2380,7 @@ export async function updateCreditNote(
 }
 
 export async function deleteCreditNote(creditNoteId: string): Promise<void> {
+  assertActiveCompanyWritable();
   if (!creditNoteId) {
     throw new Error("Credit note ID is required.");
   }

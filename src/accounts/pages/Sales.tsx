@@ -17,7 +17,6 @@ import { buildStockEntryTarget } from "../../stock/services/stockDocuments";
 import { buildStatuses } from "../../stock/services/stockCalculations";
 import { isInventoryTrackingEnabled } from "../../stock/settings";
 import {
-  deleteStockSalesLinesForDocument,
   getStockItems,
   getStockSalesBills,
 } from "../../stock/storage";
@@ -57,6 +56,10 @@ type SalesProps = {
 type SalesSortKey = "billNo" | "dateBs" | "party" | "salesAmount" | "vatAmount" | "totalAmount" | "remarks" | "inventory";
 type SortDirection = "asc" | "desc";
 
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : String(error || fallback);
+}
+
 export default function Sales({
   canManage,
   canEdit = canManage,
@@ -75,6 +78,7 @@ export default function Sales({
   const [salesAmount, setSalesAmount] = useState("");
   const [remarks, setRemarks] = useState("");
   const [message, setMessage] = useState("");
+  const [deletingSaleId, setDeletingSaleId] = useState("");
   const [registerSearch, setRegisterSearch] = useState("");
   const [salesSort, setSalesSort] = useState<{ key: SalesSortKey | null; direction: SortDirection }>({
     key: null,
@@ -239,11 +243,7 @@ export default function Sales({
       clearForm();
       await loadData();
     } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to save sale.")
-      );
+      reportError(error, "Failed to save sale.");
     }
   }
 
@@ -259,24 +259,33 @@ export default function Sales({
 
     if (!confirmed) return;
 
+    setDeletingSaleId(sale.id);
+    setMessage(`Deleting sale bill no. ${sale.billNo}...`);
+
     try {
-      await deleteSale(sale.id);
-      if (inventoryEnabled) {
-        await deleteStockSalesLinesForDocument(sale.id);
-      }
+      await deleteSale(sale.id, { deleteLinkedStock: inventoryEnabled });
+      setSales((currentSales) => currentSales.filter((item) => item.id !== sale.id));
+      setStockSalesBills((currentBills) => currentBills.filter((bill) => bill.id !== sale.id));
+
+      let cleanupMessage = "";
 
       if (editingSaleId === sale.id) {
         clearForm();
       }
 
-      await loadData();
-      setMessage(`Sale bill no. ${sale.billNo} deleted successfully.`);
+      try {
+        await loadData();
+      } catch (error) {
+        console.error("Could not refresh sales register after delete.", error);
+        cleanupMessage += " Register refresh hit a temporary database lock; reopen Sales if totals look stale.";
+      }
+
+      setMessage(`Sale bill no. ${sale.billNo} deleted successfully.${cleanupMessage}`);
     } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to delete sale.")
-      );
+      console.error("Failed to delete sale.", error);
+      reportError(error, "Failed to delete sale.");
+    } finally {
+      setDeletingSaleId("");
     }
   }
 
@@ -349,6 +358,12 @@ export default function Sales({
   const previewSale = sales.find((sale) => sale.id === previewSaleId) ?? null;
   const previewStockBill = previewSale ? stockSalesBillById.get(previewSale.id) : null;
   const previewParty = previewSale ? parties.find((party) => party.id === previewSale.partyId) : null;
+
+  function reportError(error: unknown, fallback: string) {
+    const messageText = errorMessage(error, fallback);
+    window.alert(messageText);
+    setMessage(messageText);
+  }
 
   function toggleSalesSort(key: SalesSortKey) {
     setSalesSort((current) => ({
@@ -594,10 +609,11 @@ export default function Sales({
                         {canManage && (
                           <button
                             className="danger small"
+                            disabled={deletingSaleId === sale.id}
                             type="button"
                             onClick={() => handleDeleteSale(sale)}
                           >
-                            Delete
+                            {deletingSaleId === sale.id ? "Deleting..." : "Delete"}
                           </button>
                         )}
                       </td>

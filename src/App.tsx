@@ -14,11 +14,10 @@ import {
   upsertPartiesForCarryForward,
   type AccountsBackupData,
 } from "./accounts/data/storage";
-import type { CreditNote, Party as AccountParty, Sale } from "./accounts/data/types";
+import type { Collection, CreditNote, Party as AccountParty, Sale } from "./accounts/data/types";
 import { saveBlob } from "./accounts/utils/fileSave";
 import {
   defaultSettings,
-  normalizeFreightIndiaStatus,
   normalizeSupplierCurrency,
   type AppData,
   type AppSettings,
@@ -47,12 +46,18 @@ import {
   type StockBackupData,
 } from "./stock/storage";
 import type { StockDocumentReference, StockEntryTarget } from "./stock/types";
+import { purchaseClosingParties } from "./application/purchaseCarryForward";
 import {
   createCompanyYearId,
   getActiveCompanyId,
   getActiveCompanyProfile,
   getCompanyProfiles,
   getCompanySetting,
+  mergeCompanyProfiles,
+  parseCompanyProfiles,
+  removeCompanyProfile,
+  resolveActiveCompanyId,
+  saveCompanyProfiles,
   setActiveCompanyId,
   setCompanySetting,
   upsertCompanyProfile,
@@ -189,38 +194,6 @@ function nextFiscalYear(fiscalYear: string) {
   const startYear = Number(match[1]) + 1;
   const endYear = (Number(match[2]) + 1) % 100;
   return `${startYear}/${String(endYear).padStart(2, "0")}`;
-}
-
-function purchaseClosingParties(data: AppData) {
-  const balances = new Map(data.parties.map((party) => [party.id, Number(party.openingPayable || 0)]));
-  const add = (partyId: string, amount: number) => {
-    if (!partyId || !Number.isFinite(amount)) {
-      return;
-    }
-    balances.set(partyId, (balances.get(partyId) ?? 0) + amount);
-  };
-
-  data.purchases.forEach((purchase) => {
-    add(purchase.vendorPartyId, purchase.supplierAmountNPR);
-    add(purchase.customAgentPartyId, purchase.debitNoteTotalNPR + purchase.agentServiceTotalNPR);
-    if (normalizeFreightIndiaStatus(purchase.freightIndiaStatus) === "To be paid by us") {
-      add(purchase.freightIndiaPartyId, purchase.freightIndiaAmountNPR);
-    }
-  });
-
-  data.localExpenses.forEach((expense) => {
-    add(expense.partyId, expense.totalAmountNPR);
-  });
-
-  data.payments.forEach((payment) => {
-    add(payment.partyId, -payment.amountNPR);
-  });
-
-  return data.parties.map((party) => ({
-    ...party,
-    openingPayable: balances.get(party.id) ?? 0,
-    updatedAt: new Date().toISOString(),
-  }));
 }
 
 async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany: CompanyProfile) {
@@ -402,6 +375,7 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
   const settings = readSuiteSettings(purchaseData.settings);
   const accountPartyName = new Map(accountParties.map((party) => [party.id, party.name]));
   const purchasePartyName = new Map(purchaseData.parties.map((party) => [party.id, party.name]));
+  const payableOutstandingRows = purchaseClosingParties(purchaseData);
   const fiscalYear = createFiscalYearFromCode(company.id, company.fiscalYear);
   const stockSourceDocs = buildSourceDocs({
     accountParties,
@@ -536,9 +510,23 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
       ],
     },
     {
+      name: "Payable Outstanding",
+      rows: [
+        ["partyName", "category", "country", "openingPayable", "outstandingPayable"],
+        ...payableOutstandingRows.map((party) => [
+          party.name,
+          party.category,
+          party.country,
+          party.openingPayable,
+          party.openingPayable,
+        ]),
+      ],
+    },
+    {
       name: "Import Purchases",
       rows: [
         [
+          "sourceDocumentId",
           "vendorName",
           "vendorBillNumber",
           "billDateAD",
@@ -546,6 +534,9 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
           "supplierExchangeRate",
           "amountIC",
           "supplierAmountNPR",
+          "totalKg",
+          "loadingUnloadingChargePerKg",
+          "loadingUnloadingChargeNPR",
           "customAgentName",
           "pragapanpatraNumber",
           "pragapanpatraDateBS",
@@ -563,12 +554,15 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
           "agentServiceBillDateBS",
           "agentServiceAmountBeforeVatNPR",
           "agentServiceVatNPR",
+          "debitNoteTotalNPR",
+          "totalAgentPayableNPR",
           "landedCostNPR",
           "remarks",
           "createdAt",
           "updatedAt",
         ],
         ...purchaseData.purchases.map((purchase) => [
+          purchase.id,
           purchasePartyName.get(purchase.vendorPartyId) ?? "",
           purchase.vendorBillNumber,
           purchase.billDate,
@@ -576,6 +570,9 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
           purchase.supplierExchangeRate,
           purchase.amountIC,
           purchase.supplierAmountNPR,
+          purchase.totalKg,
+          purchase.loadingUnloadingChargePerKg,
+          purchase.loadingUnloadingChargeNPR,
           purchasePartyName.get(purchase.customAgentPartyId) ?? "",
           purchase.debitNoteNumber,
           purchase.debitNoteDate,
@@ -593,6 +590,8 @@ async function downloadCompanyWorkbook(company: CompanyProfile) {
           purchase.agentServiceBillDate,
           purchase.agentServiceAmountBeforeVatNPR,
           purchase.agentServiceVatNPR,
+          purchase.debitNoteTotalNPR,
+          purchase.totalAgentPayableNPR,
           purchase.landedCostNPR,
           purchase.remarks,
           purchase.createdAt,
@@ -892,6 +891,31 @@ function isPortableCompanyBackup(value: unknown): value is PortableCompanyBackup
   return row.kind === "easysolution-company-backup" && Boolean(row.company) && Boolean(row.accounts) && Boolean(row.purchase);
 }
 
+function remapAccountsBackupFiscalYears(
+  data: AccountsBackupData,
+  remapFiscalYearId: (fiscalYearId: string) => string,
+): AccountsBackupData {
+  const remapSale = (sale: Sale): Sale => ({
+    ...sale,
+    fiscalYearId: sale.fiscalYearId ? remapFiscalYearId(sale.fiscalYearId) : sale.fiscalYearId,
+  });
+  const remapCollection = (collection: Collection): Collection => ({
+    ...collection,
+    fiscalYearId: collection.fiscalYearId ? remapFiscalYearId(collection.fiscalYearId) : collection.fiscalYearId,
+  });
+  const remapCreditNote = (creditNote: CreditNote): CreditNote => ({
+    ...creditNote,
+    fiscalYearId: creditNote.fiscalYearId ? remapFiscalYearId(creditNote.fiscalYearId) : creditNote.fiscalYearId,
+  });
+
+  return {
+    ...data,
+    collections: data.collections.map(remapCollection),
+    creditNotes: data.creditNotes.map(remapCreditNote),
+    sales: data.sales.map(remapSale),
+  };
+}
+
 async function importPortableCompanyBackup(file: File) {
   const parsed = JSON.parse(await file.text()) as unknown;
 
@@ -909,6 +933,7 @@ async function importPortableCompanyBackup(file: File) {
   }
 
   const sourceCompany = parsed.company;
+  const shouldRestoreLocked = Boolean(sourceCompany.isLocked);
   const settings = {
     ...defaultSettings,
     ...parsed.purchase.settings,
@@ -916,31 +941,27 @@ async function importPortableCompanyBackup(file: File) {
     fiscalYear: sourceCompany.fiscalYear,
   };
   const companyId = createCompanyYearId(sourceCompany.name, sourceCompany.fiscalYear);
+  const existingProfile = getCompanyProfiles().find((company) => company.id === companyId);
+  const previousActiveCompanyId = getActiveCompanyId();
   const profile = upsertCompanyProfile({
     companyGroupId: companyId,
     createdAt: sourceCompany.createdAt,
     fiscalYear: sourceCompany.fiscalYear,
     id: companyId,
-    isLocked: sourceCompany.isLocked,
+    isLocked: false,
     lastCarryForwardAt: "",
-    lockedAt: sourceCompany.lockedAt,
+    lockedAt: "",
     name: sourceCompany.name,
     nextCompanyId: "",
     previousCompanyId: "",
   });
 
-  setActiveCompanyId(profile.id);
-  writeSuiteSettings(settings);
-  localStorage.setItem(COMPANY_SETUP_KEY, "yes");
-  await restoreAccountsBackupData(parsed.accounts);
-
-  const purchaseRepository = await createDataRepository();
   const emptyPurchaseData = getEmptyData();
   const importedFiscalYears = parsed.purchase.fiscalYears ?? [];
   const fallbackFiscalYear = createFiscalYearFromCode(
     profile.id,
     settings.fiscalYear,
-    profile.isLocked ? "CLOSED" : "OPEN",
+    shouldRestoreLocked ? "CLOSED" : "OPEN",
   );
   const fiscalYearIdMap = new Map<string, string>();
   const fiscalYears = importedFiscalYears.length
@@ -967,48 +988,74 @@ async function importPortableCompanyBackup(file: File) {
   const defaultFiscalYearId = fiscalYears[0]?.id ?? fallbackFiscalYear.id;
   const remapFiscalYearId = (fiscalYearId: string) =>
     fiscalYearIdMap.get(fiscalYearId) ?? defaultFiscalYearId;
-  const restoredPurchaseData: AppData = {
-    ...emptyPurchaseData,
-    ...parsed.purchase,
-    settings,
-    parties: parsed.purchase.parties ?? [],
-    fiscalYears,
-    purchases: (parsed.purchase.purchases ?? []).map((purchase) => ({
-      ...purchase,
-      fiscalYearId: remapFiscalYearId(purchase.fiscalYearId),
-    })),
-    localExpenses: (parsed.purchase.localExpenses ?? []).map((localExpense) => ({
-      ...localExpense,
-      fiscalYearId: remapFiscalYearId(localExpense.fiscalYearId),
-    })),
-    payments: (parsed.purchase.payments ?? []).map((payment) => ({
-      ...payment,
-      fiscalYearId: remapFiscalYearId(payment.fiscalYearId),
-    })),
-    paymentAllocations: parsed.purchase.paymentAllocations ?? [],
-    ledgerEntries: (parsed.purchase.ledgerEntries ?? []).map((entry) => ({
-      ...entry,
-      companyId: profile.id,
-      fiscalYearId: remapFiscalYearId(entry.fiscalYearId),
-    })),
-    activityLogs: [
-      {
-        id: crypto.randomUUID(),
-        action: "Backup Imported",
-        details: `Imported portable backup from ${parsed.exportedAt || "unknown date"}.`,
-        userName: "Master",
-        oldValue: sourceCompany.id,
-        newValue: profile.id,
-        createdAt: new Date().toISOString(),
-      },
-      ...(parsed.purchase.activityLogs ?? []),
-    ],
-  };
-  await purchaseRepository.saveData(restoredPurchaseData);
+  const restoredAccountsData = remapAccountsBackupFiscalYears(parsed.accounts, remapFiscalYearId);
 
-  if (parsed.stock) {
-    await replaceStockBackupDataForCompany(profile.id, parsed.stock.data);
-    writeInventoryTrackingSettingForCompany(profile.id, parsed.stock.trackInventory);
+  try {
+    setActiveCompanyId(profile.id);
+    writeSuiteSettings(settings);
+    localStorage.setItem(COMPANY_SETUP_KEY, "yes");
+    await restoreAccountsBackupData(restoredAccountsData, { fiscalYears });
+
+    const purchaseRepository = await createDataRepository();
+    const restoredPurchaseData: AppData = {
+      ...emptyPurchaseData,
+      ...parsed.purchase,
+      settings,
+      parties: parsed.purchase.parties ?? [],
+      fiscalYears,
+      purchases: (parsed.purchase.purchases ?? []).map((purchase) => ({
+        ...purchase,
+        fiscalYearId: remapFiscalYearId(purchase.fiscalYearId),
+      })),
+      localExpenses: (parsed.purchase.localExpenses ?? []).map((localExpense) => ({
+        ...localExpense,
+        fiscalYearId: remapFiscalYearId(localExpense.fiscalYearId),
+      })),
+      payments: (parsed.purchase.payments ?? []).map((payment) => ({
+        ...payment,
+        fiscalYearId: remapFiscalYearId(payment.fiscalYearId),
+      })),
+      paymentAllocations: parsed.purchase.paymentAllocations ?? [],
+      ledgerEntries: (parsed.purchase.ledgerEntries ?? []).map((entry) => ({
+        ...entry,
+        companyId: profile.id,
+        fiscalYearId: remapFiscalYearId(entry.fiscalYearId),
+      })),
+      activityLogs: [
+        {
+          id: crypto.randomUUID(),
+          action: "Backup Imported",
+          details: `Imported portable backup from ${parsed.exportedAt || "unknown date"}.`,
+          userName: "Master",
+          oldValue: sourceCompany.id,
+          newValue: profile.id,
+          createdAt: new Date().toISOString(),
+        },
+        ...(parsed.purchase.activityLogs ?? []),
+      ],
+    };
+    await purchaseRepository.saveData(restoredPurchaseData);
+
+    if (parsed.stock) {
+      await replaceStockBackupDataForCompany(profile.id, parsed.stock.data);
+      writeInventoryTrackingSettingForCompany(profile.id, parsed.stock.trackInventory);
+    }
+  } catch (error) {
+    if (existingProfile) {
+      upsertCompanyProfile(existingProfile);
+    } else {
+      removeCompanyProfile(companyId);
+    }
+    setActiveCompanyId(previousActiveCompanyId);
+    throw error;
+  }
+
+  if (shouldRestoreLocked) {
+    return upsertCompanyProfile({
+      ...profile,
+      isLocked: true,
+      lockedAt: sourceCompany.lockedAt || new Date().toISOString(),
+    });
   }
 
   return profile;
@@ -1016,7 +1063,7 @@ async function importPortableCompanyBackup(file: File) {
 
 export default function App() {
   const [companies, setCompanies] = useState<CompanyProfile[]>(() => ensureInitialCompanyProfiles());
-  const [activeCompanyIdState, setActiveCompanyIdState] = useState("");
+  const [activeCompanyIdState, setActiveCompanyIdState] = useState(() => getActiveCompanyId());
   const [isAddingCompany, setIsAddingCompany] = useState(false);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [selectedModule, setSelectedModule] = useState<ModuleKey | null>(null);
@@ -1041,6 +1088,12 @@ export default function App() {
   }, [activeCompanyIdState, companyFiscalYear]);
 
   useEffect(() => {
+    if (activeCompanyIdState && getActiveCompanyId() !== activeCompanyIdState) {
+      setActiveCompanyId(activeCompanyIdState);
+    }
+  }, [activeCompanyIdState]);
+
+  useEffect(() => {
     scrollToPageTop();
   }, [activeCompanyIdState, isAddingCompany, selectedModule, userRole]);
 
@@ -1050,7 +1103,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (companies.length > 0 || typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
       return;
     }
 
@@ -1062,32 +1115,34 @@ export default function App() {
           return;
         }
 
-        const parsed = JSON.parse(seedText || "[]") as unknown;
-        if (!Array.isArray(parsed) || parsed.length === 0) {
+        const parsedSeed = JSON.parse(seedText || "[]") as unknown;
+        const rawSeedProfiles = Array.isArray(parsedSeed) ? parsedSeed : [];
+        const seededProfiles = parseCompanyProfiles(seedText || "[]");
+        if (seededProfiles.length === 0) {
           return;
         }
 
-        const seededProfiles = parsed
-          .map((item) => item && typeof item === "object" ? item as Partial<CompanyProfile> : null)
-          .filter((profile): profile is Partial<CompanyProfile> & Pick<CompanyProfile, "id" | "name"> =>
-            Boolean(profile?.id && profile?.name),
-          );
-
-        let seededActiveCompanyId = getActiveCompanyId();
-        seededProfiles.forEach((profile) => {
-          const savedProfile = upsertCompanyProfile(profile);
-          if ((profile as Partial<CompanyProfile> & { trackInventory?: unknown }).trackInventory) {
-            writeInventoryTrackingSettingForCompany(savedProfile.id, true);
-          }
-          if (!seededActiveCompanyId) {
-            seededActiveCompanyId = savedProfile.id;
+        const persistedProfiles = getCompanyProfiles();
+        const mergedProfiles = mergeCompanyProfiles(persistedProfiles, seededProfiles);
+        saveCompanyProfiles(mergedProfiles);
+        rawSeedProfiles.forEach((profile) => {
+          if (
+            profile &&
+            typeof profile === "object" &&
+            (profile as Partial<CompanyProfile> & { trackInventory?: unknown }).id &&
+            (profile as Partial<CompanyProfile> & { trackInventory?: unknown }).trackInventory
+          ) {
+            writeInventoryTrackingSettingForCompany(String((profile as Partial<CompanyProfile>).id), true);
           }
         });
-        if (seededActiveCompanyId) {
-          setActiveCompanyId(seededActiveCompanyId);
-          setActiveCompanyIdState(seededActiveCompanyId);
-        }
-        setCompanies(getCompanyProfiles());
+
+        const resolvedActiveCompanyId = resolveActiveCompanyId(
+          mergedProfiles,
+          window.localStorage.getItem("suite-active-company-id") ?? "",
+        );
+        setActiveCompanyId(resolvedActiveCompanyId);
+        setActiveCompanyIdState(resolvedActiveCompanyId);
+        setCompanies(mergedProfiles);
       })
       .catch((error) => {
         console.error("Company seed load error:", error);
@@ -1096,10 +1151,18 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [companies.length]);
+  }, []);
 
   function refreshCompanies() {
-    setCompanies(getCompanyProfiles());
+    const profiles = getCompanyProfiles();
+    setCompanies(profiles);
+    setActiveCompanyIdState((currentCompanyId) => {
+      if (currentCompanyId && profiles.some((company) => company.id === currentCompanyId)) {
+        return currentCompanyId;
+      }
+
+      return getActiveCompanyId() || profiles[0]?.id || "";
+    });
   }
 
   function activateCompany(companyId: string) {
@@ -1187,12 +1250,16 @@ export default function App() {
     }
 
     try {
+      const activeCompanyIdBeforeSync = getActiveCompanyId();
       await carryForwardOpenings(company, targetCompany);
       upsertCompanyProfile({
         ...company,
         lastCarryForwardAt: new Date().toISOString(),
       });
-      refreshCompanies();
+      const profiles = getCompanyProfiles();
+      setCompanies(profiles);
+      setActiveCompanyId(resolveActiveCompanyId(profiles, activeCompanyIdBeforeSync));
+      setActiveCompanyIdState(resolveActiveCompanyId(profiles, activeCompanyIdBeforeSync));
       setExportMessage(`Linked opening balances updated in FY ${targetCompany.fiscalYear}.`);
     } catch (error) {
       console.error("Linked opening sync error:", error);

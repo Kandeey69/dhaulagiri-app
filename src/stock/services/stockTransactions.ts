@@ -8,6 +8,7 @@ type StockTransactionOptions = {
 
 const transactionQueues = new Map<object | string, Promise<void>>();
 const wait = (milliseconds: number) => new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds));
+const TRANSACTION_QUEUE_TIMEOUT_MS = 15000;
 
 function errorText(error: unknown) {
   return String(error instanceof Error ? error.message : error).toLowerCase();
@@ -22,7 +23,25 @@ function isOpenTransactionError(error: unknown) {
   return errorText(error).includes("cannot start a transaction within a transaction");
 }
 
-async function beginImmediateTransaction(db: TransactionalDatabase) {
+async function waitForQueuedTransaction(previousTransaction: Promise<void>) {
+  let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+  try {
+    await Promise.race([
+      previousTransaction.catch(() => undefined),
+      new Promise<never>((_, reject) => {
+        timeoutId = globalThis.setTimeout(() => {
+          reject(new Error("Timed out waiting for previous stock transaction to finish."));
+        }, TRANSACTION_QUEUE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      globalThis.clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function beginTransaction(db: TransactionalDatabase) {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     try {
       await db.execute("BEGIN IMMEDIATE TRANSACTION");
@@ -49,19 +68,18 @@ export async function runStockDbTransaction<T>(
 ) {
   const queueKey = options.queueKey ?? db as object;
   const previousTransaction = transactionQueues.get(queueKey) ?? Promise.resolve();
-  let releaseCurrentTransaction: () => void = () => undefined;
-  const currentTransaction = previousTransaction
-    .catch(() => undefined)
-    .then(() => new Promise<void>((resolve) => {
-      releaseCurrentTransaction = resolve;
-    }));
+  let releaseCurrentTransaction!: () => void;
+  const currentTransactionToken = new Promise<void>((resolve) => {
+    releaseCurrentTransaction = resolve;
+  });
+  const currentTransaction = previousTransaction.catch(() => undefined).then(() => currentTransactionToken);
 
   transactionQueues.set(queueKey, currentTransaction);
-  await previousTransaction.catch(() => undefined);
+  await waitForQueuedTransaction(previousTransaction);
 
   let transactionStarted = false;
   try {
-    await beginImmediateTransaction(db);
+    await beginTransaction(db);
     transactionStarted = true;
     const result = await work();
     await db.execute("COMMIT");

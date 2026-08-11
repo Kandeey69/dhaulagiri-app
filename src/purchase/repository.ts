@@ -13,8 +13,14 @@ import {
   type Payment,
   type PaymentAllocation,
 } from './domain'
+import { mapImportPurchaseRowFromDb } from './repositoryMapping'
 import { loadData as loadLocalData, saveData as saveLocalData } from './storage'
-import { getActiveCompanyId, getActiveCompanyProfile, getActivePurchaseDatabaseUrl } from '../companyContext'
+import {
+  assertActiveCompanyWritable,
+  getActiveCompanyId,
+  getActiveCompanyProfile,
+  getActivePurchaseDatabaseUrl,
+} from '../companyContext'
 import {
   createFiscalYearFromCode,
   findFiscalYearByBsDate,
@@ -132,58 +138,11 @@ const purchaseFromDb = (
   row: Record<string, unknown>,
   fiscalYears: FiscalYear[],
   settings: AppSettings,
-): ImportPurchase => ({
-  id: String(row.id ?? ''),
-  fiscalYearId: String(row.fiscalYearId ?? '') || fiscalYearForDate(importPurchaseFiscalDateFromDb(row), fiscalYears, settings).id,
-  lifecycleStatus: lifecycleStatusFromDb(row.lifecycleStatus),
-  vendorPartyId: String(row.vendorPartyId ?? ''),
-  vendorBillNumber: String(row.vendorBillNumber ?? ''),
-  billDate: String(row.billDate ?? ''),
-  supplierCurrency: normalizeSupplierCurrency(row.supplierCurrency),
-  amountIC: Number(row.amountIC ?? 0),
-  supplierExchangeRate: Number(row.supplierExchangeRate ?? 0),
-  supplierAmountNPR: Number(row.supplierAmountNPR ?? 0),
-  customAgentPartyId: String(row.customAgentPartyId ?? ''),
-  debitNoteNumber: String(row.debitNoteNumber ?? ''),
-  debitNoteDate: String(row.debitNoteDate ?? ''),
-  importDutyNPR: Number(row.importDutyNPR ?? 0),
-  customServiceNPR: Number(row.customServiceNPR ?? 0),
-  importVatNPR: Number(row.importVatNPR ?? 0),
-  terminalChargeWithoutVatNPR: Number(row.terminalChargeWithoutVatNPR ?? 0),
-  terminalVatNPR: Number(row.terminalVatNPR ?? 0),
-  totalTerminalChargeNPR: Number(row.totalTerminalChargeNPR ?? 0),
-  freightIndiaStatus: normalizeFreightIndiaStatus(row.freightIndiaStatus),
-  freightIndiaPartyId: String(row.freightIndiaPartyId ?? ''),
-  freightIndiaAmountIC: Number(row.freightIndiaAmountIC ?? 0),
-  freightIndiaExchangeRate: Number(row.freightIndiaExchangeRate ?? 0),
-  freightIndiaAmountNPR: Number(row.freightIndiaAmountNPR ?? 0),
-  totalKg: Number(row.totalKg ?? 0),
-  loadingUnloadingChargePerKg: Number(row.loadingUnloadingChargePerKg ?? 0),
-  loadingUnloadingChargeNPR: Number(row.loadingUnloadingChargeNPR ?? 0),
-  otherChargesNPR: Number(row.otherChargesNPR ?? 0),
-  debitNoteTotalNPR: Number(row.debitNoteTotalNPR ?? 0),
-  agentServiceBillNumber: String(row.agentServiceBillNumber ?? ''),
-  agentServiceBillDate: String(row.agentServiceBillDate ?? ''),
-  agentServiceAmountBeforeVatNPR: Number(row.agentServiceAmountBeforeVatNPR ?? 0),
-  agentServiceVatNPR: Number(row.agentServiceVatNPR ?? 0),
-  agentServiceTotalNPR: Number(row.agentServiceTotalNPR ?? 0),
-  totalAgentPayableNPR: Number(row.totalAgentPayableNPR ?? 0),
-  totalInputVatNPR: Number(row.totalInputVatNPR ?? 0),
-  landedCostNPR: Number(row.landedCostNPR ?? 0),
-  appliedVatRate: Number(row.appliedVatRate ?? settings.agentServiceVatRate),
-  appliedExchangeRate: Number(row.appliedExchangeRate ?? row.supplierExchangeRate ?? settings.defaultExchangeRate),
-  calculationVersion: String(row.calculationVersion ?? 'legacy-migrated-v1'),
-  calculatedAt: String(row.calculatedAt ?? row.updatedAt ?? row.createdAt ?? ''),
-  postedAt: String(row.postedAt ?? row.createdAt ?? ''),
-  postedBy: String(row.postedBy ?? ''),
-  voidedAt: String(row.voidedAt ?? ''),
-  reversedAt: String(row.reversedAt ?? ''),
-  reversalReason: String(row.reversalReason ?? ''),
-  replacementTransactionId: String(row.replacementTransactionId ?? ''),
-  remarks: String(row.remarks ?? ''),
-  createdAt: String(row.createdAt ?? ''),
-  updatedAt: String(row.updatedAt ?? ''),
-})
+): ImportPurchase => mapImportPurchaseRowFromDb(
+  row,
+  settings,
+  (date) => fiscalYearForDate(date || importPurchaseFiscalDateFromDb(row), fiscalYears, settings).id,
+)
 
 const paymentFromDb = (
   row: Record<string, unknown>,
@@ -798,6 +757,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
         ],
       )
     }
+
       await db.execute('COMMIT')
     } catch (error) {
       await db.execute('ROLLBACK').catch(() => undefined)
@@ -873,6 +833,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
       }
     },
     saveData: async (data) => {
+      assertActiveCompanyWritable()
       const previousSave = sqliteSaveQueues.get(databaseUrl) ?? Promise.resolve()
       const nextSave = previousSave.catch(() => undefined).then(() => saveSnapshotWithRetry(data))
       sqliteSaveQueues.set(databaseUrl, nextSave.catch(() => undefined))
@@ -885,7 +846,10 @@ function createLocalRepository(): DataRepository {
   return {
     kind: 'localStorage',
     loadData: async () => loadLocalData(),
-    saveData: async (data) => saveLocalData(data),
+    saveData: async (data) => {
+      assertActiveCompanyWritable()
+      return saveLocalData(data)
+    },
   }
 }
 

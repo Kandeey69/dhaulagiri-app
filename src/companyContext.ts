@@ -62,6 +62,61 @@ export function getCompanyProfiles(): CompanyProfile[] {
   }
 }
 
+export function mergeCompanyProfiles(
+  persistedProfiles: unknown[],
+  seedProfiles: unknown[],
+): CompanyProfile[] {
+  const merged: CompanyProfile[] = []
+  const seenIds = new Set<string>()
+
+  const append = (profile: unknown) => {
+    const normalized = normalizeProfile(profile)
+
+    if (!normalized || seenIds.has(normalized.id)) {
+      return
+    }
+
+    seenIds.add(normalized.id)
+    merged.push(normalized)
+  }
+
+  persistedProfiles.forEach(append)
+  seedProfiles.forEach(append)
+
+  return merged
+}
+
+export function parseCompanyProfiles(value: string): CompanyProfile[] {
+  try {
+    const parsed = JSON.parse(value || '[]') as unknown
+    return Array.isArray(parsed) ? parsed.map(normalizeProfile).filter((profile): profile is CompanyProfile => Boolean(profile)) : []
+  } catch {
+    return []
+  }
+}
+
+export function resolveActiveCompanyId(
+  profiles: CompanyProfile[],
+  storedCompanyId: string,
+  preferredCompanyId = '',
+) {
+  const ids = new Set(profiles.map((profile) => profile.id))
+
+  if (storedCompanyId && ids.has(storedCompanyId)) {
+    return storedCompanyId
+  }
+
+  if (preferredCompanyId && ids.has(preferredCompanyId)) {
+    return preferredCompanyId
+  }
+
+  if (storedCompanyId && profiles.length > 0) {
+    return profiles[0].id
+  }
+
+  return profiles.length === 1 ? profiles[0].id : ''
+}
+
 export function saveCompanyProfiles(profiles: CompanyProfile[]) {
   if (!isBrowser()) {
     return
@@ -75,7 +130,8 @@ export function getActiveCompanyId() {
     return ''
   }
 
-  return localStorage.getItem(ACTIVE_COMPANY_KEY) ?? ''
+  const storedCompanyId = localStorage.getItem(ACTIVE_COMPANY_KEY) ?? ''
+  return resolveActiveCompanyId(getCompanyProfiles(), storedCompanyId)
 }
 
 export function setActiveCompanyId(companyId: string) {
@@ -93,6 +149,29 @@ export function setActiveCompanyId(companyId: string) {
 export function getActiveCompanyProfile() {
   const activeCompanyId = getActiveCompanyId()
   return getCompanyProfiles().find((profile) => profile.id === activeCompanyId) ?? null
+}
+
+export function getCompanyProfile(companyId: string) {
+  const normalizedCompanyId = String(companyId ?? '').trim()
+  return getCompanyProfiles().find((profile) => profile.id === normalizedCompanyId) ?? null
+}
+
+export function assertCompanyWritable(companyId: string) {
+  const profile = getCompanyProfile(companyId)
+
+  if (profile?.isLocked) {
+    throw new Error(
+      `${profile.name}${profile.fiscalYear ? ` FY ${profile.fiscalYear}` : ''} is closed. Entries cannot be added, edited, or deleted in a closed fiscal year.`,
+    )
+  }
+}
+
+export function assertActiveCompanyWritable() {
+  const activeCompanyId = getActiveCompanyId()
+
+  if (activeCompanyId) {
+    assertCompanyWritable(activeCompanyId)
+  }
 }
 
 export function createCompanyId(name: string) {
@@ -214,12 +293,44 @@ export function encodeCompanyIdForStockFilename(companyId: string) {
     .join('-')
 }
 
-export function getStockDatabaseUrlForCompanyId(companyId: string) {
-  const encodedCompanyId = encodeCompanyIdForStockFilename(companyId)
+export function stockDatabaseSafeCompanyId(companyId: string) {
+  const normalized = String(companyId ?? '').trim()
 
-  // The unscoped stock database remains the intentional legacy/default fallback.
-  return encodedCompanyId
-    ? `sqlite:inventorytracked-stock-${encodedCompanyId}.db`
+  if (!normalized || normalized === 'default') {
+    return ''
+  }
+
+  const slug =
+    normalized
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 32) || 'company'
+  let hash = 0xcbf29ce484222325n
+  const prime = 0x100000001b3n
+  const mask = 0xffffffffffffffffn
+
+  for (const character of normalized) {
+    hash ^= BigInt(character.codePointAt(0) ?? 0)
+    hash = (hash * prime) & mask
+  }
+
+  return `${slug}-${hash.toString(16).padStart(16, '0')}`
+}
+
+export function getStockDatabaseFilenameForCompanyId(companyId: string) {
+  const safeCompanyId = stockDatabaseSafeCompanyId(companyId)
+  return safeCompanyId ? `inventorytracked-stock-${safeCompanyId}.db` : 'inventorytracked-stock.db'
+}
+
+export function getLegacyStockDatabaseFilenameForCompanyId(companyId: string) {
+  const encodedCompanyId = encodeCompanyIdForStockFilename(companyId)
+  return encodedCompanyId ? `inventorytracked-stock-${encodedCompanyId}.db` : 'inventorytracked-stock.db'
+}
+
+export function getStockDatabaseUrlForCompanyId(companyId: string) {
+  return companyId && companyId !== 'default'
+    ? `sqlite:${getStockDatabaseFilenameForCompanyId(companyId)}`
     : LEGACY_STOCK_DATABASE_URL
 }
 

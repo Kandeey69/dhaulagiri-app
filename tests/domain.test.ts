@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   createFiscalYearFromCode,
   ensureFiscalYearEditable,
@@ -11,9 +12,19 @@ import {
 } from '../src/domain/fiscalYear.ts'
 import {
   LEGACY_STOCK_DATABASE_URL,
+  assertActiveCompanyWritable,
+  assertCompanyWritable,
+  getActiveAccountsDatabaseUrl,
+  getActiveCompanyId,
+  getLegacyStockDatabaseFilenameForCompanyId,
+  getStockDatabaseFilenameForCompanyId,
   getActiveStockDatabaseUrl,
   getStockDatabaseUrlForCompanyId,
+  mergeCompanyProfiles,
+  parseCompanyProfiles,
+  resolveActiveCompanyId,
   setActiveCompanyId,
+  stockDatabaseSafeCompanyId,
 } from '../src/companyContext.ts'
 import {
   createSequentialAllocations,
@@ -22,11 +33,18 @@ import {
   validateAllocations,
 } from '../src/domain/allocations.ts'
 import {
+  calculateImportLandedCostBreakdown,
   createPurchaseCalculationPolicy,
   freightTreatmentForStatus,
 } from '../src/domain/accountingPolicy.ts'
 import { detectDuplicateSupplierBill } from '../src/domain/validation.ts'
-import { calculatePurchaseComputedTotals } from '../src/purchase/calculations.ts'
+import { calculatePurchaseComputedTotals, hasAgentValues } from '../src/purchase/calculations.ts'
+import {
+  defaultSettings,
+  type ImportPurchase,
+  type Party as PurchaseParty,
+  type Payment,
+} from '../src/purchase/domain.ts'
 import {
   assertNoDuplicatePosting,
   ledgerPartyBalance,
@@ -54,9 +72,21 @@ import {
   validatePaymentAllocationDraft,
 } from '../src/application/paymentAllocationUi.ts'
 import { createDraftKey, createDraftSnapshot, shouldRestoreDraft } from '../src/application/draftAutosave.ts'
+import { purchaseClosingParties } from '../src/application/purchaseCarryForward.ts'
 import { filterByFiscalYear, reportMovementTotals, textMatchesSearch } from '../src/application/reportFilters.ts'
 import { validatePurchaseFormForUi } from '../src/application/purchaseFormValidation.ts'
 import { availableTransactionActions, transactionActionLabels } from '../src/application/transactionActions.ts'
+import { mapImportPurchaseRowFromDb } from '../src/purchase/repositoryMapping.ts'
+import {
+  deleteCollection,
+  deleteSale,
+  restoreAccountsBackupData,
+  runDbTransaction,
+  saveCollection,
+  saveSale,
+  updateCollection,
+  updateSale,
+} from '../src/accounts/data/storage.ts'
 import {
   inventoryTrackingLegacyMigrationKey,
   inventoryTrackingStorageKey,
@@ -89,8 +119,29 @@ import {
 import {
   runStockDbTransaction,
 } from '../src/stock/services/stockTransactions.ts'
+import {
+  deleteStockItem,
+  replaceStockBackupDataForCompany,
+  saveStockItem,
+  setStockPurchaseLinesForDocument,
+  setStockSalesLinesForDocument,
+  updateStockItem,
+  upsertStockOpeningItemsForCompany,
+} from '../src/stock/storage.ts'
 
 const fiscalYear = createFiscalYearFromCode('company-a', '2083/84')
+
+function postingContextForTest() {
+  let counter = 0
+  return {
+    companyId: 'company-a',
+    fiscalYearId: fiscalYear.id,
+    fiscalYear,
+    idFactory: () => `id-${counter += 1}`,
+    timestamp: '2026-01-01T00:00:00.000Z',
+    userName: 'Master',
+  }
+}
 
 function installLocalStorage(initial: Record<string, string> = {}) {
   const store = new Map(Object.entries(initial))
@@ -287,7 +338,184 @@ test('adds loading and unloading charge to purchase landed cost', () => {
   }, policy)
 
   assert.equal(totals.loadingUnloadingChargeNPR, 625)
+  assert.equal(totals.debitNoteTotalNPR, 662.6)
+  assert.equal(totals.totalAgentPayableNPR, 662.6)
   assert.equal(totals.landedCostNPR, 820.15)
+})
+
+test('balances import purchase posting when loading and unloading is zero', () => {
+  const policy = createPurchaseCalculationPolicy({ agentServiceVatRate: 0, defaultExchangeRate: 1 })
+  const totals = calculatePurchaseComputedTotals({
+    amountIC: 20000,
+    supplierExchangeRate: 1,
+    importDutyNPR: 500,
+    customServiceNPR: 0,
+    importVatNPR: 0,
+    terminalChargeWithoutVatNPR: 0,
+    freightIndiaStatus: 'Paid by custom agent',
+    freightIndiaAmountIC: 1000,
+    freightIndiaExchangeRate: 1,
+    totalKg: 100,
+    loadingUnloadingChargePerKg: 0,
+    otherChargesNPR: 0,
+    agentServiceAmountBeforeVatNPR: 0,
+  }, policy)
+
+  assert.equal(totals.loadingUnloadingChargeNPR, 0)
+  assert.equal(totals.landedCostNPR, 21500)
+  assert.equal(totals.totalAgentPayableNPR, 1500)
+
+  const entries = postPurchase({
+    id: 'HFFT-LU-ZERO',
+    lifecycleStatus: 'DRAFT',
+    fiscalYearId: fiscalYear.id,
+    date: '2083/04/01',
+    vendorPartyId: 'supplier-1',
+    customAgentPartyId: 'agent-1',
+    freightIndiaStatus: 'Paid by custom agent',
+    supplierAmountNPR: totals.supplierAmountNPR,
+    totalAgentPayableNPR: totals.totalAgentPayableNPR,
+    freightIndiaAmountNPR: totals.freightIndiaAmountNPR,
+    landedCostNPR: totals.landedCostNPR,
+    totalInputVatNPR: totals.totalInputVatNPR,
+    reference: 'HFFT-LU-ZERO',
+  }, postingContextForTest())
+
+  assert.deepEqual(reconcileLedgerBalance(entries), [])
+})
+
+test('balances import purchase posting with nonzero per-KG loading and unloading', () => {
+  const policy = createPurchaseCalculationPolicy({ agentServiceVatRate: 0, defaultExchangeRate: 1 })
+  const input = {
+    amountIC: 20000,
+    supplierExchangeRate: 1,
+    importDutyNPR: 500,
+    customServiceNPR: 0,
+    importVatNPR: 0,
+    terminalChargeWithoutVatNPR: 0,
+    freightIndiaStatus: 'Paid by custom agent' as const,
+    freightIndiaAmountIC: 1000,
+    freightIndiaExchangeRate: 1,
+    totalKg: 100,
+    loadingUnloadingChargePerKg: 3,
+    otherChargesNPR: 0,
+    agentServiceAmountBeforeVatNPR: 0,
+  }
+  const totals = calculatePurchaseComputedTotals(input, policy)
+  const breakdown = calculateImportLandedCostBreakdown(input, policy)
+
+  assert.equal(totals.loadingUnloadingChargeNPR, 300)
+  assert.equal(breakdown.loadingUnloadingNPR, 300)
+  assert.equal(totals.landedCostNPR, 21800)
+  assert.equal(totals.totalAgentPayableNPR, 1800)
+  assert.equal(hasAgentValues({ totalKg: 100, loadingUnloadingChargePerKg: 3 } as ImportPurchase), true)
+
+  const entries = postPurchase({
+    id: 'HFFT-LU-NONZERO',
+    lifecycleStatus: 'DRAFT',
+    fiscalYearId: fiscalYear.id,
+    date: '2083/04/01',
+    vendorPartyId: 'supplier-1',
+    customAgentPartyId: 'agent-1',
+    freightIndiaStatus: 'Paid by custom agent',
+    supplierAmountNPR: totals.supplierAmountNPR,
+    totalAgentPayableNPR: totals.totalAgentPayableNPR,
+    freightIndiaAmountNPR: totals.freightIndiaAmountNPR,
+    landedCostNPR: totals.landedCostNPR,
+    totalInputVatNPR: totals.totalInputVatNPR,
+    reference: 'HFFT-LU-NONZERO',
+  }, postingContextForTest())
+
+  assert.deepEqual(reconcileLedgerBalance(entries), [])
+  assert.equal(entries.find((entry) => entry.accountCode === '1200')?.debit, 21800)
+  assert.equal(entries.find((entry) => entry.accountCode === '2000')?.credit, 20000)
+  assert.equal(entries.find((entry) => entry.accountCode === '2100')?.credit, 1800)
+})
+
+test('balances HFFT Apple import landed-cost reference without supplier payable double counting', () => {
+  const policy = createPurchaseCalculationPolicy({ agentServiceVatRate: 0, defaultExchangeRate: 1.6 })
+  const totals = calculatePurchaseComputedTotals({
+    amountIC: 13200,
+    supplierExchangeRate: 1.6,
+    importDutyNPR: 900,
+    customServiceNPR: 0,
+    importVatNPR: 0,
+    terminalChargeWithoutVatNPR: 0,
+    freightIndiaStatus: 'Paid by custom agent',
+    freightIndiaAmountIC: 375,
+    freightIndiaExchangeRate: 1.6,
+    totalKg: 120,
+    loadingUnloadingChargePerKg: 1.5,
+    otherChargesNPR: 0,
+    agentServiceAmountBeforeVatNPR: 0,
+  }, policy)
+
+  assert.equal(totals.supplierAmountNPR, 21120)
+  assert.equal(totals.freightIndiaAmountNPR, 600)
+  assert.equal(totals.loadingUnloadingChargeNPR, 180)
+  assert.equal(totals.totalAgentPayableNPR, 1680)
+  assert.equal(totals.landedCostNPR, 22800)
+
+  const entries = postPurchase({
+    id: 'IMP-8283-M01-APPLE-REFERENCE',
+    lifecycleStatus: 'DRAFT',
+    fiscalYearId: fiscalYear.id,
+    date: '2082/04/05',
+    vendorPartyId: 'VEND-001',
+    customAgentPartyId: 'AGENT-001',
+    freightIndiaStatus: 'Paid by custom agent',
+    supplierAmountNPR: totals.supplierAmountNPR,
+    totalAgentPayableNPR: totals.totalAgentPayableNPR,
+    freightIndiaAmountNPR: totals.freightIndiaAmountNPR,
+    landedCostNPR: totals.landedCostNPR,
+    totalInputVatNPR: totals.totalInputVatNPR,
+    reference: 'IMP-8283-M01-APPLE-REFERENCE',
+  }, postingContextForTest())
+
+  assert.deepEqual(reconcileLedgerBalance(entries), [])
+  assert.equal(entries.find((entry) => entry.accountCode === '2000')?.credit, 21120)
+  assert.equal(entries.find((entry) => entry.accountCode === '2100')?.credit, 1680)
+  assert.equal(entries.filter((entry) => entry.accountCode === '2100').length, 1)
+})
+
+test('rounds decimal import loading values and keeps the purchase journal balanced', () => {
+  const policy = createPurchaseCalculationPolicy({ agentServiceVatRate: 13, defaultExchangeRate: 1.6015 })
+  const totals = calculatePurchaseComputedTotals({
+    amountIC: 123.45,
+    supplierExchangeRate: 1.6015,
+    importDutyNPR: 12.34,
+    customServiceNPR: 5.67,
+    importVatNPR: 1.23,
+    terminalChargeWithoutVatNPR: 7.89,
+    freightIndiaStatus: 'To be paid by us',
+    freightIndiaAmountIC: 4.56,
+    freightIndiaExchangeRate: 1.6015,
+    totalKg: 12.5,
+    loadingUnloadingChargePerKg: 2.345,
+    otherChargesNPR: 3.21,
+    agentServiceAmountBeforeVatNPR: 9.87,
+  }, policy)
+
+  assert.equal(totals.loadingUnloadingChargeNPR, 29.31)
+
+  const entries = postPurchase({
+    id: 'HFFT-LU-DECIMAL',
+    lifecycleStatus: 'DRAFT',
+    fiscalYearId: fiscalYear.id,
+    date: '2083/04/01',
+    vendorPartyId: 'supplier-1',
+    customAgentPartyId: 'agent-1',
+    freightIndiaPartyId: 'transport-1',
+    freightIndiaStatus: 'To be paid by us',
+    supplierAmountNPR: totals.supplierAmountNPR,
+    totalAgentPayableNPR: totals.totalAgentPayableNPR,
+    freightIndiaAmountNPR: totals.freightIndiaAmountNPR,
+    landedCostNPR: totals.landedCostNPR,
+    totalInputVatNPR: totals.totalInputVatNPR,
+    reference: 'HFFT-LU-DECIMAL',
+  }, postingContextForTest())
+
+  assert.deepEqual(reconcileLedgerBalance(entries), [])
 })
 
 test('centralizes freight treatment rules', () => {
@@ -622,6 +850,156 @@ test('validates purchase form with inline-ready errors and duplicate-bill warnin
   assert.equal(result.warnings.some((warning) => warning.field === 'vendorBillNumber'), true)
 })
 
+test('maps HFFT Apple import purchase landed-cost fields from repository rows', () => {
+  const mapped = mapImportPurchaseRowFromDb({
+    id: 'IMP-8283-M01-APPLE',
+    fiscalYearId: 'himalaya-fresh-fruit-traders-pvt-ltd-208-2082-83',
+    lifecycleStatus: 'POSTED',
+    vendorPartyId: 'VEND-001',
+    vendorBillNumber: 'IMP-8283-M01-APPLE',
+    billDate: '2082/04/05',
+    supplierCurrency: 'INR',
+    amountIC: 13200,
+    supplierExchangeRate: 1.6,
+    supplierAmountNPR: 21120,
+    customAgentPartyId: 'AGENT-001',
+    debitNoteNumber: 'DN-8283-M01-APPLE',
+    debitNoteDate: '2082/04/05',
+    importDutyNPR: 900,
+    customServiceNPR: 0,
+    importVatNPR: 0,
+    terminalChargeWithoutVatNPR: 0,
+    terminalVatNPR: 0,
+    totalTerminalChargeNPR: 0,
+    freightIndiaStatus: 'Paid by custom agent',
+    freightIndiaPartyId: '',
+    freightIndiaAmountIC: 375,
+    freightIndiaExchangeRate: 1.6,
+    freightIndiaAmountNPR: 600,
+    totalKg: 120,
+    loadingUnloadingChargePerKg: 1.5,
+    loadingUnloadingChargeNPR: 180,
+    otherChargesNPR: 0,
+    debitNoteTotalNPR: 1680,
+    agentServiceBillNumber: '',
+    agentServiceBillDate: '2082/04/05',
+    agentServiceAmountBeforeVatNPR: 0,
+    agentServiceVatNPR: 0,
+    agentServiceTotalNPR: 0,
+    totalAgentPayableNPR: 1680,
+    totalInputVatNPR: 0,
+    landedCostNPR: 22800,
+    appliedVatRate: 13,
+    appliedExchangeRate: 1.6,
+    calculationVersion: 'hfft-dda-v1',
+    calculatedAt: '2026-08-10T18:44:14Z',
+    postedAt: '2026-08-10T18:44:14Z',
+    postedBy: 'HFFT-DDA',
+    createdAt: '2026-08-10T18:44:14Z',
+    updatedAt: '2026-08-10T18:44:14Z',
+  }, {
+    ...defaultSettings,
+    defaultExchangeRate: 1.6,
+  }, () => 'fallback-fy')
+
+  assert.equal(mapped.fiscalYearId, 'himalaya-fresh-fruit-traders-pvt-ltd-208-2082-83')
+  assert.equal(mapped.amountIC, 13200)
+  assert.equal(mapped.supplierExchangeRate, 1.6)
+  assert.equal(mapped.supplierAmountNPR, 21120)
+  assert.equal(mapped.totalKg, 120)
+  assert.equal(mapped.loadingUnloadingChargeNPR, 180)
+  assert.equal(mapped.debitNoteTotalNPR, 1680)
+  assert.equal(mapped.totalAgentPayableNPR, 1680)
+  assert.equal(mapped.landedCostNPR, 22800)
+  assert.equal(mapped.lifecycleStatus, 'POSTED')
+})
+
+test('keeps purchase snapshot commit outside activity log loop', () => {
+  const source = readFileSync('src/purchase/repository.ts', 'utf8')
+  const lines = source.split(/\r?\n/)
+  const loopLine = lines.findIndex((line) => line.includes('for (const log of data.activityLogs)'))
+  const commitLine = lines.findIndex((line, index) => index > loopLine && line.includes("await db.execute('COMMIT')"))
+
+  assert.notEqual(loopLine, -1)
+  assert.notEqual(commitLine, -1)
+
+  let loopDepth = 0
+  for (const line of lines.slice(loopLine, commitLine)) {
+    for (const character of line) {
+      if (character === '{') {
+        loopDepth += 1
+      } else if (character === '}') {
+        loopDepth -= 1
+      }
+    }
+  }
+
+  assert.equal(loopDepth, 0)
+})
+
+test('persists import loading and landed-cost fields through the Rust purchase command payload', () => {
+  const source = readFileSync('src-tauri/src/lib.rs', 'utf8')
+
+  assert.match(source, /write_import_purchase_transaction/)
+  assert.match(source, /DELETE FROM ledger_entries WHERE sourceType = 'PURCHASE' AND sourceId = \?/)
+  assert.match(source, /\.bind\(json_number\(payload, "loadingUnloadingChargePerKg"\)\)/)
+  assert.match(source, /\.bind\(json_number\(payload, "loadingUnloadingChargeNPR"\)\)/)
+  assert.match(source, /\.bind\(json_number\(payload, "debitNoteTotalNPR"\)\)/)
+  assert.match(source, /\.bind\(json_number\(payload, "totalAgentPayableNPR"\)\)/)
+  assert.match(source, /\.bind\(json_number\(payload, "landedCostNPR"\)\)/)
+})
+
+test('rebuilds import purchase ledger entries when an existing purchase is updated', () => {
+  const source = readFileSync('src/purchase/App.tsx', 'utf8')
+
+  assert.match(source, /const buildImportPurchaseLedgerEntries = \(purchase: ImportPurchase\) =>/)
+  assert.match(source, /const replaceLedgerEntriesForSource = /)
+  assert.match(source, /ledgerEntries = buildImportPurchaseLedgerEntries\(updated\)/)
+  assert.match(source, /ledgerEntries: replaceLedgerEntriesForSource\('PURCHASE', updated\.id, ledgerEntries\)/)
+})
+
+test('carries forward customs agent payable from total agent payable without double counting landed-cost fields', () => {
+  const carried = purchaseClosingParties({
+    settings: defaultSettings,
+    fiscalYears: [],
+    parties: [
+      {
+        id: 'AGENT-001',
+        name: 'Birgunj Customs & Logistics Services',
+        address: '',
+        phone: '',
+        panVatNo: '',
+        country: 'Nepal',
+        category: 'Custom Agent',
+        openingPayable: 18000,
+        isActive: true,
+        createdAt: '',
+        updatedAt: '',
+      },
+    ],
+    purchases: [{
+      customAgentPartyId: 'AGENT-001',
+      debitNoteTotalNPR: 1680,
+      agentServiceTotalNPR: 1680,
+      totalAgentPayableNPR: 1680,
+      vendorPartyId: 'VEND-001',
+      supplierAmountNPR: 21120,
+      freightIndiaStatus: 'Paid by custom agent',
+      freightIndiaPartyId: '',
+      freightIndiaAmountNPR: 600,
+    } as ImportPurchase],
+    payments: [{
+      partyId: 'AGENT-001',
+      amountNPR: 1400,
+    } as Payment],
+    localExpenses: [],
+    paymentAllocations: [],
+    activityLogs: [],
+  })
+
+  assert.equal(carried.find((party) => party.id === 'AGENT-001')?.openingPayable, 18280)
+})
+
 test('builds payment allocation rows, auto allocates oldest, and rejects over-allocation', () => {
   const rows = buildPaymentAllocationRows({
     bills: [
@@ -689,13 +1067,34 @@ test('creates and restores compatible draft autosave snapshots only', () => {
 })
 
 test('resolves stock database URLs per active company without filename collisions', () => {
-  const storage = installLocalStorage()
+  const storage = installLocalStorage({
+    'suite-company-profiles': JSON.stringify([
+      { id: 'company-a', name: 'Company A', fiscalYear: '2083/84' },
+      { id: 'company-b', name: 'Company B', fiscalYear: '2083/84' },
+    ]),
+  })
 
   assert.equal(getStockDatabaseUrlForCompanyId(''), LEGACY_STOCK_DATABASE_URL)
   assert.equal(getStockDatabaseUrlForCompanyId('default'), LEGACY_STOCK_DATABASE_URL)
-  assert.match(getStockDatabaseUrlForCompanyId('company-a'), /^sqlite:inventorytracked-stock-[0-9a-f-]+\.db$/)
+  assert.match(getStockDatabaseUrlForCompanyId('company-a'), /^sqlite:inventorytracked-stock-company-a-[0-9a-f]{16}\.db$/)
   assert.notEqual(getStockDatabaseUrlForCompanyId('A B'), getStockDatabaseUrlForCompanyId('A-B'))
   assert.notEqual(getStockDatabaseUrlForCompanyId('Company'), getStockDatabaseUrlForCompanyId('company'))
+  assert.equal(
+    getStockDatabaseFilenameForCompanyId('himalaya-fresh-fruit-traders-pvt-ltd-208').length < 90,
+    true,
+  )
+  assert.match(
+    getLegacyStockDatabaseFilenameForCompanyId('company-a'),
+    /^inventorytracked-stock-[0-9a-f-]+\.db$/,
+  )
+  assert.notEqual(
+    getStockDatabaseFilenameForCompanyId('company-a'),
+    getLegacyStockDatabaseFilenameForCompanyId('company-a'),
+  )
+  assert.equal(
+    stockDatabaseSafeCompanyId('himalaya-fresh-fruit-traders-pvt-ltd-208'),
+    'himalaya-fresh-fruit-traders-pvt-c5657790587582aa',
+  )
 
   setActiveCompanyId('company-a')
   const companyAUrl = getActiveStockDatabaseUrl()
@@ -705,8 +1104,296 @@ test('resolves stock database URLs per active company without filename collision
   assert.equal(storage.getItem('suite-active-company-id'), 'company-b')
 })
 
+test('falls back to the only saved company profile instead of empty default databases', () => {
+  installLocalStorage({
+    'suite-company-profiles': JSON.stringify([
+      {
+        companyGroupId: 'pashupati-chemicals',
+        createdAt: '',
+        fiscalYear: '2082/83',
+        id: 'pashupati-chemicals-2082-83',
+        isLocked: false,
+        lastCarryForwardAt: '',
+        lockedAt: '',
+        name: 'Pashupati Chemicals',
+        nextCompanyId: '',
+        previousCompanyId: '',
+        updatedAt: '',
+      },
+    ]),
+  })
+
+  assert.equal(getActiveCompanyId(), 'pashupati-chemicals-2082-83')
+  assert.equal(getActiveAccountsDatabaseUrl(), 'sqlite:accounts-pashupati-chemicals-2082-83.db')
+  assert.match(getActiveStockDatabaseUrl(), /^sqlite:inventorytracked-stock-pashupati-chemicals-2082-83-[0-9a-f]{16}\.db$/)
+})
+
+test('merges seed company profiles without replacing persisted user profiles', () => {
+  const persisted = parseCompanyProfiles(JSON.stringify([
+    {
+      companyGroupId: 'user-company',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      fiscalYear: '2082/83',
+      id: 'user-company-2082-83',
+      isLocked: false,
+      lastCarryForwardAt: '',
+      lockedAt: '',
+      name: 'User Edited Company Name',
+      nextCompanyId: '',
+      previousCompanyId: '',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    },
+    {
+      companyGroupId: 'hfft',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      fiscalYear: '2082/83',
+      id: 'hfft-2082-83',
+      isLocked: false,
+      lastCarryForwardAt: '',
+      lockedAt: '',
+      name: 'User Edited HFFT',
+      nextCompanyId: '',
+      previousCompanyId: '',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    },
+  ]))
+  const seeded = parseCompanyProfiles(JSON.stringify([
+    {
+      companyGroupId: 'hfft',
+      createdAt: '2026-02-01T00:00:00.000Z',
+      fiscalYear: '2082/83',
+      id: 'hfft-2082-83',
+      isLocked: true,
+      lastCarryForwardAt: 'seed',
+      lockedAt: 'seed',
+      name: 'Seed HFFT',
+      nextCompanyId: 'hfft-2083-84',
+      previousCompanyId: '',
+      updatedAt: '2026-02-02T00:00:00.000Z',
+    },
+    {
+      companyGroupId: 'hfft',
+      createdAt: '2026-02-01T00:00:00.000Z',
+      fiscalYear: '2083/84',
+      id: 'hfft-2083-84',
+      isLocked: false,
+      lastCarryForwardAt: '',
+      lockedAt: '',
+      name: 'Seed HFFT',
+      nextCompanyId: '',
+      previousCompanyId: 'hfft-2082-83',
+      updatedAt: '2026-02-02T00:00:00.000Z',
+    },
+    {
+      companyGroupId: 'hfft',
+      createdAt: 'duplicate',
+      fiscalYear: '2083/84',
+      id: 'hfft-2083-84',
+      isLocked: false,
+      name: 'Duplicate Seed HFFT',
+    },
+  ]))
+
+  const merged = mergeCompanyProfiles(persisted, seeded)
+
+  assert.deepEqual(merged.map((profile) => profile.id), [
+    'user-company-2082-83',
+    'hfft-2082-83',
+    'hfft-2083-84',
+  ])
+  assert.equal(merged.find((profile) => profile.id === 'hfft-2082-83')?.name, 'User Edited HFFT')
+  assert.equal(merged.find((profile) => profile.id === 'hfft-2082-83')?.isLocked, false)
+  assert.equal(merged.find((profile) => profile.id === 'hfft-2083-84')?.previousCompanyId, 'hfft-2082-83')
+})
+
+test('resolves active company safely for empty, seeded, stale, duplicate, and restart states', () => {
+  const emptyProfiles = mergeCompanyProfiles([], [])
+  assert.equal(resolveActiveCompanyId(emptyProfiles, ''), '')
+
+  const seeded = mergeCompanyProfiles([], parseCompanyProfiles(JSON.stringify([
+    { id: 'hfft-2082-83', name: 'HFFT', fiscalYear: '2082/83' },
+  ])))
+  assert.equal(resolveActiveCompanyId(seeded, ''), 'hfft-2082-83')
+
+  const persistedAndSeeded = mergeCompanyProfiles(
+    parseCompanyProfiles(JSON.stringify([{ id: 'user-2082-83', name: 'User', fiscalYear: '2082/83' }])),
+    parseCompanyProfiles(JSON.stringify([{ id: 'hfft-2082-83', name: 'HFFT', fiscalYear: '2082/83' }])),
+  )
+  assert.equal(resolveActiveCompanyId(persistedAndSeeded, 'user-2082-83'), 'user-2082-83')
+  assert.equal(resolveActiveCompanyId(persistedAndSeeded, 'deleted-company'), 'user-2082-83')
+  assert.deepEqual(
+    mergeCompanyProfiles(persistedAndSeeded, persistedAndSeeded).map((profile) => profile.id),
+    ['user-2082-83', 'hfft-2082-83'],
+  )
+})
+
+test('blocks storage writes for locked company profiles and allows open companies', () => {
+  installLocalStorage({
+    'suite-company-profiles': JSON.stringify([
+      {
+        companyGroupId: 'locked-company',
+        createdAt: '',
+        fiscalYear: '2082/83',
+        id: 'locked-company-2082-83',
+        isLocked: true,
+        lastCarryForwardAt: '',
+        lockedAt: '2026-08-11T00:00:00.000Z',
+        name: 'Locked Company',
+        nextCompanyId: '',
+        previousCompanyId: '',
+        updatedAt: '',
+      },
+      {
+        companyGroupId: 'open-company',
+        createdAt: '',
+        fiscalYear: '2083/84',
+        id: 'open-company-2083-84',
+        isLocked: false,
+        lastCarryForwardAt: '',
+        lockedAt: '',
+        name: 'Open Company',
+        nextCompanyId: '',
+        previousCompanyId: '',
+        updatedAt: '',
+      },
+    ]),
+  })
+
+  assert.throws(
+    () => assertCompanyWritable('locked-company-2082-83'),
+    /closed.*cannot be added, edited, or deleted/i,
+  )
+  assert.doesNotThrow(() => assertCompanyWritable('open-company-2083-84'))
+
+  setActiveCompanyId('locked-company-2082-83')
+  assert.throws(() => assertActiveCompanyWritable(), /closed.*cannot be added, edited, or deleted/i)
+
+  setActiveCompanyId('open-company-2083-84')
+  assert.doesNotThrow(() => assertActiveCompanyWritable())
+})
+
+test('storage write APIs reject locked active company before persistence', async () => {
+  installLocalStorage({
+    'suite-active-company-id': 'locked-company-2082-83',
+    'suite-company-profiles': JSON.stringify([
+      {
+        companyGroupId: 'locked-company',
+        createdAt: '',
+        fiscalYear: '2082/83',
+        id: 'locked-company-2082-83',
+        isLocked: true,
+        lastCarryForwardAt: '',
+        lockedAt: '2026-08-11T00:00:00.000Z',
+        name: 'Locked Company',
+        nextCompanyId: '',
+        previousCompanyId: '',
+        updatedAt: '',
+      },
+    ]),
+  })
+
+  const closedYearError = /closed.*cannot be added, edited, or deleted/i
+
+  await assert.rejects(() => saveSale({
+    billNo: '1',
+    dateBs: '2082/04/01',
+    dateAd: '',
+    partyId: 'customer-1',
+    salesAmount: 100,
+    vatAmount: 0,
+    totalAmount: 100,
+    remarks: '',
+  }), closedYearError)
+  await assert.rejects(() => updateSale({
+    id: 'sale-1',
+    fiscalYearId: fiscalYear.id,
+    lifecycleStatus: 'POSTED',
+    billNo: '1',
+    dateBs: '2082/04/01',
+    dateAd: '',
+    partyId: 'customer-1',
+    salesAmount: 100,
+    vatAmount: 0,
+    totalAmount: 100,
+    remarks: '',
+  }), closedYearError)
+  await assert.rejects(() => deleteSale('sale-1'), closedYearError)
+  await assert.rejects(() => saveCollection({
+    fiscalYearId: fiscalYear.id,
+    lifecycleStatus: 'POSTED',
+    receiptNo: '1',
+    dateBs: '2082/04/01',
+    dateAd: '',
+    partyId: 'customer-1',
+    bankName: 'DDA Bank',
+    amount: 100,
+    remarks: '',
+  }), closedYearError)
+  await assert.rejects(() => updateCollection({
+    id: 'receipt-1',
+    fiscalYearId: fiscalYear.id,
+    lifecycleStatus: 'POSTED',
+    receiptNo: '1',
+    dateBs: '2082/04/01',
+    dateAd: '',
+    partyId: 'customer-1',
+    bankName: 'DDA Bank',
+    amount: 100,
+    remarks: '',
+  }), closedYearError)
+  await assert.rejects(() => deleteCollection('receipt-1'), closedYearError)
+  await assert.rejects(() => restoreAccountsBackupData({ parties: [] }), closedYearError)
+  await assert.rejects(() => saveStockItem({
+    code: 'ITEM',
+    name: 'Item',
+    unit: 'KG',
+    openingQty: 1,
+    openingRate: 1,
+    reorderLevel: 0,
+    isActive: true,
+  }), closedYearError)
+  await assert.rejects(() => updateStockItem({
+    id: 'item-1',
+    code: 'ITEM',
+    name: 'Item',
+    unit: 'KG',
+    openingQty: 1,
+    openingRate: 1,
+    reorderLevel: 0,
+    isActive: true,
+  }), closedYearError)
+  await assert.rejects(() => deleteStockItem('item-1'), closedYearError)
+  await assert.rejects(() => setStockPurchaseLinesForDocument({
+    documentId: 'purchase-1',
+    billNo: 'P-1',
+    date: '2082/04/01',
+    partyName: 'Supplier',
+    source: 'Local Purchase',
+    sourceDocumentType: 'Local Purchase',
+    items: [],
+  }), closedYearError)
+  await assert.rejects(() => setStockSalesLinesForDocument({
+    documentId: 'sale-1',
+    billNo: 'S-1',
+    date: '2082/04/01',
+    partyName: 'Customer',
+    items: [],
+  }), closedYearError)
+  await assert.rejects(() => replaceStockBackupDataForCompany('locked-company-2082-83', {
+    items: [],
+    purchaseBills: [],
+    salesBills: [],
+  }), closedYearError)
+  await assert.rejects(() => upsertStockOpeningItemsForCompany('locked-company-2082-83', []), closedYearError)
+})
+
 test('keeps inventory tracking setting scoped by company', () => {
-  installLocalStorage()
+  installLocalStorage({
+    'suite-company-profiles': JSON.stringify([
+      { id: 'company-a', name: 'Company A', fiscalYear: '2083/84' },
+      { id: 'company-b', name: 'Company B', fiscalYear: '2083/84' },
+    ]),
+  })
 
   setActiveCompanyId('company-a')
   writeInventoryTrackingSetting(true)
@@ -723,7 +1410,12 @@ test('keeps inventory tracking setting scoped by company', () => {
 })
 
 test('migrates legacy global inventory setting once without overwriting company choice', () => {
-  installLocalStorage({ [TRACK_INVENTORY_KEY]: 'yes' })
+  installLocalStorage({
+    [TRACK_INVENTORY_KEY]: 'yes',
+    'suite-company-profiles': JSON.stringify([
+      { id: 'company-c', name: 'Company C', fiscalYear: '2083/84' },
+    ]),
+  })
 
   setActiveCompanyId('company-c')
   assert.equal(isInventoryTrackingEnabled(), true)
@@ -982,6 +1674,194 @@ test('marks sales stock lines mismatched when the source sale amount changes', (
   const [status] = buildStatuses(sourceDocs, [], salesBills)
   assert.equal(status.status, 'Mismatch')
   assert.equal(status.isFinal, false)
+})
+
+test('accepts stable sale document id as stored stock bill reference', () => {
+  const sourceDocs = [{
+    amount: 6760,
+    amountCurrency: 'NPR' as const,
+    amountNpr: 6760,
+    billNo: '180',
+    date: '2083/03/15',
+    documentId: 'SAL-8283-M12-15',
+    fiscalYearId: fiscalYear.id,
+    grandTotal: 6760,
+    lifecycleStatus: 'POSTED' as const,
+    partyName: 'Gandaki Super Store',
+    type: 'Sale' as const,
+  }]
+  const salesBills = [{
+    id: 'SAL-8283-M12-15',
+    billNo: 'SAL-8283-M12-15',
+    dateBs: '2083/03/15',
+    customerName: 'Gandaki Super Store',
+    sourceSnapshot: {
+      sourceAmount: 6760,
+      sourceAmountNpr: 6760,
+      sourceCurrency: 'NPR' as const,
+      sourceFiscalYearId: fiscalYear.id,
+      sourceGrandTotal: 6760,
+      sourceLifecycleStatus: 'POSTED' as const,
+    },
+    remarks: '',
+    createdAt: '',
+    items: [
+      { id: 'line-1', billId: 'SAL-8283-M12-15', itemId: 'apple', quantity: 10, rate: 260, amount: 2600 },
+      { id: 'line-2', billId: 'SAL-8283-M12-15', itemId: 'mango', quantity: 16, rate: 190, amount: 3040 },
+      { id: 'line-3', billId: 'SAL-8283-M12-15', itemId: 'lemon', quantity: 8, rate: 140, amount: 1120 },
+    ],
+  }]
+
+  const [status] = buildStatuses(sourceDocs, [], salesBills)
+
+  assert.equal(status.status, 'Entered')
+  assert.equal(status.isFinal, true)
+  assert.equal(status.lineValue, 6760)
+})
+
+test('marks HFFT import purchase stock lines entered when NPR entry and landed valuation reconcile', () => {
+  const sourceDocs = [{
+    amount: 13200,
+    amountCurrency: 'INR' as const,
+    amountNpr: 21120,
+    billNo: 'IMP-8283-M01-APPLE',
+    date: '2082/04/05',
+    documentId: 'IMP-8283-M01-APPLE',
+    exchangeRate: 1.6,
+    fiscalYearId: fiscalYear.id,
+    grandTotal: 22800,
+    landedCostNpr: 22800,
+    lifecycleStatus: 'POSTED' as const,
+    partyName: 'North India Apple Exports Pvt Ltd',
+    type: 'Import Purchase' as const,
+  }]
+  const purchaseBills = [{
+    id: 'IMP-8283-M01-APPLE',
+    billNo: 'IMP-8283-M01-APPLE',
+    dateBs: '2082/04/05',
+    supplierName: 'North India Apple Exports Pvt Ltd',
+    source: 'Importation' as const,
+    sourceType: 'Import Purchase' as const,
+    sourceSnapshot: {
+      sourceAmount: 21120,
+      sourceAmountNpr: 21120,
+      sourceCurrency: 'INR' as const,
+      sourceExchangeRate: 1.6,
+      sourceFiscalYearId: fiscalYear.id,
+      sourceGrandTotal: 22800,
+      sourceLandedCostNpr: 22800,
+      sourceLifecycleStatus: 'POSTED' as const,
+    },
+    referenceNo: 'DN-8283-M01-APPLE',
+    remarks: '',
+    createdAt: '',
+    items: [{
+      id: 'import-line',
+      billId: 'IMP-8283-M01-APPLE',
+      itemId: 'apple',
+      quantity: 120,
+      rate: 190,
+      amount: 22800,
+      entryRate: 176,
+      entryAmount: 21120,
+    }],
+  }]
+
+  const [status] = buildStatuses(sourceDocs, purchaseBills, [])
+
+  assert.equal(status.status, 'Entered')
+  assert.equal(status.isFinal, true)
+  assert.equal(status.lineValue, 21120)
+  assert.equal(status.valuationValue, 22800)
+})
+
+test('marks foreign-currency import stock lines entered when source-currency entry and landed valuation reconcile', () => {
+  const sourceDocs = [{
+    amount: 12500,
+    amountCurrency: 'INR' as const,
+    amountNpr: 20000,
+    billNo: 'HFFT-LU-RETEST-001',
+    date: '2083/04/14',
+    documentId: 'import-fx-1',
+    exchangeRate: 1.6,
+    fiscalYearId: fiscalYear.id,
+    grandTotal: 21800,
+    landedCostNpr: 21800,
+    lifecycleStatus: 'POSTED' as const,
+    partyName: 'North India Apple Exports Pvt Ltd',
+    type: 'Import Purchase' as const,
+  }]
+  const purchaseBills = [{
+    id: 'import-fx-1',
+    billNo: 'HFFT-LU-RETEST-001',
+    dateBs: '2083/04/14',
+    supplierName: 'North India Apple Exports Pvt Ltd',
+    source: 'Importation' as const,
+    sourceType: 'Import Purchase' as const,
+    sourceSnapshot: {
+      sourceAmount: 12500,
+      sourceAmountNpr: 20000,
+      sourceCurrency: 'INR' as const,
+      sourceExchangeRate: 1.6,
+      sourceFiscalYearId: fiscalYear.id,
+      sourceGrandTotal: 21800,
+      sourceLandedCostNpr: 21800,
+      sourceLifecycleStatus: 'POSTED' as const,
+    },
+    referenceNo: 'HFFT-LU-RETEST-001-PP',
+    remarks: '',
+    createdAt: '',
+    items: [{
+      id: 'import-line',
+      billId: 'import-fx-1',
+      itemId: 'ITEM-APPLE',
+      quantity: 100,
+      rate: 218,
+      amount: 21800,
+      entryRate: 125,
+      entryAmount: 12500,
+    }],
+  }]
+
+  const [status] = buildStatuses(sourceDocs, purchaseBills, [])
+
+  assert.equal(status.status, 'Entered')
+  assert.equal(status.isFinal, true)
+  assert.equal(status.lineValue, 12500)
+  assert.equal(status.valuationValue, 21800)
+})
+
+test('maps import purchase source docs with landed NPR as stock grand total', () => {
+  const sourceDocs = buildSourceDocs({
+    accountParties: [],
+    fiscalYearId: fiscalYear.id,
+    localExpenses: [],
+    purchaseParties: [{ id: 'VEND-001', name: 'North India Apple Exports Pvt Ltd' } as PurchaseParty],
+    purchases: [{
+      id: 'IMP-8283-M01-APPLE',
+      fiscalYearId: fiscalYear.id,
+      lifecycleStatus: 'POSTED',
+      vendorPartyId: 'VEND-001',
+      vendorBillNumber: 'IMP-8283-M01-APPLE',
+      billDate: '2082/04/05',
+      supplierCurrency: 'INR',
+      amountIC: 13200,
+      supplierExchangeRate: 1.6,
+      supplierAmountNPR: 21120,
+      debitNoteDate: '2082/04/05',
+      debitNoteNumber: 'DN-8283-M01-APPLE',
+      landedCostNPR: 22800,
+      calculationVersion: 'hfft-dda-v1',
+      calculatedAt: '2026-08-10T18:44:14Z',
+      remarks: '',
+    } as ImportPurchase],
+    sales: [],
+  })
+
+  assert.equal(sourceDocs[0].amount, 13200)
+  assert.equal(sourceDocs[0].amountNpr, 21120)
+  assert.equal(sourceDocs[0].grandTotal, 22800)
+  assert.equal(sourceDocs[0].landedCostNpr, 22800)
 })
 
 test('marks import and local purchase stock mismatched when source values change', () => {
@@ -1609,6 +2489,92 @@ test('recovers a leaked stock transaction before retrying begin', async () => {
     'ROLLBACK',
     'BEGIN IMMEDIATE TRANSACTION',
     'safe-write',
+    'COMMIT',
+  ])
+})
+
+test('commits accounts sale delete transaction and allows immediate second write', async () => {
+  const statements: string[] = []
+  let transactionOpen = false
+  const fakeDb = {
+    async execute(statement: string) {
+      if (statement === 'BEGIN TRANSACTION') {
+        if (transactionOpen) {
+          throw new Error('cannot start a transaction within a transaction')
+        }
+        transactionOpen = true
+      }
+      statements.push(statement)
+      if (statement === 'COMMIT' || statement === 'ROLLBACK') {
+        transactionOpen = false
+      }
+    },
+  }
+
+  await runDbTransaction(fakeDb, async () => {
+    await fakeDb.execute('delete-receipt-allocations')
+    await fakeDb.execute('delete-ledger')
+    await fakeDb.execute('delete-sale')
+  }, { operationId: 'SALE-DELETE-TEST-1' })
+
+  await runDbTransaction(fakeDb, async () => {
+    await fakeDb.execute('second-sale-write')
+  }, { operationId: 'SALE-DELETE-TEST-2' })
+
+  assert.deepEqual(statements, [
+    'BEGIN TRANSACTION',
+    'delete-receipt-allocations',
+    'delete-ledger',
+    'delete-sale',
+    'COMMIT',
+    'BEGIN TRANSACTION',
+    'second-sale-write',
+    'COMMIT',
+  ])
+})
+
+test('rolls back failed accounts sale delete and keeps database writable', async () => {
+  const statements: string[] = []
+  let transactionOpen = false
+  const fakeDb = {
+    async execute(statement: string) {
+      if (statement === 'BEGIN TRANSACTION') {
+        if (transactionOpen) {
+          throw new Error('cannot start a transaction within a transaction')
+        }
+        transactionOpen = true
+      }
+      statements.push(statement)
+      if (statement === 'delete-sale-fails') {
+        throw new Error('controlled delete failure')
+      }
+      if (statement === 'COMMIT' || statement === 'ROLLBACK') {
+        transactionOpen = false
+      }
+    },
+  }
+
+  await assert.rejects(
+    () => runDbTransaction(fakeDb, async () => {
+      await fakeDb.execute('delete-receipt-allocations')
+      await fakeDb.execute('delete-ledger')
+      await fakeDb.execute('delete-sale-fails')
+    }, { operationId: 'SALE-DELETE-FAIL-TEST' }),
+    /controlled delete failure/,
+  )
+
+  await runDbTransaction(fakeDb, async () => {
+    await fakeDb.execute('post-rollback-write')
+  }, { operationId: 'SALE-DELETE-POST-ROLLBACK-TEST' })
+
+  assert.deepEqual(statements, [
+    'BEGIN TRANSACTION',
+    'delete-receipt-allocations',
+    'delete-ledger',
+    'delete-sale-fails',
+    'ROLLBACK',
+    'BEGIN TRANSACTION',
+    'post-rollback-write',
     'COMMIT',
   ])
 })

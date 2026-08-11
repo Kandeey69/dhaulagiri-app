@@ -18,12 +18,17 @@ const files = [
   'src/domain/chartOfAccounts.ts',
   'src/domain/ledger.ts',
   'src/domain/reconciliation.ts',
+  'src/accounts/data/storage.ts',
+  'src/accounts/utils/settings.ts',
   'src/application/draftAutosave.ts',
   'src/application/paymentAllocationUi.ts',
+  'src/application/purchaseCarryForward.ts',
   'src/application/purchaseFormValidation.ts',
   'src/application/reportFilters.ts',
   'src/application/transactionActions.ts',
   'src/purchase/calculations.ts',
+  'src/purchase/domain.ts',
+  'src/purchase/repositoryMapping.ts',
   'src/stock/settings.ts',
   'src/stock/services/stockCalculations.ts',
   'src/stock/services/stockCarryForward.ts',
@@ -31,6 +36,7 @@ const files = [
   'src/stock/services/stockLandedCost.ts',
   'src/stock/services/stockLedger.ts',
   'src/stock/services/stockTransactions.ts',
+  'src/stock/storage.ts',
   'tests/domain.test.ts',
 ]
 
@@ -43,6 +49,19 @@ const rewriteImports = (source) =>
   })
 
 await rm(outRoot, { recursive: true, force: true })
+
+const sqlStubRoot = path.join(outRoot, 'node_modules', '@tauri-apps', 'plugin-sql')
+await mkdir(sqlStubRoot, { recursive: true })
+await writeFile(
+  path.join(sqlStubRoot, 'package.json'),
+  JSON.stringify({ name: '@tauri-apps/plugin-sql', type: 'module', exports: './index.js' }),
+  'utf8',
+)
+await writeFile(
+  path.join(sqlStubRoot, 'index.js'),
+  "export default { load() { throw new Error('Tauri SQL plugin is unavailable in domain tests.'); } };\n",
+  'utf8',
+)
 
 for (const file of files) {
   const inputPath = path.join(root, file)

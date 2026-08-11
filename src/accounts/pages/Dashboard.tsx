@@ -18,8 +18,41 @@ type DashboardProps = {
   onNavigate: (page: DashboardTarget) => void;
 };
 
+const wait = (milliseconds: number) => new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds));
+
+function errorText(error: unknown) {
+  return String(error instanceof Error ? error.message : error || "Unknown error");
+}
+
+function isTransientDatabaseError(error: unknown) {
+  const text = errorText(error).toLowerCase();
+  return (
+    text.includes("database is locked") ||
+    text.includes("database locked") ||
+    text.includes("code: 5") ||
+    text.includes("cannot start a transaction within a transaction")
+  );
+}
+
+async function loadDashboardSection<T>(sectionName: string, load: () => Promise<T>) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      return await load();
+    } catch (error) {
+      if (!isTransientDatabaseError(error) || attempt === 7) {
+        throw new Error(`${sectionName}: ${errorText(error)}`, { cause: error });
+      }
+
+      await wait(Math.min(1800, 200 * (attempt + 1)));
+    }
+  }
+
+  throw new Error(`${sectionName}: could not load`);
+}
+
 export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNavigate }: DashboardProps) {
   const [entryMessage, setEntryMessage] = useState("");
+  const [loadMessage, setLoadMessage] = useState("");
   const [parties, setParties] = useState<Party[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
@@ -27,29 +60,45 @@ export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNa
   const [outstanding, setOutstanding] = useState<OutstandingRow[]>([]);
 
   useEffect(() => {
-    async function load() {
-      const [
-        loadedParties,
-        loadedSales,
-        loadedCollections,
-        loadedCreditNotes,
-        loadedOutstanding,
-      ] = await Promise.all([
-        getParties(),
-        getSales(),
-        getCollections(),
-        getCreditNotes(),
-        getOutstanding(),
-      ]);
+    let isActive = true;
 
-      setParties(loadedParties);
-      setSales(loadedSales);
-      setCollections(loadedCollections);
-      setCreditNotes(loadedCreditNotes);
-      setOutstanding(loadedOutstanding);
+    async function load() {
+      const results = await Promise.allSettled([
+        loadDashboardSection("Parties", getParties),
+        loadDashboardSection("Sales", getSales),
+        loadDashboardSection("Collections", getCollections),
+        loadDashboardSection("Credit notes", getCreditNotes),
+        loadDashboardSection("Outstanding totals", getOutstanding),
+      ] as const);
+
+      if (!isActive) {
+        return;
+      }
+
+      const [partiesResult, salesResult, collectionsResult, creditNotesResult, outstandingResult] = results;
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => errorText(result.reason));
+
+      if (partiesResult.status === "fulfilled") setParties(partiesResult.value);
+      if (salesResult.status === "fulfilled") setSales(salesResult.value);
+      if (collectionsResult.status === "fulfilled") setCollections(collectionsResult.value);
+      if (creditNotesResult.status === "fulfilled") setCreditNotes(creditNotesResult.value);
+      if (outstandingResult.status === "fulfilled") setOutstanding(outstandingResult.value);
+      const nextLoadMessage = failures.length
+        ? `Some dashboard totals could not be loaded: ${failures.join("; ")}. Registers still show saved entries.`
+        : "";
+      if (nextLoadMessage) {
+        window.alert(nextLoadMessage);
+      }
+      setLoadMessage(nextLoadMessage);
     }
 
-    load();
+    void load();
+
+    return () => {
+      isActive = false;
+    };
   }, []);
 
   const salesBeforeVat = sales.reduce((sum, sale) => sum + sale.salesAmount, 0);
@@ -103,6 +152,7 @@ export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNa
     <div className="stack">
       <div className="card">
         <h3>New Entry</h3>
+        {loadMessage && <p className="status-message">{loadMessage}</p>}
         {entryMessage && <p className="status-message">{entryMessage}</p>}
         <div className="quick-actions">
           <button type="button" onClick={() => openEntry("sales")}>
