@@ -329,6 +329,7 @@ export default function Sales({
           billNo: sale.billNo,
           date: sale.dateBs,
           documentId: sale.id,
+          exchangeRate: 1,
           fiscalYearId: sale.fiscalYearId,
           grandTotal: sale.totalAmount,
           lifecycleStatus: sale.lifecycleStatus,

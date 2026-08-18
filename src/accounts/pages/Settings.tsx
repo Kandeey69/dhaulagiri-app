@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { MASTER_PASSWORD, type UserRole } from "../auth";
 import { getCompanySetting, setCompanySetting } from "../../companyContext";
+import { readLetterheadSettings, writeLetterheadSettings } from "../utils/letterheadSettings";
 
 type SettingsProps = {
   onCompanySettingsChange: (companyName: string, fiscalYear: string) => void;
@@ -20,6 +21,7 @@ export default function Settings({
   const [fiscalYear, setFiscalYear] = useState(
     () => getCompanySetting("accounts-fiscal-year", "")
   );
+  const [letterheadSettings, setLetterheadSettings] = useState(readLetterheadSettings);
   const [message, setMessage] = useState("");
 
   function unlockMaster() {
@@ -48,6 +50,18 @@ export default function Settings({
     setCompanySetting("accounts-fiscal-year", nextFiscalYear);
     onCompanySettingsChange(nextCompanyName, nextFiscalYear);
     setMessage("Settings saved.");
+  }
+
+  function saveLetterheadSettings() {
+    writeLetterheadSettings(letterheadSettings);
+    setMessage("Letterhead settings saved.");
+  }
+
+  function updateLetterheadField(field: keyof typeof letterheadSettings, value: string) {
+    setLetterheadSettings((current) => ({
+      ...current,
+      [field]: value,
+    }));
   }
 
   return (
@@ -114,6 +128,35 @@ export default function Settings({
           <br />
           <button className="primary" onClick={saveCompanySettings}>
             Save Settings
+          </button>
+        </div>
+
+        <div className="card">
+          <h3>Letterhead Settings</h3>
+
+          <div className="form-grid single-column">
+            <label>
+              Company Name in Nepali
+              <input
+                value={letterheadSettings.nepaliCompanyName}
+                onChange={(event) => updateLetterheadField("nepaliCompanyName", event.target.value)}
+                placeholder="Enter Nepali company name"
+              />
+            </label>
+
+            <label>
+              Default Contact Line
+              <textarea
+                value={letterheadSettings.contactLine}
+                onChange={(event) => updateLetterheadField("contactLine", event.target.value)}
+                placeholder="Leave blank to use phone number from normal settings"
+              />
+            </label>
+          </div>
+
+          <br />
+          <button className="primary" onClick={saveLetterheadSettings}>
+            Save Letterhead Settings
           </button>
         </div>
 

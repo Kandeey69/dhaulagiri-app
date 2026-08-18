@@ -357,6 +357,7 @@ export default function StockApp({
         {view === "Dashboard" && showInitialLoading && <p className="stock-muted">Loading stock data...</p>}
         {view === "Dashboard" && (
           <DashboardPage
+            currentRows={currentRows}
             dashboardTotals={dashboardTotals}
             itemCount={items.length}
             negativeRows={negativeRows}

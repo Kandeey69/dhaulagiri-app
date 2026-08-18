@@ -140,7 +140,7 @@ export default function AllocationEditor({
         <label className="stock-field readonly"><span>Unit</span><strong>{selectedItem?.unit ?? "-"}</strong></label>
         <label>
           Rate Exclusive of VAT ({currency})
-          <input disabled={readOnly || saving} type="number" min="0" step="0.000001" value={lineRate} onKeyDown={blockArrowNumberStep} onChange={(event) => onLineRateChange(event.target.value)} />
+          <input disabled={readOnly || saving} type="number" min="0" step="0.00001" value={lineRate} onKeyDown={blockArrowNumberStep} onChange={(event) => onLineRateChange(limitDecimalPlaces(event.target.value, 5))} />
         </label>
         <label className="stock-field readonly"><span>Current Line Total</span><strong>{formatCurrency(currentLineTotal, currency)}</strong></label>
       </div>
@@ -178,4 +178,10 @@ export default function AllocationEditor({
       />
     </div>
   );
+}
+
+function limitDecimalPlaces(value: string, maxDecimals: number) {
+  const [integerPart, decimalPart, ...rest] = value.split(".");
+  if (decimalPart === undefined) return value;
+  return `${integerPart}.${decimalPart.slice(0, maxDecimals)}${rest.join("")}`;
 }

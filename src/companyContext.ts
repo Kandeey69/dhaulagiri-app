@@ -257,12 +257,44 @@ export function setCompanySetting(key: string, value: string) {
   localStorage.setItem(companyStorageKey(key), value)
 }
 
+export function copyCompanySettings(sourceCompanyId: string, targetCompanyId: string, keys: string[]) {
+  if (!isBrowser() || !sourceCompanyId || !targetCompanyId) {
+    return
+  }
+
+  keys.forEach((key) => {
+    const value = localStorage.getItem(companyStorageKey(key, sourceCompanyId))
+
+    if (value !== null) {
+      localStorage.setItem(companyStorageKey(key, targetCompanyId), value)
+    }
+  })
+}
+
 export function removeCompanySetting(key: string) {
   if (!isBrowser()) {
     return
   }
 
   localStorage.removeItem(companyStorageKey(key))
+}
+
+export function removeCompanyScopedSettings(companyId: string) {
+  if (!isBrowser() || !companyId) {
+    return
+  }
+
+  const suffix = `:${companyId}`
+  const keysToRemove: string[] = []
+
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index)
+    if (key?.endsWith(suffix)) {
+      keysToRemove.push(key)
+    }
+  }
+
+  keysToRemove.forEach((key) => localStorage.removeItem(key))
 }
 
 export function getActiveAccountsDatabaseUrl() {

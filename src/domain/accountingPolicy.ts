@@ -131,7 +131,6 @@ export function calculateImportLandedCostBreakdown(
       input.importVatNPR +
       totalTerminalChargeNPR +
       freightCustomAgentPayableNPR +
-      loadingUnloadingNPR +
       input.otherChargesNPR,
   )
   const agentServiceTotalNPR = money(

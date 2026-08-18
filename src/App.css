@@ -470,7 +470,9 @@
   font-weight: 800;
 }
 
-.suite-settings-grid input {
+.suite-settings-grid input,
+.suite-settings-grid select,
+.suite-settings-grid textarea {
   width: 100%;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
@@ -481,8 +483,30 @@
   font-weight: 600;
 }
 
+.suite-settings-grid textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+
+.suite-settings-grid label span {
+  color: #64748b;
+  font-weight: 700;
+}
+
 .suite-settings-wide {
   grid-column: 1 / -1;
+}
+
+.suite-settings-section {
+  border-top: 1px solid #d8e0e8;
+  margin-top: 24px;
+  padding-top: 22px;
+}
+
+.suite-settings-section h2 {
+  margin: 0 0 6px;
+  color: #0f172a;
+  font-size: 20px;
 }
 
 .suite-settings-actions {
@@ -503,6 +527,22 @@
 .suite-settings-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.65;
+}
+
+.suite-settings-actions button.danger {
+  background: #b91c1c;
+}
+
+.suite-settings-actions button.danger:hover:not(:disabled) {
+  background: #991b1b;
+}
+
+.suite-danger-zone {
+  border-top-color: #fecaca;
+}
+
+.suite-danger-zone h2 {
+  color: #991b1b;
 }
 
 @media (max-width: 900px) {

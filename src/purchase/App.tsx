@@ -1603,6 +1603,7 @@ function App({
       supplierAmountNPR: purchase.supplierAmountNPR,
       totalAgentPayableNPR: purchase.totalAgentPayableNPR,
       freightIndiaAmountNPR: purchase.freightIndiaAmountNPR,
+      landedCostAdjustmentNPR: purchase.loadingUnloadingChargeNPR,
       landedCostNPR: purchase.landedCostNPR,
       totalInputVatNPR: purchase.totalInputVatNPR,
       reference: purchase.vendorBillNumber,

@@ -104,6 +104,7 @@ type RegisterTransaction = {
   receivedQty: number;
   receivedAmount: number;
   issuedQty: number;
+  issuedSalesRate: number;
   sortGroup: number;
   sortDate: string;
 };
@@ -141,6 +142,7 @@ export function buildStockRegisterRows(
       receivedQty: Number(item.openingQty || 0),
       receivedAmount: openingAmount,
       issuedQty: 0,
+      issuedSalesRate: 0,
       sortDate: "",
       sortGroup: 0,
     });
@@ -162,6 +164,7 @@ export function buildStockRegisterRows(
         receivedQty: Number(line.quantity || 0),
         receivedAmount: Number(line.amount || 0),
         issuedQty: 0,
+        issuedSalesRate: 0,
         sortDate: billDate,
         sortGroup: 1,
       });
@@ -179,6 +182,7 @@ export function buildStockRegisterRows(
         receivedQty: 0,
         receivedAmount: 0,
         issuedQty: Number(line.quantity || 0),
+        issuedSalesRate: Number(line.rate || 0),
         sortDate: billDate,
         sortGroup: 2,
       });
@@ -228,6 +232,7 @@ export function buildStockRegisterRows(
           receivedAmount: transaction.receivedAmount,
           issuedQty: transaction.issuedQty,
           issuedRate: transaction.issuedQty ? balanceRateBeforeIssue : 0,
+          issuedSalesRate: transaction.issuedQty ? transaction.issuedSalesRate : 0,
           issuedAmount,
           balanceQty,
           balanceRate: rateFromAmount(balanceAmount, balanceQty),

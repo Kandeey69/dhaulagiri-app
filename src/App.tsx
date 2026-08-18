@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import AccountsApp from "./accounts/App";
@@ -16,6 +16,11 @@ import {
 } from "./accounts/data/storage";
 import type { Collection, CreditNote, Party as AccountParty, Sale } from "./accounts/data/types";
 import { saveBlob } from "./accounts/utils/fileSave";
+import {
+  LETTERHEAD_SETTING_KEY_LIST,
+  readLetterheadSettings,
+  writeLetterheadSettings,
+} from "./accounts/utils/letterheadSettings";
 import {
   defaultSettings,
   normalizeSupplierCurrency,
@@ -49,13 +54,16 @@ import type { StockDocumentReference, StockEntryTarget } from "./stock/types";
 import { purchaseClosingParties } from "./application/purchaseCarryForward";
 import {
   createCompanyYearId,
+  copyCompanySettings,
   getActiveCompanyId,
   getActiveCompanyProfile,
+  getCompanyProfile,
   getCompanyProfiles,
   getCompanySetting,
   mergeCompanyProfiles,
   parseCompanyProfiles,
   removeCompanyProfile,
+  removeCompanyScopedSettings,
   resolveActiveCompanyId,
   saveCompanyProfiles,
   setActiveCompanyId,
@@ -308,6 +316,8 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
         });
         writeInventoryTrackingSettingForCompany(targetCompany.id, true);
       }
+
+      copyCompanySettings(sourceCompany.id, targetCompany.id, LETTERHEAD_SETTING_KEY_LIST);
     } catch (error) {
       setActiveCompanyId(targetCompany.id);
       await restoreAccountsBackupData(targetAccountsBefore).catch((restoreError) => {
@@ -846,8 +856,15 @@ type PortableCompanyBackup = {
   version: 1 | 2;
 };
 
-async function downloadPortableCompanyBackup(company: CompanyProfile) {
-  await withActiveCompany(company.id, async () => {
+type PortableCompanyGroupBackup = {
+  companies: PortableCompanyBackup[];
+  exportedAt: string;
+  kind: "easysolution-company-group-backup";
+  version: 1;
+};
+
+async function buildPortableCompanyBackup(company: CompanyProfile): Promise<PortableCompanyBackup> {
+  return withActiveCompany(company.id, async () => {
     const [accounts, purchaseRepository, stockData] = await Promise.all([
       getAccountsBackupData(),
       createDataRepository(),
@@ -873,12 +890,44 @@ async function downloadPortableCompanyBackup(company: CompanyProfile) {
       },
       version: 2,
     };
+
+    return backup;
+  });
+}
+
+async function downloadPortableCompanyBackup(company: CompanyProfile) {
+  const backup = await buildPortableCompanyBackup(company);
+
+  await withActiveCompany(company.id, async () => {
     const filename = `${safePdfFilename(`${company.name}-${company.fiscalYear || "fy"}-backup`)}.easysolution-backup.json`;
     await saveBlob(filename, new Blob([JSON.stringify(backup, null, 2)], { type: "application/json;charset=utf-8" }), {
       description: "Easysolution Backup",
       mimeType: "application/json",
       extensions: [".json"],
     });
+  });
+}
+
+async function downloadPortableCompanyGroupBackup(company: CompanyProfile) {
+  const companies = getLinkedCompanyGroup(company)
+    .sort((left, right) => fiscalYearSortValue(left.fiscalYear) - fiscalYearSortValue(right.fiscalYear));
+  const backups: PortableCompanyBackup[] = [];
+
+  for (const linkedCompany of companies) {
+    backups.push(await buildPortableCompanyBackup(linkedCompany));
+  }
+
+  const backup: PortableCompanyGroupBackup = {
+    companies: backups,
+    exportedAt: new Date().toISOString(),
+    kind: "easysolution-company-group-backup",
+    version: 1,
+  };
+  const filename = `${safePdfFilename(`${company.name}-full-company-backup`)}.easysolution-company-backup.json`;
+  await saveBlob(filename, new Blob([JSON.stringify(backup, null, 2)], { type: "application/json;charset=utf-8" }), {
+    description: "Easysolution Full Company Backup",
+    mimeType: "application/json",
+    extensions: [".json"],
   });
 }
 
@@ -889,6 +938,15 @@ function isPortableCompanyBackup(value: unknown): value is PortableCompanyBackup
 
   const row = value as Partial<PortableCompanyBackup>;
   return row.kind === "easysolution-company-backup" && Boolean(row.company) && Boolean(row.accounts) && Boolean(row.purchase);
+}
+
+function isPortableCompanyGroupBackup(value: unknown): value is PortableCompanyGroupBackup {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const row = value as Partial<PortableCompanyGroupBackup>;
+  return row.kind === "easysolution-company-group-backup" && Array.isArray(row.companies);
 }
 
 function remapAccountsBackupFiscalYears(
@@ -916,13 +974,15 @@ function remapAccountsBackupFiscalYears(
   };
 }
 
-async function importPortableCompanyBackup(file: File) {
-  const parsed = JSON.parse(await file.text()) as unknown;
+type ImportCompanyBackupOptions = {
+  linkAdjacent?: boolean;
+  preserveIdentity?: boolean;
+};
 
-  if (!isPortableCompanyBackup(parsed)) {
-    throw new Error("This is not a valid Easysolution company backup file.");
-  }
-
+async function importPortableCompanyBackupData(
+  parsed: PortableCompanyBackup,
+  options: ImportCompanyBackupOptions = {},
+) {
   const backupVersion = Number(parsed.version || 1);
   if (!Number.isFinite(backupVersion) || backupVersion < 1 || backupVersion > 2) {
     throw new Error(`Unsupported Easysolution backup version ${parsed.version}.`);
@@ -940,11 +1000,17 @@ async function importPortableCompanyBackup(file: File) {
     companyName: sourceCompany.name,
     fiscalYear: sourceCompany.fiscalYear,
   };
-  const companyId = createCompanyYearId(sourceCompany.name, sourceCompany.fiscalYear);
+  const companyId = options.preserveIdentity ? sourceCompany.id : createCompanyYearId(sourceCompany.name, sourceCompany.fiscalYear);
   const existingProfile = getCompanyProfiles().find((company) => company.id === companyId);
   const previousActiveCompanyId = getActiveCompanyId();
+  const adjacentLink = options.linkAdjacent
+    ? resolveAdjacentFiscalYearLink(sourceCompany, companyId)
+    : { accepted: false, companyGroupId: options.preserveIdentity ? sourceCompany.companyGroupId : companyId, nextCompanyId: "", previousCompanyId: "" };
+  const companyGroupId = options.preserveIdentity
+    ? sourceCompany.companyGroupId || companyId
+    : adjacentLink.companyGroupId || companyId;
   const profile = upsertCompanyProfile({
-    companyGroupId: companyId,
+    companyGroupId,
     createdAt: sourceCompany.createdAt,
     fiscalYear: sourceCompany.fiscalYear,
     id: companyId,
@@ -952,8 +1018,8 @@ async function importPortableCompanyBackup(file: File) {
     lastCarryForwardAt: "",
     lockedAt: "",
     name: sourceCompany.name,
-    nextCompanyId: "",
-    previousCompanyId: "",
+    nextCompanyId: options.preserveIdentity ? sourceCompany.nextCompanyId : adjacentLink.nextCompanyId,
+    previousCompanyId: options.preserveIdentity ? sourceCompany.previousCompanyId : adjacentLink.previousCompanyId,
   });
 
   const emptyPurchaseData = getEmptyData();
@@ -1040,6 +1106,10 @@ async function importPortableCompanyBackup(file: File) {
       await replaceStockBackupDataForCompany(profile.id, parsed.stock.data);
       writeInventoryTrackingSettingForCompany(profile.id, parsed.stock.trackInventory);
     }
+
+    if (!options.preserveIdentity && adjacentLink.accepted) {
+      linkAdjacentProfiles(profile, adjacentLink);
+    }
   } catch (error) {
     if (existingProfile) {
       upsertCompanyProfile(existingProfile);
@@ -1059,6 +1129,230 @@ async function importPortableCompanyBackup(file: File) {
   }
 
   return profile;
+}
+
+async function importPortableCompanyGroupBackup(parsed: PortableCompanyGroupBackup) {
+  const backups = parsed.companies.filter(isPortableCompanyBackup);
+
+  if (!backups.length) {
+    throw new Error("This full company backup does not contain any fiscal-year backups.");
+  }
+
+  const existingIds = new Set(getCompanyProfiles().map((company) => company.id));
+  const conflictingIds = backups.map((backup) => backup.company.id).filter((id) => existingIds.has(id));
+
+  if (conflictingIds.length > 0 && !window.confirm(
+    `This full company backup will replace ${conflictingIds.length} existing fiscal year(s) with the same identity.\n\nContinue?`
+  )) {
+    throw new Error("Full company import cancelled.");
+  }
+
+  let firstImported: CompanyProfile | null = null;
+
+  for (const backup of backups) {
+    const imported = await importPortableCompanyBackupData(backup, { preserveIdentity: true });
+    firstImported = firstImported ?? imported;
+  }
+
+  backups.forEach((backup) => {
+    const company = backup.company;
+    upsertCompanyProfile({
+      ...company,
+      companyGroupId: company.companyGroupId || firstImported?.companyGroupId || company.id,
+    });
+  });
+
+  return firstImported ?? getCompanyProfiles()[0];
+}
+
+async function importPortableBackupFile(file: File) {
+  const parsed = JSON.parse(await file.text()) as unknown;
+
+  if (isPortableCompanyGroupBackup(parsed)) {
+    return importPortableCompanyGroupBackup(parsed);
+  }
+
+  if (isPortableCompanyBackup(parsed)) {
+    return importPortableCompanyBackupData(parsed, { linkAdjacent: true });
+  }
+
+  throw new Error("This is not a valid Easysolution backup file.");
+}
+
+type AdjacentFiscalYearLink = {
+  accepted: boolean;
+  companyGroupId: string;
+  nextCompanyId: string;
+  previousCompanyId: string;
+};
+
+function fiscalYearSortValue(fiscalYear: string) {
+  const match = fiscalYear.trim().match(/^(\d{4})\s*\/\s*(\d{2})$/);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+function fiscalYearCodeOffset(fiscalYear: string, offset: number) {
+  const match = fiscalYear.trim().match(/^(\d{4})\s*\/\s*(\d{2})$/);
+
+  if (!match) {
+    return "";
+  }
+
+  const startYear = Number(match[1]) + offset;
+  const endYear = (Number(match[2]) + offset + 100) % 100;
+  return `${startYear}/${String(endYear).padStart(2, "0")}`;
+}
+
+function getLinkedCompanyGroup(company: CompanyProfile) {
+  const profiles = getCompanyProfiles();
+  const groupId = company.companyGroupId || company.id;
+  const linkedIds = new Set<string>([company.id]);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    profiles.forEach((profile) => {
+      const directlyLinked =
+        profile.companyGroupId === groupId ||
+        linkedIds.has(profile.id) ||
+        linkedIds.has(profile.previousCompanyId) ||
+        linkedIds.has(profile.nextCompanyId);
+
+      if (directlyLinked && !linkedIds.has(profile.id)) {
+        linkedIds.add(profile.id);
+        changed = true;
+      }
+    });
+  }
+
+  return profiles.filter((profile) => linkedIds.has(profile.id));
+}
+
+function resolveAdjacentFiscalYearLink(sourceCompany: CompanyProfile, importCompanyId: string): AdjacentFiscalYearLink {
+  const profiles = getCompanyProfiles().filter((profile) => profile.id !== importCompanyId);
+  const previousFiscalYear = fiscalYearCodeOffset(sourceCompany.fiscalYear, -1);
+  const nextFiscalYear = fiscalYearCodeOffset(sourceCompany.fiscalYear, 1);
+  const sameCompanyName = (profile: CompanyProfile) =>
+    profile.name.trim().toLowerCase() === sourceCompany.name.trim().toLowerCase();
+  const previousCompany = profiles.find((profile) => sameCompanyName(profile) && profile.fiscalYear === previousFiscalYear);
+  const nextCompany = profiles.find((profile) => sameCompanyName(profile) && profile.fiscalYear === nextFiscalYear);
+
+  if (!previousCompany && !nextCompany) {
+    return {
+      accepted: false,
+      companyGroupId: importCompanyId,
+      nextCompanyId: "",
+      previousCompanyId: "",
+    };
+  }
+
+  const linkTargets = [
+    previousCompany ? `previous FY ${previousCompany.fiscalYear}` : "",
+    nextCompany ? `next FY ${nextCompany.fiscalYear}` : "",
+  ].filter(Boolean).join(" and ");
+  const accepted = window.confirm(
+    `This backup looks adjacent to ${linkTargets} for ${sourceCompany.name}.\n\nLink the fiscal years after import?`
+  );
+
+  if (!accepted) {
+    return {
+      accepted: false,
+      companyGroupId: importCompanyId,
+      nextCompanyId: "",
+      previousCompanyId: "",
+    };
+  }
+
+  return {
+    accepted: true,
+    companyGroupId: previousCompany?.companyGroupId || nextCompany?.companyGroupId || importCompanyId,
+    nextCompanyId: nextCompany?.id ?? "",
+    previousCompanyId: previousCompany?.id ?? "",
+  };
+}
+
+function linkAdjacentProfiles(importedProfile: CompanyProfile, link: AdjacentFiscalYearLink) {
+  const profiles = getCompanyProfiles();
+  const previousCompany = profiles.find((profile) => profile.id === link.previousCompanyId);
+  const nextCompany = profiles.find((profile) => profile.id === link.nextCompanyId);
+
+  if (previousCompany) {
+    upsertCompanyProfile({
+      ...previousCompany,
+      companyGroupId: link.companyGroupId,
+      nextCompanyId: importedProfile.id,
+    });
+  }
+
+  if (nextCompany) {
+    upsertCompanyProfile({
+      ...nextCompany,
+      companyGroupId: link.companyGroupId,
+      previousCompanyId: importedProfile.id,
+    });
+  }
+}
+
+type CompanyDeleteScope = "fiscal-year" | "company-group";
+
+const emptyAccountsBackupData: AccountsBackupData = {
+  activityLogs: [],
+  collections: [],
+  creditNotes: [],
+  parties: [],
+  receiptAllocations: [],
+  sales: [],
+};
+
+const emptyStockBackupData: StockBackupData = {
+  items: [],
+  purchaseBills: [],
+  salesBills: [],
+};
+
+async function clearCompanyData(company: CompanyProfile) {
+  const originalProfile = getCompanyProfile(company.id) ?? company;
+
+  upsertCompanyProfile({
+    ...originalProfile,
+    isLocked: false,
+    lockedAt: "",
+  });
+
+  try {
+    await withActiveCompany(company.id, async () => {
+      await restoreAccountsBackupData(emptyAccountsBackupData, { fiscalYears: [] });
+      const repository = await createDataRepository();
+      await repository.saveData(getEmptyData());
+      await replaceStockBackupDataForCompany(company.id, emptyStockBackupData);
+      writeInventoryTrackingSettingForCompany(company.id, false);
+    });
+  } catch (error) {
+    upsertCompanyProfile(originalProfile);
+    throw error;
+  }
+}
+
+async function deleteCompanyProfiles(company: CompanyProfile, scope: CompanyDeleteScope) {
+  const targetCompanies = scope === "company-group" ? getLinkedCompanyGroup(company) : [company];
+  const targetIds = new Set(targetCompanies.map((profile) => profile.id));
+
+  for (const targetCompany of targetCompanies) {
+    await clearCompanyData(targetCompany);
+    removeCompanyScopedSettings(targetCompany.id);
+  }
+
+  const remainingProfiles = getCompanyProfiles()
+    .filter((profile) => !targetIds.has(profile.id))
+    .map((profile) => ({
+      ...profile,
+      nextCompanyId: targetIds.has(profile.nextCompanyId) ? "" : profile.nextCompanyId,
+      previousCompanyId: targetIds.has(profile.previousCompanyId) ? "" : profile.previousCompanyId,
+    }));
+
+  saveCompanyProfiles(remainingProfiles);
+  setActiveCompanyId(resolveActiveCompanyId(remainingProfiles, getActiveCompanyId()));
+  return targetCompanies;
 }
 
 export default function App() {
@@ -1223,11 +1517,30 @@ export default function App() {
     }
   }
 
+  async function backupSelectedCompanyGroup() {
+    if (!activeCompany || userRole !== "master") {
+      return;
+    }
+
+    setIsBackingUp(true);
+    setExportMessage("");
+
+    try {
+      await downloadPortableCompanyGroupBackup(activeCompany);
+      setExportMessage(`Full company backup created for ${activeCompany.name}.`);
+    } catch (error) {
+      console.error("Full company backup error:", error);
+      setExportMessage(error instanceof Error ? error.message : String(error || "Could not create full company backup."));
+    } finally {
+      setIsBackingUp(false);
+    }
+  }
+
   async function importBackupFile(file: File) {
     setExportMessage("");
 
     try {
-      const profile = await importPortableCompanyBackup(file);
+      const profile = await importPortableBackupFile(file);
       refreshCompanies();
       activateCompany(profile.id);
       setExportMessage(`Imported backup as ${profile.name}${profile.fiscalYear ? ` FY ${profile.fiscalYear}` : ""}.`);
@@ -1235,6 +1548,27 @@ export default function App() {
       console.error("Portable backup import error:", error);
       setExportMessage(error instanceof Error ? error.message : String(error || "Could not import backup."));
     }
+  }
+
+  async function deleteActiveCompany(scope: CompanyDeleteScope) {
+    if (!activeCompany || userRole !== "master") {
+      return;
+    }
+
+    const deletedCompanies = await deleteCompanyProfiles(activeCompany, scope);
+    const profiles = getCompanyProfiles();
+    const nextActiveCompanyId = getActiveCompanyId() || profiles[0]?.id || "";
+
+    setCompanies(profiles);
+    setActiveCompanyIdState(nextActiveCompanyId);
+    setTrackInventory(Boolean(nextActiveCompanyId) && isInventoryTrackingEnabled());
+    setStockEntryTarget(null);
+    navigateToModule(null);
+    setExportMessage(
+      scope === "company-group"
+        ? `Deleted ${deletedCompanies.length} linked fiscal year(s) for ${activeCompany.name}.`
+        : `Deleted ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}.`
+    );
   }
 
   async function syncLinkedOpeningIfNeeded(company: CompanyProfile | null) {
@@ -1546,11 +1880,24 @@ export default function App() {
                 onClick={backupSelectedCompany}
                 disabled={isBackingUp}
               >
-                <span>Manual Backup</span>
-                <strong>{isBackingUp ? "Creating Backup..." : "Download Backup File"}</strong>
+                <span>Current FY Backup</span>
+                <strong>{isBackingUp ? "Creating Backup..." : "Download Fiscal Year"}</strong>
                 <small>
                   Create a portable backup file for this company and fiscal year.
                   Use it on another PC from the company selection screen.
+                </small>
+              </button>
+
+              <button
+                type="button"
+                className="module-card"
+                onClick={backupSelectedCompanyGroup}
+                disabled={isBackingUp}
+              >
+                <span>Full Company Backup</span>
+                <strong>{isBackingUp ? "Creating Backup..." : "Download All Fiscal Years"}</strong>
+                <small>
+                  Create one backup containing every linked fiscal year for this company.
                 </small>
               </button>
 
@@ -1625,6 +1972,9 @@ export default function App() {
   if (selectedModule === "settings") {
     return (
       <SuiteSettings
+        activeCompany={activeCompany}
+        companies={companies}
+        onDeleteCompany={deleteActiveCompany}
         onBack={() => navigateToModule(null)}
         onCompanySaved={refreshCompanies}
         onInventorySettingChanged={setTrackInventory}
@@ -2309,6 +2659,9 @@ function safePdfFilename(value: string) {
 }
 
 type SuiteSettingsProps = {
+  activeCompany: CompanyProfile;
+  companies: CompanyProfile[];
+  onDeleteCompany: (scope: CompanyDeleteScope) => Promise<void>;
   onBack: () => void;
   onCompanySaved: () => void;
   onInventorySettingChanged: (enabled: boolean) => void;
@@ -2841,13 +3194,28 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
   );
 }
 
-function SuiteSettings({ onBack, onCompanySaved, onInventorySettingChanged, onLogout }: SuiteSettingsProps) {
+function SuiteSettings({
+  activeCompany,
+  companies,
+  onBack,
+  onCompanySaved,
+  onDeleteCompany,
+  onInventorySettingChanged,
+  onLogout,
+}: SuiteSettingsProps) {
   const [settingsForm, setSettingsForm] = useState<AppSettings>(() => readSuiteSettings());
+  const [letterheadSettings, setLetterheadSettings] = useState(readLetterheadSettings);
   const [trackInventory, setTrackInventory] = useState(() => isInventoryTrackingEnabled());
   const [purchaseData, setPurchaseData] = useState<AppData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isDeletingCompany, setIsDeletingCompany] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [message, setMessage] = useState("");
+  const linkedCompanyCount = useMemo(() => {
+    const linkedIds = new Set(getLinkedCompanyGroup(activeCompany).map((company) => company.id));
+    return companies.filter((company) => linkedIds.has(company.id)).length;
+  }, [activeCompany, companies]);
 
   useEffect(() => {
     let active = true;
@@ -2866,6 +3234,7 @@ function SuiteSettings({ onBack, onCompanySaved, onInventorySettingChanged, onLo
 
         setPurchaseData(data);
         setSettingsForm(readSuiteSettings(data.settings));
+        setLetterheadSettings(readLetterheadSettings());
         setTrackInventory(isInventoryTrackingEnabled());
       } catch (error) {
         console.error("Settings load error:", error);
@@ -2907,6 +3276,10 @@ function SuiteSettings({ onBack, onCompanySaved, onInventorySettingChanged, onLo
     }));
   }
 
+  function updateLetterheadField(field: keyof typeof letterheadSettings, value: string) {
+    setLetterheadSettings((current) => ({ ...current, [field]: value }));
+  }
+
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsSaving(true);
@@ -2931,6 +3304,7 @@ function SuiteSettings({ onBack, onCompanySaved, onInventorySettingChanged, onLo
     };
 
     writeSuiteSettings(nextSettings);
+    writeLetterheadSettings(letterheadSettings);
     writeInventoryTrackingSetting(trackInventory);
     onInventorySettingChanged(trackInventory);
 
@@ -2951,6 +3325,35 @@ function SuiteSettings({ onBack, onCompanySaved, onInventorySettingChanged, onLo
       setMessage("Settings saved locally. Purchase database settings could not be updated.");
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function deleteCompany(scope: CompanyDeleteScope) {
+    if (deleteConfirmation.trim() !== "DELETE") {
+      setMessage("Type DELETE before deleting company data.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      scope === "company-group"
+        ? `Delete all linked fiscal years for ${activeCompany.name}?\n\nThis clears account, purchase, and stock data for ${linkedCompanyCount} fiscal year(s).`
+        : `Delete ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}?\n\nThis clears account, purchase, and stock data for this fiscal year.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsDeletingCompany(true);
+    setMessage("");
+
+    try {
+      await onDeleteCompany(scope);
+    } catch (error) {
+      console.error("Company delete error:", error);
+      setMessage(error instanceof Error ? error.message : String(error || "Could not delete company data."));
+    } finally {
+      setIsDeletingCompany(false);
     }
   }
 
@@ -3059,6 +3462,69 @@ function SuiteSettings({ onBack, onCompanySaved, onInventorySettingChanged, onLo
             />
             Track inventory for this company
           </label>
+        </section>
+
+        <section className="suite-settings-section">
+          <h2>Letterhead Settings</h2>
+          <p className="muted">Phone, VAT/PAN, and address come from the normal company settings above.</p>
+
+          <div className="suite-settings-grid">
+            <label className="suite-settings-wide">
+              Company Name in Nepali
+              <input
+                value={letterheadSettings.nepaliCompanyName}
+                onChange={(event) => updateLetterheadField("nepaliCompanyName", event.target.value)}
+                placeholder="Enter Nepali company name"
+              />
+            </label>
+
+            <label className="suite-settings-wide">
+              Default Contact Line
+              <textarea
+                value={letterheadSettings.contactLine}
+                onChange={(event) => updateLetterheadField("contactLine", event.target.value)}
+                placeholder="Leave blank to use phone number from normal settings"
+              />
+            </label>
+          </div>
+        </section>
+
+        <section className="suite-settings-section suite-danger-zone">
+          <h2>Company Management</h2>
+          <p className="muted">
+            Delete clears account, purchase, and stock data, then removes the company profile from selection.
+          </p>
+
+          <div className="suite-settings-grid">
+            <label className="suite-settings-wide">
+              Confirmation
+              <input
+                value={deleteConfirmation}
+                onChange={(event) => setDeleteConfirmation(event.target.value)}
+                placeholder="Type DELETE"
+              />
+              <span>Current linked fiscal years: {linkedCompanyCount}</span>
+            </label>
+          </div>
+
+          <div className="suite-settings-actions">
+            <button
+              type="button"
+              className="danger"
+              disabled={isDeletingCompany || deleteConfirmation.trim() !== "DELETE"}
+              onClick={() => deleteCompany("fiscal-year")}
+            >
+              Delete Current Fiscal Year
+            </button>
+            <button
+              type="button"
+              className="danger"
+              disabled={isDeletingCompany || deleteConfirmation.trim() !== "DELETE" || linkedCompanyCount <= 1}
+              onClick={() => deleteCompany("company-group")}
+            >
+              Delete Full Company
+            </button>
+          </div>
         </section>
 
         <div className="suite-settings-actions">

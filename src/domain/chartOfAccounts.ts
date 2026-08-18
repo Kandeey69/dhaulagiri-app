@@ -9,6 +9,7 @@ export type AccountCode =
   | '2200'
   | '2300'
   | '2400'
+  | '2600'
   | '3000'
   | '4000'
   | '4100'
@@ -32,6 +33,7 @@ export const chartOfAccounts: Record<AccountCode, AccountDefinition> = {
   '2200': { code: '2200', name: 'Indian Transport Payable', normalBalance: 'CREDIT' },
   '2300': { code: '2300', name: 'Local Supplier Payable', normalBalance: 'CREDIT' },
   '2400': { code: '2400', name: 'Output VAT Payable', normalBalance: 'CREDIT' },
+  '2600': { code: '2600', name: 'Landed Cost Clearing', normalBalance: 'CREDIT' },
   '3000': { code: '3000', name: 'Equity / Opening Balance', normalBalance: 'CREDIT' },
   '4000': { code: '4000', name: 'Sales Revenue', normalBalance: 'CREDIT' },
   '4100': { code: '4100', name: 'Sales Return / Credit Note', normalBalance: 'DEBIT' },

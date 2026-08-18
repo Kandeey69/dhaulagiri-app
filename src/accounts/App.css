@@ -682,6 +682,122 @@ textarea:disabled {
   min-width: 230px;
 }
 
+.confirmation-preview-shell {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  background: #f8fafc;
+}
+
+.confirmation-page-preview {
+  width: min(100%, 794px);
+  min-height: 1123px;
+  margin: 0 auto;
+  padding: 34px 64px 48px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #111827;
+  font-family: "Times New Roman", Times, serif;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.confirmation-fallback-letterhead {
+  border-bottom: 2px solid #111827;
+  padding-bottom: 8px;
+  text-align: center;
+}
+
+.confirmation-fallback-letterhead > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+  text-align: left;
+}
+
+.confirmation-fallback-letterhead h2 {
+  margin: 8px 0 3px;
+  color: #0f3d8f;
+  font-size: 25px;
+  line-height: 1.1;
+}
+
+.confirmation-fallback-letterhead h3 {
+  margin: 8px 0 3px;
+  color: #0f3d8f;
+  font-size: 26px;
+  line-height: 1.1;
+}
+
+.confirmation-fallback-letterhead p {
+  margin: 0 0 8px;
+  white-space: pre-line;
+}
+
+.confirmation-body {
+  display: grid;
+  gap: 18px;
+  padding-top: 22px;
+}
+
+.confirmation-body p,
+.confirmation-to p {
+  margin: 0;
+}
+
+.confirmation-body h4 {
+  margin: 0;
+  font-size: 17px;
+  text-align: center;
+}
+
+.confirmation-indent {
+  padding-left: 36px;
+}
+
+.confirmation-summary-table {
+  width: 430px;
+  min-width: 0;
+  margin: 2px auto 4px;
+  border: 1px solid #111827;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+
+.confirmation-summary-table th,
+.confirmation-summary-table td {
+  border: 1px solid #111827;
+  padding: 5px 8px;
+  color: #111827;
+  background: #ffffff;
+  text-align: center;
+  text-transform: none;
+  white-space: normal;
+}
+
+.confirmation-summary-table td:last-child {
+  text-align: right;
+}
+
+.confirmation-signature-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 70px;
+  align-items: end;
+  padding-top: 30px;
+}
+
+.confirmation-signature-space {
+  height: 86px;
+}
+
+.confirmation-signature-grid strong {
+  display: block;
+}
+
 .missing-number-list {
   display: flex;
   flex-wrap: wrap;
@@ -1083,5 +1199,24 @@ td {
   .search-field,
   .month-selector {
     min-width: 0;
+  }
+
+  .confirmation-preview-shell {
+    padding: 8px;
+  }
+
+  .confirmation-page-preview {
+    min-height: auto;
+    padding: 24px;
+    font-size: 14px;
+  }
+
+  .confirmation-summary-table {
+    width: 100%;
+  }
+
+  .confirmation-signature-grid {
+    grid-template-columns: 1fr;
+    gap: 24px;
   }
 }

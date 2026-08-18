@@ -101,6 +101,7 @@ export type StockRegisterRow = {
   receivedAmount: number;
   issuedQty: number;
   issuedRate: number;
+  issuedSalesRate: number;
   issuedAmount: number;
   balanceQty: number;
   balanceRate: number;

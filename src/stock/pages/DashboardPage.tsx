@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import MetricCard from "../components/MetricCard";
 import PendingDocuments from "../components/PendingDocuments";
 import StockTable from "../components/StockTable";
-import { formatRate, money, qty } from "../services/stockCalculations";
+import { money, qty } from "../services/stockCalculations";
 import type {
   StockDashboardTotals,
   StockDocumentStatus,
@@ -10,6 +10,7 @@ import type {
 } from "../types";
 
 type DashboardPageProps = {
+  currentRows: StockRow[];
   dashboardTotals: StockDashboardTotals;
   itemCount: number;
   negativeRows: StockRow[];
@@ -18,6 +19,7 @@ type DashboardPageProps = {
 };
 
 export default function DashboardPage({
+  currentRows,
   dashboardTotals,
   itemCount,
   negativeRows,
@@ -28,13 +30,34 @@ export default function DashboardPage({
     () => statuses.filter((row) => row.status !== "Entered"),
     [statuses],
   );
+  const balanceRows = useMemo(
+    () => currentRows
+      .filter((row) => (
+        row.openingQty
+        || row.localPurchaseQty
+        || row.importationQty
+        || row.salesQty
+        || row.closingQty
+        || row.closingValue
+      ))
+      .sort((left, right) => left.code.localeCompare(right.code) || left.name.localeCompare(right.name))
+      .map((row) => [
+        row.code,
+        row.name,
+        row.unit,
+        <span className={row.closingQty < 0 ? "stock-low" : undefined}>{qty(row.closingQty)}</span>,
+        dashboardRate(row.averageRate, "NPR"),
+        <span className={row.closingValue < 0 ? "stock-low" : undefined}>{money(row.closingValue)}</span>,
+      ]),
+    [currentRows],
+  );
   const negativeStockRows = useMemo(
     () => negativeRows.map((row) => [
       row.code,
       row.name,
       row.unit,
       <span className="stock-low">{qty(row.closingQty)}</span>,
-      formatRate(row.averageRate, "NPR"),
+      dashboardRate(row.averageRate, "NPR"),
       money(row.closingValue),
     ]),
     [negativeRows],
@@ -60,6 +83,15 @@ export default function DashboardPage({
         <PendingDocuments rows={actionDocs.slice(0, 20)} onEdit={onOpenDocument} />
       </section>
 
+      <section className="stock-panel stock-dashboard-balance">
+        <h3>Stock Balance As Of Today</h3>
+        <StockTable
+          emptyText="No stock movement entered yet."
+          headers={["Code", "Particulars", "Unit", "Balance Qty", "Weighted Avg Rate", "Balance Value"]}
+          rows={balanceRows}
+        />
+      </section>
+
       <section className="stock-panel stock-dashboard-negative">
         <h3>Negative Stock</h3>
         <StockTable
@@ -70,4 +102,12 @@ export default function DashboardPage({
       </section>
     </div>
   );
+}
+
+function dashboardRate(value: number, currency: "NPR") {
+  const formatted = Number(value || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${currency} ${formatted}`;
 }

@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
-import type { LedgerRow, OutstandingRow, Party } from "../data/types";
-import { getOutstanding, getParties, getPartyLedger } from "../data/storage";
+import type { LedgerRow, OutstandingRow, Party, Sale } from "../data/types";
+import { getOutstanding, getParties, getPartyLedger, getSales } from "../data/storage";
 import { saveLedgerPdf } from "../utils/pdf";
 import OutputVatReport from "./Maskebari";
 import { companyStorageKey } from "../../companyContext";
+import ThirdPartyConfirmation from "./ThirdPartyConfirmation";
 
-type ReportView = "Party Ledger" | "Outstanding Balance" | "Output VAT";
+type ReportView = "Party Ledger" | "Outstanding Balance" | "Output VAT" | "3rd Party Confirmation";
 
 export default function Reports() {
   const [rows, setRows] = useState<OutstandingRow[]>([]);
   const [parties, setParties] = useState<Party[]>([]);
+  const [sales, setSales] = useState<Sale[]>([]);
   const [selectedPartyId, setSelectedPartyId] = useState("");
   const [ledgerRows, setLedgerRows] = useState<LedgerRow[]>([]);
   const [reportView, setReportView] = useState<ReportView>(() => {
     const saved = localStorage.getItem(companyStorageKey("accounts-report-view")) as ReportView | null;
-    return saved === "Output VAT" || saved === "Outstanding Balance" || saved === "Party Ledger"
+    return saved === "Output VAT" ||
+      saved === "Outstanding Balance" ||
+      saved === "Party Ledger" ||
+      saved === "3rd Party Confirmation"
       ? saved
       : "Party Ledger";
   });
@@ -36,9 +41,10 @@ export default function Reports() {
   }, []);
 
   const loadReport = useCallback(async () => {
-    const [loadedRows, loadedParties] = await Promise.all([getOutstanding(), getParties()]);
+    const [loadedRows, loadedParties, loadedSales] = await Promise.all([getOutstanding(), getParties(), getSales()]);
     setRows(loadedRows);
     setParties(loadedParties);
+    setSales(loadedSales);
 
     const dashboardPartyId = localStorage.getItem(companyStorageKey("accounts-report-party-id")) || "";
     if (dashboardPartyId) {
@@ -119,7 +125,7 @@ export default function Reports() {
       {message && <p className="status-message">{message}</p>}
 
       <div className="tabs">
-        {(["Party Ledger", "Outstanding Balance", "Output VAT"] as ReportView[]).map((item) => (
+        {(["Party Ledger", "Outstanding Balance", "Output VAT", "3rd Party Confirmation"] as ReportView[]).map((item) => (
           <button
             key={item}
             className={reportView === item ? "active" : ""}
@@ -273,6 +279,10 @@ export default function Reports() {
       )}
 
       {reportView === "Output VAT" && <OutputVatReport initialMonth={outputVatMonth} />}
+
+      {reportView === "3rd Party Confirmation" && (
+        <ThirdPartyConfirmation outstandingRows={rows} parties={parties} sales={sales} />
+      )}
     </>
   );
 }

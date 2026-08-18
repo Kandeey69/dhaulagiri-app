@@ -338,8 +338,8 @@ test('adds loading and unloading charge to purchase landed cost', () => {
   }, policy)
 
   assert.equal(totals.loadingUnloadingChargeNPR, 625)
-  assert.equal(totals.debitNoteTotalNPR, 662.6)
-  assert.equal(totals.totalAgentPayableNPR, 662.6)
+  assert.equal(totals.debitNoteTotalNPR, 37.6)
+  assert.equal(totals.totalAgentPayableNPR, 37.6)
   assert.equal(totals.landedCostNPR, 820.15)
 })
 
@@ -407,7 +407,7 @@ test('balances import purchase posting with nonzero per-KG loading and unloading
   assert.equal(totals.loadingUnloadingChargeNPR, 300)
   assert.equal(breakdown.loadingUnloadingNPR, 300)
   assert.equal(totals.landedCostNPR, 21800)
-  assert.equal(totals.totalAgentPayableNPR, 1800)
+  assert.equal(totals.totalAgentPayableNPR, 1500)
   assert.equal(hasAgentValues({ totalKg: 100, loadingUnloadingChargePerKg: 3 } as ImportPurchase), true)
 
   const entries = postPurchase({
@@ -421,6 +421,7 @@ test('balances import purchase posting with nonzero per-KG loading and unloading
     supplierAmountNPR: totals.supplierAmountNPR,
     totalAgentPayableNPR: totals.totalAgentPayableNPR,
     freightIndiaAmountNPR: totals.freightIndiaAmountNPR,
+    landedCostAdjustmentNPR: totals.loadingUnloadingChargeNPR,
     landedCostNPR: totals.landedCostNPR,
     totalInputVatNPR: totals.totalInputVatNPR,
     reference: 'HFFT-LU-NONZERO',
@@ -429,7 +430,8 @@ test('balances import purchase posting with nonzero per-KG loading and unloading
   assert.deepEqual(reconcileLedgerBalance(entries), [])
   assert.equal(entries.find((entry) => entry.accountCode === '1200')?.debit, 21800)
   assert.equal(entries.find((entry) => entry.accountCode === '2000')?.credit, 20000)
-  assert.equal(entries.find((entry) => entry.accountCode === '2100')?.credit, 1800)
+  assert.equal(entries.find((entry) => entry.accountCode === '2100')?.credit, 1500)
+  assert.equal(entries.find((entry) => entry.accountCode === '2600')?.credit, 300)
 })
 
 test('balances HFFT Apple import landed-cost reference without supplier payable double counting', () => {
@@ -453,7 +455,7 @@ test('balances HFFT Apple import landed-cost reference without supplier payable 
   assert.equal(totals.supplierAmountNPR, 21120)
   assert.equal(totals.freightIndiaAmountNPR, 600)
   assert.equal(totals.loadingUnloadingChargeNPR, 180)
-  assert.equal(totals.totalAgentPayableNPR, 1680)
+  assert.equal(totals.totalAgentPayableNPR, 1500)
   assert.equal(totals.landedCostNPR, 22800)
 
   const entries = postPurchase({
@@ -467,6 +469,7 @@ test('balances HFFT Apple import landed-cost reference without supplier payable 
     supplierAmountNPR: totals.supplierAmountNPR,
     totalAgentPayableNPR: totals.totalAgentPayableNPR,
     freightIndiaAmountNPR: totals.freightIndiaAmountNPR,
+    landedCostAdjustmentNPR: totals.loadingUnloadingChargeNPR,
     landedCostNPR: totals.landedCostNPR,
     totalInputVatNPR: totals.totalInputVatNPR,
     reference: 'IMP-8283-M01-APPLE-REFERENCE',
@@ -474,7 +477,8 @@ test('balances HFFT Apple import landed-cost reference without supplier payable 
 
   assert.deepEqual(reconcileLedgerBalance(entries), [])
   assert.equal(entries.find((entry) => entry.accountCode === '2000')?.credit, 21120)
-  assert.equal(entries.find((entry) => entry.accountCode === '2100')?.credit, 1680)
+  assert.equal(entries.find((entry) => entry.accountCode === '2100')?.credit, 1500)
+  assert.equal(entries.find((entry) => entry.accountCode === '2600')?.credit, 180)
   assert.equal(entries.filter((entry) => entry.accountCode === '2100').length, 1)
 })
 
@@ -510,6 +514,7 @@ test('rounds decimal import loading values and keeps the purchase journal balanc
     supplierAmountNPR: totals.supplierAmountNPR,
     totalAgentPayableNPR: totals.totalAgentPayableNPR,
     freightIndiaAmountNPR: totals.freightIndiaAmountNPR,
+    landedCostAdjustmentNPR: totals.loadingUnloadingChargeNPR,
     landedCostNPR: totals.landedCostNPR,
     totalInputVatNPR: totals.totalInputVatNPR,
     reference: 'HFFT-LU-DECIMAL',
@@ -1494,6 +1499,7 @@ test('builds stock summary and register rows from opening, purchase, and sales m
   const registerRows = buildStockRegisterRows(items, purchaseBills, salesBills)
   assert.deepEqual(registerRows.map((row) => row.id), ['opening-item-1', 'line-local', 'line-import', 'sales-line'])
   assert.equal(registerRows[3].issuedRate, 120)
+  assert.equal(registerRows[3].issuedSalesRate, 200)
   assert.equal(registerRows[3].balanceQty, 12)
 })
 

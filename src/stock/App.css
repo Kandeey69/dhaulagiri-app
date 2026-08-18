@@ -438,6 +438,42 @@
   text-transform: uppercase;
 }
 
+.sortable-table-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  text-transform: inherit;
+  box-shadow: none;
+}
+
+.sortable-table-header:hover {
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.sortable-table-header:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .stock-table td {
   color: var(--text-primary);
   background: var(--surface);
@@ -653,9 +689,15 @@
 .stock-dashboard-pending .stock-table td:nth-child(7),
 .stock-dashboard-pending .stock-table th:nth-child(8),
 .stock-dashboard-pending .stock-table td:nth-child(8),
+.stock-dashboard-balance .stock-table th:nth-child(n + 4),
+.stock-dashboard-balance .stock-table td:nth-child(n + 4),
 .stock-dashboard-negative .stock-table th:nth-child(n + 4),
 .stock-dashboard-negative .stock-table td:nth-child(n + 4) {
   text-align: right;
+}
+
+.stock-dashboard-balance h3 {
+  color: var(--primary);
 }
 
 .stock-dashboard .stock-empty-state {
@@ -733,7 +775,9 @@
 }
 
 .stock-register-table {
-  min-width: 980px;
+  width: 100%;
+  min-width: 1120px;
+  table-layout: fixed;
 }
 
 .stock-register-table th {
@@ -748,6 +792,47 @@
   top: 37px;
 }
 
+.stock-register-table thead tr:first-child th:nth-child(n + 2) {
+  border-top: 2px solid var(--text-primary);
+  border-bottom: 2px solid var(--text-primary);
+}
+
+.stock-register-table thead tr:first-child th:nth-child(2),
+.stock-register-table thead tr:first-child th:nth-child(3),
+.stock-register-table thead tr:first-child th:nth-child(4) {
+  border-left: 2px solid var(--text-primary);
+}
+
+.stock-register-table thead tr:first-child th:nth-child(2),
+.stock-register-table thead tr:first-child th:nth-child(3),
+.stock-register-table thead tr:first-child th:nth-child(4) {
+  border-right: 2px solid var(--text-primary);
+}
+
+.stock-register-table thead tr:nth-child(2) th:nth-child(3),
+.stock-register-table thead tr:nth-child(2) th:nth-child(5),
+.stock-register-table thead tr:nth-child(2) th:nth-child(8) {
+  border-left: 2px solid var(--text-primary);
+}
+
+.stock-register-table thead tr:nth-child(2) th:nth-child(4),
+.stock-register-table thead tr:nth-child(2) th:nth-child(7),
+.stock-register-table thead tr:nth-child(2) th:nth-child(9) {
+  border-right: 2px solid var(--text-primary);
+}
+
+.stock-register-table tbody td:nth-child(3),
+.stock-register-table tbody td:nth-child(5),
+.stock-register-table tbody td:nth-child(8) {
+  border-left: 2px solid var(--text-primary);
+}
+
+.stock-register-table tbody td:nth-child(4),
+.stock-register-table tbody td:nth-child(7),
+.stock-register-table tbody td:nth-child(9) {
+  border-right: 2px solid var(--text-primary);
+}
+
 .stock-register-table th:last-child,
 .stock-register-table td:last-child {
   border-right: 0;
@@ -759,17 +844,44 @@
 
 .stock-register-table th:first-child,
 .stock-register-table td:first-child {
-  width: 130px;
+  width: 104px;
+  white-space: nowrap;
 }
 
 .stock-register-table th:nth-child(2),
 .stock-register-table td:nth-child(2) {
-  min-width: 360px;
+  overflow: hidden;
+  width: 34%;
+  min-width: 280px;
+  max-width: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-register-date-col {
+  width: 104px;
+}
+
+.stock-register-particulars-col {
+  width: 34%;
+}
+
+.stock-register-qty-col {
+  width: 98px;
+}
+
+.stock-register-rate-col {
+  width: 86px;
+}
+
+.stock-register-sales-rate-col {
+  width: 104px;
 }
 
 .stock-register-table th:nth-child(n + 3),
 .stock-register-table td:nth-child(n + 3) {
   text-align: right;
+  white-space: nowrap;
 }
 
 .stock-register-table th:first-child,

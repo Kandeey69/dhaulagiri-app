@@ -64,6 +64,7 @@ export type PurchasePostingInput = {
   supplierAmountNPR: number
   totalAgentPayableNPR: number
   freightIndiaAmountNPR: number
+  landedCostAdjustmentNPR?: number
   landedCostNPR: number
   totalInputVatNPR: number
   reference: string
@@ -218,12 +219,24 @@ export function postPurchase(input: PurchasePostingInput, context: PostingContex
   const freightPayable = freightCreatesTransporterPayable(input.freightIndiaStatus)
     ? input.freightIndiaAmountNPR
     : 0
+  const landedCostAdjustmentNPR = money(
+    input.landedCostAdjustmentNPR ??
+      Math.max(
+        0,
+        input.landedCostNPR +
+          input.totalInputVatNPR -
+          input.supplierAmountNPR -
+          input.totalAgentPayableNPR -
+          freightPayable,
+      ),
+  )
   return makeEntries(context, 'PURCHASE', input.id, input.date, input.reference, [
     { accountCode: '1200', debit: input.landedCostNPR, narration: `Landed cost ${input.reference}` },
     { accountCode: '1300', debit: input.totalInputVatNPR, narration: `Input VAT ${input.reference}` },
     { accountCode: '2000', partyId: input.vendorPartyId, credit: input.supplierAmountNPR, narration: `Supplier payable ${input.reference}` },
     { accountCode: '2100', partyId: input.customAgentPartyId, credit: input.totalAgentPayableNPR, narration: `Customs agent payable ${input.reference}` },
     { accountCode: '2200', partyId: input.freightIndiaPartyId, credit: freightPayable, narration: `Indian transport payable ${input.reference}` },
+    { accountCode: '2600', credit: landedCostAdjustmentNPR, narration: `Landed cost clearing ${input.reference}` },
   ])
 }
 

@@ -1,5 +1,4 @@
 import { useMemo, useState } from "react";
-import { formatRate, qty } from "../services/stockCalculations";
 import type { StockItem, StockRegisterRow } from "../types";
 
 type StockRegisterPageProps = {
@@ -68,20 +67,32 @@ export default function StockRegisterPage({ items, registerRows }: StockRegister
         </div>
         <div className="stock-table-wrap">
           <table className="stock-table stock-register-table">
+            <colgroup>
+              <col className="stock-register-date-col" />
+              <col className="stock-register-particulars-col" />
+              <col className="stock-register-qty-col" />
+              <col className="stock-register-rate-col" />
+              <col className="stock-register-qty-col" />
+              <col className="stock-register-rate-col" />
+              <col className="stock-register-sales-rate-col" />
+              <col className="stock-register-qty-col" />
+              <col className="stock-register-rate-col" />
+            </colgroup>
             <thead>
               <tr>
                 <th colSpan={2}></th>
-                <th colSpan={2}>Quantity Received</th>
-                <th colSpan={2}>Quantity Sent</th>
+                <th colSpan={2}>Received</th>
+                <th colSpan={3}>Sent</th>
                 <th colSpan={2}>Balance</th>
               </tr>
               <tr>
                 <th>Date</th>
                 <th>Particulars</th>
                 <th>Qty</th>
-                <th>Rate</th>
+                <th>Cost</th>
                 <th>Qty</th>
-                <th>Rate</th>
+                <th>Cost</th>
+                <th>Sales Price</th>
                 <th>Qty</th>
                 <th>Rate</th>
               </tr>
@@ -92,19 +103,20 @@ export default function StockRegisterPage({ items, registerRows }: StockRegister
                 return (
                   <tr key={row.id}>
                     <td>{isOpening ? "NA" : row.date || "-"}</td>
-                    <td>{isOpening ? "Opening" : row.particulars}</td>
-                    <td>{!isOpening && row.receivedQty ? `${qty(row.receivedQty)} ${row.unit}` : "-"}</td>
-                    <td>{!isOpening && row.receivedQty ? formatRate(row.receivedRate) : "-"}</td>
-                    <td>{row.issuedQty ? `${qty(row.issuedQty)} ${row.unit}` : "-"}</td>
-                    <td>{row.issuedQty ? formatRate(row.issuedRate) : "-"}</td>
-                    <td className={row.balanceQty < 0 ? "stock-low" : ""}>{`${qty(row.balanceQty)} ${row.unit}`}</td>
-                    <td className={row.balanceAmount < 0 ? "stock-low" : ""}>{formatRate(row.balanceRate)}</td>
+                    <td title={isOpening ? "Opening" : row.particulars}>{isOpening ? "Opening" : row.particulars}</td>
+                    <td>{!isOpening && row.receivedQty ? registerQty(row.receivedQty, row.unit) : "-"}</td>
+                    <td>{!isOpening && row.receivedQty ? registerNumber(row.receivedRate) : "-"}</td>
+                    <td>{row.issuedQty ? registerQty(row.issuedQty, row.unit) : "-"}</td>
+                    <td>{row.issuedQty ? registerNumber(row.issuedRate) : "-"}</td>
+                    <td>{row.issuedQty ? registerNumber(row.issuedSalesRate) : "-"}</td>
+                    <td className={row.balanceQty < 0 ? "stock-low" : ""}>{registerQty(row.balanceQty, row.unit)}</td>
+                    <td className={row.balanceAmount < 0 ? "stock-low" : ""}>{registerNumber(row.balanceRate)}</td>
                   </tr>
                 );
               })}
               {!selectedRows.length && (
                 <tr>
-                  <td className="stock-empty-state" colSpan={8}>
+                  <td className="stock-empty-state" colSpan={9}>
                     Select a stock item with opening, purchase, or sales movement.
                   </td>
                 </tr>
@@ -131,4 +143,15 @@ function registerMovementGroup(row: StockRegisterRow) {
   if (row.id.startsWith("opening-")) return 0;
   if (row.receivedQty) return 1;
   return 2;
+}
+
+function registerNumber(value: number) {
+  return Number(value || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function registerQty(value: number, unit: string) {
+  return `${registerNumber(value)} ${unit}`.trim();
 }
