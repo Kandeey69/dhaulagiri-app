@@ -1,0 +1,149 @@
+{
+  "generatedAt": "2026-08-11T08:57:00+05:45",
+  "source": "Live Tauri WebView localStorage plus read-only SQLite copies",
+  "appDataRoot": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite",
+  "activeCompanyIdAtLaunch": "pashupati-chemicals-2082-83-2",
+  "hfftProfiles": [
+    {
+      "id": "himalaya-fresh-fruit-traders-pvt-ltd-208",
+      "companyGroupId": "himalaya-fresh-fruit-traders-pvt-ltd-208",
+      "name": "Himalaya Fresh Fruit Traders Pvt. Ltd.",
+      "fiscalYear": "2082/83",
+      "isLocked": true,
+      "nextCompanyId": "himalaya-fresh-fruit-traders-pvt-ltd-208-2",
+      "previousCompanyId": "",
+      "lockedAt": "2026-08-10T18:44:14Z"
+    },
+    {
+      "id": "himalaya-fresh-fruit-traders-pvt-ltd-208-2",
+      "companyGroupId": "himalaya-fresh-fruit-traders-pvt-ltd-208",
+      "name": "Himalaya Fresh Fruit Traders Pvt. Ltd.",
+      "fiscalYear": "2083/84",
+      "isLocked": false,
+      "nextCompanyId": "",
+      "previousCompanyId": "himalaya-fresh-fruit-traders-pvt-ltd-208"
+    }
+  ],
+  "trackInventory": {
+    "suite-track-inventory:himalaya-fresh-fruit-traders-pvt-ltd-208": "yes",
+    "suite-track-inventory:himalaya-fresh-fruit-traders-pvt-ltd-208-2": "yes"
+  },
+  "databasePaths": {
+    "fy2082_83Accounts": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\accounts-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+    "fy2082_83Purchases": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+    "fy2082_83Stock": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\inventorytracked-stock-himalaya-fresh-fruit-traders-pvt-c5657790587582aa.db",
+    "fy2083_84Accounts": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\accounts-himalaya-fresh-fruit-traders-pvt-ltd-208-2.db",
+    "fy2083_84Purchases": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208-2.db",
+    "fy2083_84Stock": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\inventorytracked-stock-himalaya-fresh-fruit-traders-pvt-defc9179629d84d5.db"
+  },
+  "fy2082_83": {
+    "status": "CLOSED",
+    "counts": {
+      "customers": 10,
+      "sales": 180,
+      "collections": 120,
+      "receiptAllocations": 240,
+      "vendorsAgents": 4,
+      "importPurchases": 12,
+      "localPurchases": 24,
+      "payments": 48,
+      "paymentAllocations": 12,
+      "stockItems": 3,
+      "stockPurchaseBills": 36,
+      "stockPurchaseLines": 36,
+      "stockSalesBills": 180,
+      "stockSalesLines": 540,
+      "accountsLedgerRows": 600,
+      "purchaseLedgerRows": 180
+    },
+    "oracle": {
+      "salesInvoices": 180,
+      "salesRevenue": 1182600,
+      "collections": 946080,
+      "receivables": 306520,
+      "payables": 251920,
+      "bank": 1047600,
+      "stockQty": 1360,
+      "inventoryValue": 180078.1383839345
+    },
+    "customerBalances": {
+      "Everest Mart Pvt Ltd": 44952,
+      "Annapurna Grocery Center": 38288,
+      "Bagmati Fresh House": 48240,
+      "Chitwan Retail Traders": 34208,
+      "Gandaki Super Store": 42160,
+      "Janaki Food Suppliers": 16224,
+      "Koshi Department Store": 24516,
+      "Lumbini Mini Mart": 18064,
+      "Mechi Wholesale Center": 22224,
+      "Sagarmatha Grocers": 17644
+    },
+    "vendorBalances": {
+      "North India Apple Exports Pvt Ltd": 93360,
+      "Terai Mango Supply House": 95200,
+      "Narayani Citrus Suppliers": 42000,
+      "Birgunj Customs & Logistics Services": 21360
+    },
+    "stockBalances": {
+      "Apple": {
+        "closingQty": 440,
+        "averageRate": 186.42857142857142,
+        "closingValue": 82028.57142857142
+      },
+      "Mango": {
+        "closingQty": 460,
+        "averageRate": 126.83544303797468,
+        "closingValue": 58344.303797468354
+      },
+      "Lemon": {
+        "closingQty": 460,
+        "averageRate": 86.3157894736842,
+        "closingValue": 39705.26315789473
+      }
+    },
+    "ledgerBatches": {
+      "sales": {
+        "SALE": 180,
+        "CUSTOMER_RECEIPT": 120
+      },
+      "purchases": {
+        "PURCHASE": 12,
+        "LOCAL_EXPENSE": 24,
+        "SUPPLIER_PAYMENT": 48
+      }
+    }
+  },
+  "fy2083_84": {
+    "status": "OPEN",
+    "purchaseCounts": {
+      "importPurchases": 0,
+      "localPurchases": 0,
+      "payments": 0,
+      "purchaseLedgerRows": 0
+    },
+    "stockCounts": {
+      "stockItems": 3,
+      "stockPurchaseBills": 0,
+      "stockPurchaseLines": 0,
+      "stockSalesBills": 0,
+      "stockSalesLines": 0
+    },
+    "openingStockBalances": {
+      "Apple": {
+        "openingQty": 440,
+        "openingRate": 186.42857142857142,
+        "openingValue": 82028.57142857142
+      },
+      "Mango": {
+        "openingQty": 460,
+        "openingRate": 126.83544303797468,
+        "openingValue": 58344.303797468354
+      },
+      "Lemon": {
+        "openingQty": 460,
+        "openingRate": 86.3157894736842,
+        "openingValue": 39705.26315789473
+      }
+    }
+  }
+}

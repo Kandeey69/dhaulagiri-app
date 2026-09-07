@@ -39,6 +39,18 @@ const pageLabels: Record<Page, string> = {
   activityLogs: "Activity Logs",
 };
 
+const pageShortLabels: Record<Page, string> = {
+  dashboard: "DB",
+  parties: "PM",
+  sales: "SE",
+  collections: "CE",
+  creditNotes: "CN",
+  imports: "DI",
+  reports: "RP",
+  settings: "ST",
+  activityLogs: "AL",
+};
+
 const masterPages: Page[] = [
   "dashboard",
   "sales",
@@ -120,6 +132,9 @@ export default function App({
   const [fiscalYear, setFiscalYear] = useState(
     () => getCompanySetting("accounts-fiscal-year", getActiveCompanyProfile()?.fiscalYear || "")
   );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("easysolution:accounts-sidebar-collapsed") === "yes"
+  );
 
   const allowedPages = useMemo(
     () => {
@@ -134,6 +149,10 @@ export default function App({
     [isReadOnly, userRole]
   );
   const currentPage = allowedPages.includes(page) ? page : "dashboard";
+
+  useEffect(() => {
+    localStorage.setItem("easysolution:accounts-sidebar-collapsed", sidebarCollapsed ? "yes" : "no");
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     if (initialUserRole) {
@@ -288,34 +307,47 @@ export default function App({
   }
 
   return (
-    <div className="app-shell" onKeyDown={moveEnterToNextField}>
+    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"} onKeyDown={moveEnterToNextField}>
       <aside className="sidebar">
         <div>
           <p className="company-name-display compact inverse">{companyName}</p>
           <h1>Accounts</h1>
-          <p className="sidebar-note">Sales, receivables, collections, credit notes, VAT, and customer ledgers.</p>
           <p className="sidebar-note">User: {userRole === "master" ? "Master" : "Account"}</p>
           {isReadOnly && <p className="sidebar-note">Locked fiscal year: view only</p>}
         </div>
 
         <nav>
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed((current) => !current)}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            <span aria-hidden="true">{sidebarCollapsed ? ">>" : "<<"}</span>
+            <span className="nav-label">{sidebarCollapsed ? "Expand" : "Collapse"}</span>
+          </button>
           {allowedPages.map((item) => (
             <button
               key={item}
               type="button"
               className={currentPage === item ? "active" : ""}
               onClick={() => navigateToPage(item)}
+              title={pageLabels[item]}
             >
-              {pageLabels[item]}
+              <span className="nav-icon" aria-hidden="true">{pageShortLabels[item]}</span>
+              <span className="nav-label">{pageLabels[item]}</span>
             </button>
           ))}
           {onBackToModules && (
-            <button type="button" onClick={onBackToModules}>
-              Switch Module
+            <button type="button" onClick={onBackToModules} title="Switch Module">
+              <span className="nav-icon" aria-hidden="true">SM</span>
+              <span className="nav-label">Switch Module</span>
             </button>
           )}
-          <button type="button" className="logout-button" onClick={logout}>
-            Logout
+          <button type="button" className="logout-button" onClick={logout} title="Logout">
+            <span className="nav-icon" aria-hidden="true">LO</span>
+            <span className="nav-label">Logout</span>
           </button>
         </nav>
       </aside>

@@ -27,7 +27,6 @@ import {
 import { createDraftKey } from '../application/draftAutosave'
 import { validatePurchaseFormForUi, validationMessagesByField } from '../application/purchaseFormValidation'
 import { availableTransactionActions } from '../application/transactionActions'
-import { AppContextBar } from '../components/AppContextBar'
 import { TransactionStatusBadge } from '../components/StatusBadge'
 import { ValidationSummary } from '../components/ValidationSummary'
 import { FreightTreatmentExplanation } from '../features/purchases/FreightTreatmentExplanation'
@@ -296,6 +295,18 @@ const viewItems: View[] = [
   'Party Master',
   'Activity Logs',
 ]
+
+const viewShortLabels: Record<View, string> = {
+  Dashboard: 'DB',
+  'Party Master': 'PM',
+  'Import Purchase Entry': 'IP',
+  'Payment Entry': 'PE',
+  'Local Purchase / Expense': 'LP',
+  'Data Importation': 'DI',
+  Reports: 'RP',
+  Settings: 'ST',
+  'Activity Logs': 'AL',
+}
 
 const accountViewItems: View[] = [
   'Dashboard',
@@ -961,6 +972,9 @@ function App({
   const [importPurchaseSort, setImportPurchaseSort] = useState<SortState<ImportPurchaseSortKey>>({ key: null, direction: 'asc' })
   const [paymentSort, setPaymentSort] = useState<SortState<PaymentSortKey>>({ key: null, direction: 'asc' })
   const [localExpenseSort, setLocalExpenseSort] = useState<SortState<LocalExpenseSortKey>>({ key: null, direction: 'asc' })
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem('easysolution:purchase-sidebar-collapsed') === 'yes',
+  )
   const [previewStockPurchase, setPreviewStockPurchase] = useState<{
     documentId: string
     sourceType: 'Import Purchase' | 'Local Purchase'
@@ -989,6 +1003,10 @@ function App({
   const [partyImportResults, setPartyImportResults] = useState<PartyImportResult[]>([])
   const [purchaseImportResults, setPurchaseImportResults] = useState<PurchaseImportResult[]>([])
   const [paymentImportResults, setPaymentImportResults] = useState<PaymentImportResult[]>([])
+
+  useEffect(() => {
+    localStorage.setItem('easysolution:purchase-sidebar-collapsed', sidebarCollapsed ? 'yes' : 'no')
+  }, [sidebarCollapsed])
   const [summaryFilters, setSummaryFilters] = useState({
     from: '',
     to: '',
@@ -1000,10 +1018,6 @@ function App({
   const [ledgerPartyId, setLedgerPartyId] = useState('')
   const [vatFilters, setVatFilters] = useState({ month: '' })
   const activeCompanyId = getActiveCompanyId() || 'default'
-  const purchaseFiscalYearStorageKey = `purchase-selected-fiscal-year:${activeCompanyId}`
-  const [selectedFiscalYearId, setSelectedFiscalYearId] = useState(() =>
-    window.localStorage.getItem(purchaseFiscalYearStorageKey) ?? '',
-  )
   const lastSavedSnapshotRef = useRef('')
 
   useEffect(() => {
@@ -1011,10 +1025,6 @@ function App({
       setUserRole(initialUserRole)
     }
   }, [initialUserRole])
-
-  useEffect(() => {
-    setSelectedFiscalYearId(window.localStorage.getItem(purchaseFiscalYearStorageKey) ?? '')
-  }, [purchaseFiscalYearStorageKey])
 
   useEffect(() => {
     scrollToPageTop()
@@ -1080,27 +1090,17 @@ function App({
   const indianSupplierPaymentParties = [...indianSuppliers, ...indianTransportParties]
   const localSuppliers = activeParties.filter((party) => party.category === 'Local Suppliers')
   const otherPaymentParties = activeParties.filter((party) => !isIndianSupplierCategory(party))
-  const fiscalYearOptions = useMemo(() => {
+  const activeFiscalYear = useMemo(() => {
     const profile = getActiveCompanyProfile()
     const code = profile?.fiscalYear || data.settings.fiscalYear || defaultSettings.fiscalYear
     const companyYears = data.fiscalYears.filter((fiscalYear) => fiscalYear.companyId === activeCompanyId)
-    const candidate =
+    const selected =
       companyYears.find((fiscalYear) => fiscalYear.code === code) ??
       companyYears.find((fiscalYear) => fiscalYear.id === data.purchases[0]?.fiscalYearId) ??
       createFiscalYearFromCode(activeCompanyId, code, isReadOnly ? 'CLOSED' : 'OPEN')
 
-    return companyYears.some((fiscalYear) => fiscalYear.id === candidate.id)
-      ? companyYears
-      : [candidate, ...companyYears]
-  }, [activeCompanyId, data.fiscalYears, data.purchases, data.settings.fiscalYear, isReadOnly])
-  const activeFiscalYear = useMemo(() => {
-    const selected =
-      fiscalYearOptions.find((fiscalYear) => fiscalYear.id === selectedFiscalYearId) ??
-      fiscalYearOptions.find((fiscalYear) => fiscalYear.status === 'OPEN') ??
-      fiscalYearOptions[0]
-
     return isReadOnly ? { ...selected, status: 'CLOSED' as const } : selected
-  }, [fiscalYearOptions, isReadOnly, selectedFiscalYearId])
+  }, [activeCompanyId, data.fiscalYears, data.purchases, data.settings.fiscalYear, isReadOnly])
   const isClosedFiscalYear = activeFiscalYear.status === 'CLOSED'
   const canEditOrDelete = userRole === 'Master' && !isReadOnly && !isClosedFiscalYear
   const canEditPurchase = !isReadOnly && !isClosedFiscalYear && (userRole === 'Master' || userRole === 'Account')
@@ -1121,15 +1121,6 @@ function App({
     [activeFiscalYear],
   )
 
-  useEffect(() => {
-    if (!activeFiscalYear.id) {
-      return
-    }
-    if (selectedFiscalYearId !== activeFiscalYear.id) {
-      setSelectedFiscalYearId(activeFiscalYear.id)
-    }
-    window.localStorage.setItem(purchaseFiscalYearStorageKey, activeFiscalYear.id)
-  }, [activeFiscalYear.id, purchaseFiscalYearStorageKey, selectedFiscalYearId])
   const isUsdSupplierMode = data.settings.supplierPurchaseCurrency === 'USD'
   const selectedSupplierCurrency: SupplierCurrency = isUsdSupplierMode
     ? normalizeSupplierCurrency(purchaseForm.supplierCurrency)
@@ -1581,14 +1572,29 @@ function App({
   const appendLedgerEntries = (entries: LedgerEntry[]) =>
     [...data.ledgerEntries, ...entries]
 
-  const replaceLedgerEntriesForSource = (
+  const replaceLedgerEntriesInList = (
+    ledgerEntries: LedgerEntry[],
     sourceType: LedgerEntry['sourceType'],
     sourceId: string,
     entries: LedgerEntry[],
   ) => [
-    ...data.ledgerEntries.filter((entry) => entry.sourceType !== sourceType || entry.sourceId !== sourceId),
+    ...ledgerEntries.filter((entry) => entry.sourceType !== sourceType || entry.sourceId !== sourceId),
     ...entries,
   ]
+
+  const replaceLedgerEntriesForSource = (
+    sourceType: LedgerEntry['sourceType'],
+    sourceId: string,
+    entries: LedgerEntry[],
+  ) => replaceLedgerEntriesInList(data.ledgerEntries, sourceType, sourceId, entries)
+
+  const removeLedgerEntriesForSources = (
+    ledgerEntries: LedgerEntry[],
+    sources: Array<{ sourceType: LedgerEntry['sourceType']; sourceId: string }>,
+  ) => {
+    const keys = new Set(sources.map((source) => `${source.sourceType}:${source.sourceId}`))
+    return ledgerEntries.filter((entry) => !keys.has(`${entry.sourceType}:${entry.sourceId}`))
+  }
 
   const buildImportPurchaseLedgerEntries = (purchase: ImportPurchase) =>
     postPurchase({
@@ -1608,6 +1614,32 @@ function App({
       totalInputVatNPR: purchase.totalInputVatNPR,
       reference: purchase.vendorBillNumber,
     }, postingContext(purchase.fiscalYearId))
+
+  const buildPaymentLedgerEntries = (payment: Payment) =>
+    postSupplierPayment({
+      id: payment.id,
+      lifecycleStatus: 'DRAFT',
+      fiscalYearId: payment.fiscalYearId,
+      date: payment.paymentDate,
+      partyId: payment.partyId,
+      paymentType: payment.paymentType,
+      amountNPR: payment.amountNPR,
+      reference: payment.referenceNumber || payment.id,
+    }, postingContext(payment.fiscalYearId))
+
+  const buildLocalExpenseLedgerEntries = (localExpense: LocalPurchaseExpense) =>
+    postLocalExpense({
+      id: localExpense.id,
+      lifecycleStatus: 'DRAFT',
+      fiscalYearId: localExpense.fiscalYearId,
+      date: localExpense.billDate,
+      partyId: localExpense.partyId,
+      expenseType: localExpense.expenseType,
+      amountBeforeVatNPR: localExpense.amountBeforeVatNPR,
+      vatNPR: localExpense.vatNPR,
+      totalAmountNPR: localExpense.totalAmountNPR,
+      reference: localExpense.billNumber,
+    }, postingContext(localExpense.fiscalYearId))
 
   const loginAsAccount = () => {
     setUserRole('Account')
@@ -1743,6 +1775,62 @@ function App({
     const agentPayable = agentOpening + agentBills - agentPayments
     const transportPayable = transportOpening + transportCredits - transportPayments
     const localSupplierPayable = localSupplierOpening + localSupplierBills - localSupplierPayments
+    const totalObligation =
+      supplierOpening +
+      supplierBills +
+      agentOpening +
+      agentBills +
+      transportOpening +
+      transportCredits +
+      localSupplierOpening +
+      localSupplierBills
+    const totalPaid =
+      supplierPayments + agentPayments + transportPayments + localSupplierPayments
+    const paymentRate =
+      totalObligation > 0
+        ? Math.min(100, Math.round((totalPaid / totalObligation) * 100))
+        : 0
+    const paymentsByParty = new Map<string, number>()
+
+    currentPayments.forEach((payment) => {
+      paymentsByParty.set(payment.partyId, (paymentsByParty.get(payment.partyId) ?? 0) + payment.amountNPR)
+    })
+
+    const topPayables = data.parties
+      .map((party) => {
+        let bills = 0
+
+        if (isIndianSupplierCategory(party)) {
+          bills = currentPurchases
+            .filter((purchase) => purchase.vendorPartyId === party.id)
+            .reduce((sum, purchase) => sum + purchase.supplierAmountNPR, 0)
+        } else if (isCustomAgentCategory(party)) {
+          bills = currentPurchases
+            .filter((purchase) => purchase.customAgentPartyId === party.id)
+            .reduce((sum, purchase) => sum + purchase.totalAgentPayableNPR, 0)
+        } else if (isIndianTransportCategory(party)) {
+          bills = currentPurchases
+            .filter(
+              (purchase) =>
+                shouldCreditIndianTransport(purchase.freightIndiaStatus) &&
+                purchase.freightIndiaPartyId === party.id,
+            )
+            .reduce((sum, purchase) => sum + purchase.freightIndiaAmountNPR, 0)
+        } else if (party.category === 'Local Suppliers') {
+          bills = sortedLocalExpenses
+            .filter((localExpense) => localExpense.partyId === party.id)
+            .reduce((sum, localExpense) => sum + localExpense.totalAmountNPR, 0)
+        }
+
+        return {
+          partyId: party.id,
+          partyName: party.name,
+          outstanding: party.openingPayable + bills - (paymentsByParty.get(party.id) ?? 0),
+        }
+      })
+      .filter((row) => row.outstanding > 0)
+      .sort((left, right) => right.outstanding - left.outstanding)
+      .slice(0, 5)
 
     return {
       totalPayable: supplierPayable + agentPayable + transportPayable + localSupplierPayable,
@@ -1750,6 +1838,10 @@ function App({
       agentPayable,
       transportPayable,
       localSupplierPayable,
+      totalObligation,
+      totalPaid,
+      paymentRate,
+      topPayables,
       inputVat: currentPurchases.reduce((sum, purchase) => sum + purchase.totalInputVatNPR, 0),
       landedCost: currentPurchases.reduce((sum, purchase) => sum + purchase.landedCostNPR, 0),
       recentPurchases: sortedPurchases.slice(0, 5),
@@ -2631,6 +2723,7 @@ function App({
     const partiesByName = new Map(data.parties.map((party) => [normalizeKey(party.name), party]))
     const errors: string[] = []
     const importedPurchases: ImportPurchase[] = []
+    const importedLedgerEntries: LedgerEntry[] = []
     const importedDetails: PurchaseImportResult[] = []
 
     rows.forEach((row, index) => {
@@ -2881,14 +2974,40 @@ function App({
         return
       }
 
-      importedPurchases.push(withNewPurchase({
+      const created = withNewPurchase({
         ...purchase,
         ...totals,
         appliedVatRate: purchasePolicy.vatRatePercent,
         appliedExchangeRate: importSupplierExchangeRate,
         calculationVersion: purchasePolicy.calculationVersion,
         calculatedAt: new Date().toISOString(),
-      }))
+      })
+
+      try {
+        importedLedgerEntries.push(...buildImportPurchaseLedgerEntries(created))
+      } catch (error) {
+        const reason = errorMessage(error)
+        errors.push(`Line ${line}: ${reason}`)
+        importedDetails.push({
+          status: 'Skipped',
+          line,
+          vendor: vendorName,
+          billNumber: purchase.vendorBillNumber,
+          billDate: purchase.billDate,
+          supplierAmountNPR: totals.supplierAmountNPR,
+          customAgent: customAgent?.name ?? '-',
+          indianTransport: indianTransportParty?.name ?? '-',
+          pragapanpatraNumber: purchase.debitNoteNumber,
+          debitNoteTotalNPR: totals.debitNoteTotalNPR,
+          agentServiceTotalNPR: totals.agentServiceTotalNPR,
+          totalInputVatNPR: totals.totalInputVatNPR,
+          landedCostNPR: totals.landedCostNPR,
+          remarks: reason,
+        })
+        return
+      }
+
+      importedPurchases.push(created)
       importedDetails.push({
         status: 'Imported',
         line,
@@ -2914,7 +3033,11 @@ function App({
     }
 
     setDataWithLog(
-      { ...data, purchases: [...importedPurchases, ...data.purchases] },
+      {
+        ...data,
+        purchases: [...importedPurchases, ...data.purchases],
+        ledgerEntries: [...data.ledgerEntries, ...importedLedgerEntries],
+      },
       'Imported import purchases',
       `${importedPurchases.length} purchase record${importedPurchases.length === 1 ? '' : 's'}`,
     )
@@ -2942,6 +3065,7 @@ function App({
     const partiesByName = new Map(data.parties.map((party) => [normalizeKey(party.name), party]))
     const errors: string[] = []
     const importedPayments: Payment[] = []
+    const importedLedgerEntries: LedgerEntry[] = []
     const importedDetails: PaymentImportResult[] = []
 
     rows.forEach((row, index) => {
@@ -3049,6 +3173,13 @@ function App({
         remarks,
       })
 
+      try {
+        importedLedgerEntries.push(...buildPaymentLedgerEntries(created))
+      } catch (error) {
+        skip(errorMessage(error))
+        return
+      }
+
       importedPayments.push(created)
       importedDetails.push({
         ...resultBase,
@@ -3069,7 +3200,11 @@ function App({
     }
 
     setDataWithLog(
-      { ...data, payments: [...importedPayments, ...data.payments] },
+      {
+        ...data,
+        payments: [...importedPayments, ...data.payments],
+        ledgerEntries: [...data.ledgerEntries, ...importedLedgerEntries],
+      },
       'Imported Indian supplier payments',
       `${importedPayments.length} payment record${importedPayments.length === 1 ? '' : 's'}`,
     )
@@ -3097,6 +3232,7 @@ function App({
     const partiesByName = new Map(data.parties.map((party) => [normalizeKey(party.name), party]))
     const errors: string[] = []
     const importedPayments: Payment[] = []
+    const importedLedgerEntries: LedgerEntry[] = []
     const importedDetails: PaymentImportResult[] = []
 
     rows.forEach((row, index) => {
@@ -3178,6 +3314,13 @@ function App({
         remarks: importedRemarks,
       })
 
+      try {
+        importedLedgerEntries.push(...buildPaymentLedgerEntries(created))
+      } catch (error) {
+        skip(errorMessage(error))
+        return
+      }
+
       importedPayments.push(created)
       importedDetails.push({
         ...resultBase,
@@ -3198,7 +3341,11 @@ function App({
     }
 
     setDataWithLog(
-      { ...data, payments: [...importedPayments, ...data.payments] },
+      {
+        ...data,
+        payments: [...importedPayments, ...data.payments],
+        ledgerEntries: [...data.ledgerEntries, ...importedLedgerEntries],
+      },
       'Imported custom agent/local payments',
       `${importedPayments.length} payment record${importedPayments.length === 1 ? '' : 's'}`,
     )
@@ -3217,8 +3364,18 @@ function App({
   const saveParty = (event: FormEvent) => {
     event.preventDefault()
 
-    if (!partyForm.name.trim()) {
+    const partyNameValue = partyForm.name.trim()
+
+    if (!partyNameValue) {
       window.alert('Party name is required.')
+      return
+    }
+
+    const duplicateParty = data.parties.find(
+      (party) => party.id !== partyForm.id && normalizeKey(party.name) === normalizeKey(partyNameValue),
+    )
+    if (duplicateParty) {
+      window.alert(`Party name already exists: ${duplicateParty.name}.`)
       return
     }
 
@@ -3265,7 +3422,7 @@ function App({
     navigateToView('Party Master')
   }
 
-  const hardDeleteParty = (party: Party) => {
+  const hardDeleteParty = async (party: Party) => {
     const linkedPurchases = data.purchases.filter(
       (purchase) =>
         purchase.vendorPartyId === party.id ||
@@ -3286,6 +3443,15 @@ function App({
       return
     }
 
+    const linkedPurchaseIds = new Set(linkedPurchases.map((purchase) => purchase.id))
+    const linkedLocalExpenseIds = new Set(linkedLocalExpenses.map((localExpense) => localExpense.id))
+    const linkedPaymentIds = new Set(linkedPayments.map((payment) => payment.id))
+    const ledgerSources = [
+      ...linkedPurchases.map((purchase) => ({ sourceType: 'PURCHASE' as const, sourceId: purchase.id })),
+      ...linkedLocalExpenses.map((localExpense) => ({ sourceType: 'LOCAL_EXPENSE' as const, sourceId: localExpense.id })),
+      ...linkedPayments.map((payment) => ({ sourceType: 'SUPPLIER_PAYMENT' as const, sourceId: payment.id })),
+    ]
+
     const next = {
       ...data,
       parties: data.parties.filter((item) => item.id !== party.id),
@@ -3299,6 +3465,10 @@ function App({
         (localExpense) => localExpense.partyId !== party.id,
       ),
       payments: data.payments.filter((payment) => payment.partyId !== party.id),
+      paymentAllocations: data.paymentAllocations.filter(
+        (allocation) => !linkedPaymentIds.has(allocation.paymentId) && !linkedPurchaseIds.has(allocation.purchaseId),
+      ),
+      ledgerEntries: removeLedgerEntriesForSources(data.ledgerEntries, ledgerSources),
     }
 
     setDataWithLog(
@@ -3333,6 +3503,16 @@ function App({
     if (ledgerPartyId === party.id) {
       setLedgerPartyId('')
     }
+
+    const stockCleanupTasks = [
+      ...Array.from(linkedPurchaseIds).map((id) =>
+        cleanupLinkedPurchaseStock(id, 'Import Purchase', `deleted party ${party.name}`),
+      ),
+      ...Array.from(linkedLocalExpenseIds).map((id) =>
+        cleanupLinkedPurchaseStock(id, 'Local Purchase', `deleted party ${party.name}`),
+      ),
+    ]
+    await Promise.all(stockCleanupTasks)
   }
 
   const savePurchase = async (event: FormEvent) => {
@@ -3658,6 +3838,10 @@ function App({
     const next = {
       ...data,
       purchases: data.purchases.filter((item) => item.id !== purchase.id),
+      paymentAllocations: data.paymentAllocations.filter((allocation) => allocation.purchaseId !== purchase.id),
+      ledgerEntries: removeLedgerEntriesForSources(data.ledgerEntries, [
+        { sourceType: 'PURCHASE', sourceId: purchase.id },
+      ]),
     }
     const saved = await persistDataWithLog(next, 'Deleted import purchase', purchase.vendorBillNumber, {
       oldValue: auditValue(purchase),
@@ -3667,7 +3851,7 @@ function App({
     if (!saved) {
       return
     }
-    void cleanupLinkedPurchaseStock(purchase.id, 'Import Purchase', `purchase bill ${purchase.vendorBillNumber}`)
+    await cleanupLinkedPurchaseStock(purchase.id, 'Import Purchase', `purchase bill ${purchase.vendorBillNumber}`)
   }
 
   const otherPaymentTypeForParty = (party: Party | undefined): Payment['paymentType'] => {
@@ -3795,11 +3979,23 @@ function App({
     if (paymentForm.id) {
       const previous = data.payments.find((payment) => payment.id === paymentForm.id)
       const updated = withUpdatedPayment(paymentToSave)
+      let ledgerEntries: LedgerEntry[]
+
+      try {
+        ledgerEntries = buildPaymentLedgerEntries(updated)
+      } catch (error) {
+        const errors = [{ field: 'partyId', message: errorMessage(error) }]
+        setPaymentValidationErrors(errors)
+        focusFirstInvalidField(errors)
+        return
+      }
+
       const next = {
         ...data,
         payments: data.payments.map((payment) =>
           payment.id === updated.id ? updated : payment,
         ),
+        ledgerEntries: replaceLedgerEntriesForSource('SUPPLIER_PAYMENT', updated.id, ledgerEntries),
       }
       setDataWithLog(
         next,
@@ -3862,6 +4058,9 @@ function App({
       ...data,
       payments: data.payments.filter((item) => item.id !== payment.id),
       paymentAllocations: data.paymentAllocations.filter((allocation) => allocation.paymentId !== payment.id),
+      ledgerEntries: removeLedgerEntriesForSources(data.ledgerEntries, [
+        { sourceType: 'SUPPLIER_PAYMENT', sourceId: payment.id },
+      ]),
     }
     setDataWithLog(
       next,
@@ -3910,11 +4109,21 @@ function App({
     if (localExpenseForm.id) {
       const previous = data.localExpenses.find((localExpense) => localExpense.id === localExpenseForm.id)
       const updated = withUpdatedLocalExpense(localExpenseToSave)
+      let ledgerEntries: LedgerEntry[]
+
+      try {
+        ledgerEntries = buildLocalExpenseLedgerEntries(updated)
+      } catch (error) {
+        window.alert(errorMessage(error))
+        return
+      }
+
       const next = {
         ...data,
         localExpenses: data.localExpenses.map((localExpense) =>
           localExpense.id === updated.id ? updated : localExpense,
         ),
+        ledgerEntries: replaceLedgerEntriesForSource('LOCAL_EXPENSE', updated.id, ledgerEntries),
       }
       const saved = await persistDataWithLog(
         next,
@@ -4020,6 +4229,9 @@ function App({
     const next = {
       ...data,
       localExpenses: data.localExpenses.filter((item) => item.id !== localExpense.id),
+      ledgerEntries: removeLedgerEntriesForSources(data.ledgerEntries, [
+        { sourceType: 'LOCAL_EXPENSE', sourceId: localExpense.id },
+      ]),
     }
     const saved = await persistDataWithLog(
       next,
@@ -4034,7 +4246,7 @@ function App({
     if (!saved) {
       return
     }
-    void cleanupLinkedPurchaseStock(localExpense.id, 'Local Purchase', `local purchase/expense ${localExpense.billNumber}`)
+    await cleanupLinkedPurchaseStock(localExpense.id, 'Local Purchase', `local purchase/expense ${localExpense.billNumber}`)
   }
 
   const openGlobalSearchResult = (result: (typeof globalSearchResults)[number]) => {
@@ -4206,6 +4418,16 @@ function App({
           <button type="button" onClick={openNewLocalExpenseEntry}>
             New local purchase / expense
           </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => {
+              setReportView('Payables')
+              navigateToView('Reports')
+            }}
+          >
+            Open reports
+          </button>
         </div>
       </Panel>
 
@@ -4213,9 +4435,36 @@ function App({
         <Metric label="Total payable" value={npr(dashboard.totalPayable)} />
         <Metric label="Supplier payable" value={npr(dashboard.supplierPayable)} />
         <Metric label="Custom agent payable" value={npr(dashboard.agentPayable)} />
+        <Metric label="Transport payable" value={npr(dashboard.transportPayable)} />
         <Metric label="Local supplier payable" value={npr(dashboard.localSupplierPayable)} />
-        <Metric label="Total input VAT" value={npr(dashboard.inputVat)} />
-        <Metric label="Total landed cost" value={npr(dashboard.landedCost)} />
+      </div>
+
+      <div className="two-column">
+        <section className="panel">
+          <div className="card-header report-header">
+            <h3>Payment Progress</h3>
+            <strong>{dashboard.paymentRate}%</strong>
+          </div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${dashboard.paymentRate}%` }} />
+          </div>
+          <div className="split-stats">
+            <span>Opening + Bills: {npr(dashboard.totalObligation)}</span>
+            <span>Paid: {npr(dashboard.totalPaid)}</span>
+          </div>
+        </section>
+
+        <Panel title="Top Payable Parties">
+          <div className="rank-list">
+            {dashboard.topPayables.map((row) => (
+              <div key={row.partyId} className="rank-row">
+                <span>{row.partyName}</span>
+                <strong>{npr(row.outstanding)}</strong>
+              </div>
+            ))}
+            {dashboard.topPayables.length === 0 && <p className="muted">No payable data yet.</p>}
+          </div>
+        </Panel>
       </div>
 
       <Panel title="Landed Cost by Month">
@@ -4224,7 +4473,7 @@ function App({
           emptyText="No landed cost data by agent bill date yet."
           onSelect={(row) => {
             setVatFilters({ month: row.month })
-            setReportView('Input VAT')
+            setReportView('Landed Cost')
             navigateToView('Reports')
           }}
         />
@@ -4395,11 +4644,6 @@ function App({
 
   const renderPurchaseEntry = () => (
     <div className="stack">
-      {isClosedFiscalYear && (
-        <section className="read-only-banner" role="status">
-          This company fiscal year is closed. Purchase entry is available for viewing only.
-        </section>
-      )}
       <form onSubmit={savePurchase} className="stack">
         <ValidationSummary errors={purchaseValidationErrors} warnings={purchaseValidationWarnings} />
         <Panel title="Section A: Supplier Invoice">
@@ -4708,11 +4952,6 @@ function App({
       </div>
 
       <Panel title={paymentMode === 'Indian Supplier' ? 'Indian Supplier Payment' : 'Custom Agent / Local Payment'}>
-        {isClosedFiscalYear && (
-          <section className="read-only-banner" role="status">
-            This company fiscal year is closed. Payment entry is available for viewing only.
-          </section>
-        )}
         <form className="stack" onSubmit={savePayment}>
           <ValidationSummary errors={paymentValidationErrors} />
           <div className="form-grid">
@@ -5635,7 +5874,7 @@ function App({
     : previewLocalExpense?.billDate ?? previewStockBill?.dateBs ?? ''
 
   return (
-    <div className="app-shell" onKeyDown={moveEnterToNextField}>
+    <div className={sidebarCollapsed ? 'app-shell sidebar-collapsed' : 'app-shell'} onKeyDown={moveEnterToNextField}>
       {previewStockBill && (
         <LineItemPreviewModal
           billAmount={previewPurchaseBillAmount}
@@ -5660,28 +5899,41 @@ function App({
         <div>
           <p className="company-name-display compact inverse">{data.settings.companyName || 'Company'}</p>
           <h1>Import Purchase</h1>
-          <p className="sidebar-note">Supplier bills, Pragapanpatra charges, VAT, landed cost, payables, and payments.</p>
           <p className="sidebar-note">User: {userRole}</p>
           {isReadOnly && <p className="sidebar-note">Locked fiscal year: view only</p>}
         </div>
         <nav>
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed((current) => !current)}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <span aria-hidden="true">{sidebarCollapsed ? '>>' : '<<'}</span>
+            <span className="nav-label">{sidebarCollapsed ? 'Expand' : 'Collapse'}</span>
+          </button>
           {allowedViewItems.map((item) => (
             <button
               type="button"
               key={item}
               className={currentView === item ? 'active' : ''}
               onClick={() => navigateToView(item)}
+              title={item}
             >
-              {item}
+              <span className="nav-icon" aria-hidden="true">{viewShortLabels[item]}</span>
+              <span className="nav-label">{item}</span>
             </button>
           ))}
           {onBackToModules && (
-            <button type="button" onClick={onBackToModules}>
-              Switch Module
+            <button type="button" onClick={onBackToModules} title="Switch Module">
+              <span className="nav-icon" aria-hidden="true">SM</span>
+              <span className="nav-label">Switch Module</span>
             </button>
           )}
-          <button type="button" className="logout-button" onClick={logout}>
-            Logout
+          <button type="button" className="logout-button" onClick={logout} title="Logout">
+            <span className="nav-icon" aria-hidden="true">LO</span>
+            <span className="nav-label">Logout</span>
           </button>
         </nav>
       </aside>
@@ -5694,14 +5946,9 @@ function App({
             </p>
             <h2>{currentView}</h2>
           </div>
-          <div className="global-search">
-            <input
-              data-global-search="true"
-              value={globalSearch}
-              onChange={(event) => setGlobalSearch(event.target.value)}
-              placeholder="Search party, bill, debit note, payment ref, PAN/VAT"
-              aria-label="Global search"
-            />
+          <div className="quick-total">
+            <span>Net payable</span>
+            <strong>{npr(dashboard.totalPayable)}</strong>
           </div>
           <button type="button" className="ghost" onClick={logout}>
             Logout
@@ -5713,29 +5960,20 @@ function App({
           )}
         </header>
 
+        <div className="global-search module-search">
+          <input
+            data-global-search="true"
+            value={globalSearch}
+            onChange={(event) => setGlobalSearch(event.target.value)}
+            placeholder="Search party, bill, debit note, payment ref, PAN/VAT"
+            aria-label="Global search"
+          />
+        </div>
+
         {!isStorageReady && (
           <section className="panel">
             <h3>Loading storage</h3>
             <p>Opening the import purchase database...</p>
-          </section>
-        )}
-
-        <AppContextBar
-          companyName={data.settings.companyName}
-          fiscalYears={fiscalYearOptions}
-          selectedFiscalYearId={activeFiscalYear.id}
-          onFiscalYearChange={(id) => {
-            setSelectedFiscalYearId(id)
-            setPurchaseForm(createEmptyPurchase(data.settings))
-            setPaymentForm(createEmptyPayment())
-            setPaymentBillYear('Current')
-            setLocalExpenseForm(createEmptyLocalExpense())
-            scrollToPageTop()
-          }}
-        />
-        {isClosedFiscalYear && (
-          <section className="read-only-banner" role="status">
-            Fiscal year {activeFiscalYear.code} is closed. Reports remain available; entries are view and print only.
           </section>
         )}
 
@@ -5960,7 +6198,7 @@ function InventoryRegisterCell({
           Mismatch
         </span>
         {!isReadOnly && (
-          <button type="button" className="small danger" onClick={onAdd}>
+          <button type="button" className="small" onClick={onAdd}>
             Fix
           </button>
         )}
@@ -5984,7 +6222,7 @@ function InventoryRegisterCell({
       {isReadOnly ? (
         <span className="muted">No inventory</span>
       ) : (
-        <button type="button" className="small danger" onClick={onAdd}>
+        <button type="button" className="small" onClick={onAdd}>
           Add
         </button>
       )}

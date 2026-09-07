@@ -605,6 +605,20 @@ function normalizeStockItemCode(value: string) {
   return String(value ?? "").trim().toUpperCase();
 }
 
+function assertNonNegativeStockItemValues(input: Pick<StockItem, "openingQty" | "openingRate" | "reorderLevel">) {
+  if (Number(input.openingQty || 0) < 0) {
+    throw new Error("Opening quantity must not be negative.");
+  }
+
+  if (Number(input.openingRate || 0) < 0) {
+    throw new Error("Opening rate must not be negative.");
+  }
+
+  if (Number(input.reorderLevel || 0) < 0) {
+    throw new Error("Reorder level must not be negative.");
+  }
+}
+
 function sourceSnapshotValues(snapshot: StockSourceSnapshot | undefined): unknown[] {
   return [
     snapshot?.sourceAmount ?? null,
@@ -734,6 +748,8 @@ export async function saveStockItem(input: Omit<StockItem, "id" | "createdAt">) 
     throw new Error("Item name is required.");
   }
 
+  assertNonNegativeStockItemValues(input);
+
   const item: StockItem = {
     ...input,
     id: crypto.randomUUID(),
@@ -817,6 +833,8 @@ export async function updateStockItem(input: Omit<StockItem, "createdAt">) {
   if (!name) {
     throw new Error("Item name is required.");
   }
+
+  assertNonNegativeStockItemValues(input);
 
   await runSerializedStockOperation(stockDbUrl, () => db.execute(
     `
@@ -1431,6 +1449,7 @@ function validateStockBackupData(data: StockBackupData) {
     if (!item.id || !code || !String(item.name ?? "").trim()) {
       throw new Error("Stock backup contains an invalid item record.");
     }
+    assertNonNegativeStockItemValues(item);
     if (itemCodes.has(code)) {
       throw new Error(`Stock backup contains duplicate item code ${code}.`);
     }
@@ -1664,6 +1683,8 @@ export async function upsertStockOpeningItemsForCompany(
       if (!code || !name) {
         throw new Error("Carry-forward item code and name are required.");
       }
+
+      assertNonNegativeStockItemValues(item);
 
       if (existing) {
         await db.execute(

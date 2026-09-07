@@ -657,7 +657,7 @@ function InventoryRegisterCell({
           Mismatch
         </span>
         {!isReadOnly && (
-          <button className="danger small" type="button" onClick={onAdd}>
+          <button className="small" type="button" onClick={onAdd}>
             Fix
           </button>
         )}
@@ -681,7 +681,7 @@ function InventoryRegisterCell({
       {isReadOnly ? (
         <span className="muted">No inventory</span>
       ) : (
-        <button className="danger small" type="button" onClick={onAdd}>
+        <button className="small" type="button" onClick={onAdd}>
           Add
         </button>
       )}

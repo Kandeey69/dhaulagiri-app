@@ -20,6 +20,7 @@ const files = [
   'src/domain/reconciliation.ts',
   'src/accounts/data/storage.ts',
   'src/accounts/utils/settings.ts',
+  'src/application/carryForwardPartySync.ts',
   'src/application/draftAutosave.ts',
   'src/application/paymentAllocationUi.ts',
   'src/application/purchaseCarryForward.ts',

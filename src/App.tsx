@@ -33,6 +33,10 @@ import { createFiscalYearFromCode } from "./domain/fiscalYear";
 import PurchaseApp from "./purchase/App";
 import StockApp from "./stock/App";
 import {
+  deletedPartyIdsFromCarryForwardSourceLogs,
+  removableDeletedCarryForwardPartyIds,
+} from "./application/carryForwardPartySync";
+import {
   isInventoryTrackingEnabled,
   isInventoryTrackingEnabledForCompany,
   writeInventoryTrackingSetting,
@@ -104,13 +108,17 @@ function legacySetting(key: string) {
 }
 
 function readSuiteSettings(settings: AppSettings = defaultSettings): AppSettings {
+  const activeCompany = getActiveCompanyProfile();
+
   return {
     ...settings,
     companyName:
+      activeCompany?.name ||
       getCompanySetting(ACCOUNTS_COMPANY_KEY) ||
       getCompanySetting(SUITE_SETTING_KEYS.companyName) ||
       settings.companyName,
     fiscalYear:
+      activeCompany?.fiscalYear ||
       getCompanySetting(ACCOUNTS_FISCAL_YEAR_KEY) ||
       getCompanySetting(SUITE_SETTING_KEYS.fiscalYear) ||
       settings.fiscalYear,
@@ -132,35 +140,43 @@ function readSuiteSettings(settings: AppSettings = defaultSettings): AppSettings
   };
 }
 
-function writeSuiteSettings(settings: AppSettings) {
-  setCompanySetting(ACCOUNTS_COMPANY_KEY, settings.companyName);
-  setCompanySetting(ACCOUNTS_FISCAL_YEAR_KEY, settings.fiscalYear);
-  setCompanySetting(SUITE_SETTING_KEYS.companyName, settings.companyName);
-  setCompanySetting(SUITE_SETTING_KEYS.fiscalYear, settings.fiscalYear);
-  setCompanySetting(SUITE_SETTING_KEYS.panVatNo, settings.panVatNo);
-  setCompanySetting(SUITE_SETTING_KEYS.address, settings.address);
-  setCompanySetting(SUITE_SETTING_KEYS.phone, settings.phone);
+function writeSuiteSettings(settings: AppSettings): AppSettings {
+  const activeCompany = getActiveCompanyProfile();
+  const nextSettings = {
+    ...settings,
+    companyName: settings.companyName.trim() || activeCompany?.name || defaultSettings.companyName,
+    fiscalYear: activeCompany?.fiscalYear || settings.fiscalYear.trim() || defaultSettings.fiscalYear,
+  };
+
+  setCompanySetting(ACCOUNTS_COMPANY_KEY, nextSettings.companyName);
+  setCompanySetting(ACCOUNTS_FISCAL_YEAR_KEY, nextSettings.fiscalYear);
+  setCompanySetting(SUITE_SETTING_KEYS.companyName, nextSettings.companyName);
+  setCompanySetting(SUITE_SETTING_KEYS.fiscalYear, nextSettings.fiscalYear);
+  setCompanySetting(SUITE_SETTING_KEYS.panVatNo, nextSettings.panVatNo);
+  setCompanySetting(SUITE_SETTING_KEYS.address, nextSettings.address);
+  setCompanySetting(SUITE_SETTING_KEYS.phone, nextSettings.phone);
   setCompanySetting(
     SUITE_SETTING_KEYS.defaultExchangeRate,
-    String(settings.defaultExchangeRate),
+    String(nextSettings.defaultExchangeRate),
   );
   setCompanySetting(
     SUITE_SETTING_KEYS.supplierPurchaseCurrency,
-    settings.supplierPurchaseCurrency,
+    nextSettings.supplierPurchaseCurrency,
   );
   setCompanySetting(
     SUITE_SETTING_KEYS.agentServiceVatRate,
-    String(settings.agentServiceVatRate),
+    String(nextSettings.agentServiceVatRate),
   );
 
-  const activeCompany = getActiveCompanyProfile();
   if (activeCompany) {
     upsertCompanyProfile({
       ...activeCompany,
-      fiscalYear: settings.fiscalYear,
-      name: settings.companyName,
+      fiscalYear: nextSettings.fiscalYear,
+      name: nextSettings.companyName,
     });
   }
+
+  return nextSettings;
 }
 
 function ensureInitialCompanyProfiles() {
@@ -210,13 +226,16 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
 
   try {
     setActiveCompanyId(sourceCompany.id);
-    const [accountParties, accountOutstandingRows, sourceSales, sourcePurchaseRepository] = await Promise.all([
-      getParties(),
+    const [sourceAccountsData, accountOutstandingRows, sourcePurchaseRepository] = await Promise.all([
+      getAccountsBackupData(),
       getAccountOutstanding(),
-      getSales(),
       createDataRepository(),
     ]);
+    const accountParties = sourceAccountsData.parties;
+    const sourceSales = sourceAccountsData.sales;
+    const deletedSourceAccountPartyIds = deletedPartyIdsFromCarryForwardSourceLogs(sourceAccountsData.activityLogs);
     const sourcePurchaseData = await sourcePurchaseRepository.loadData();
+    const deletedSourcePurchasePartyIds = deletedPartyIdsFromCarryForwardSourceLogs(sourcePurchaseData.activityLogs);
     const outstandingByPartyId = new Map(
       accountOutstandingRows.map((row) => [row.partyId, row.outstanding]),
     );
@@ -231,6 +250,14 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
     const targetPurchaseRepository = await createDataRepository();
     const targetPurchaseData = await targetPurchaseRepository.loadData();
     const targetPurchaseBefore: AppData = JSON.parse(JSON.stringify(targetPurchaseData)) as AppData;
+    const targetInventoryTrackingBefore = isInventoryTrackingEnabledForCompany(targetCompany.id);
+    let targetStockBefore: StockBackupData | null = null;
+    let accountPartySync = {
+      removed: 0,
+      skippedRemoval: 0,
+      upserted: carriedAccountParties.length,
+    };
+    let removedPurchaseParties = 0;
     let inventory = {
       conflicts: [] as string[],
       created: 0,
@@ -246,10 +273,21 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
     };
 
     try {
-      await upsertPartiesForCarryForward(carriedAccountParties);
+      accountPartySync = await upsertPartiesForCarryForward(carriedAccountParties, {
+        deletedSourcePartyIds: deletedSourceAccountPartyIds,
+      });
 
       const targetPartyMap = new Map(targetPurchaseData.parties.map((party) => [party.id, party]));
-      const nextParties = [...targetPurchaseData.parties];
+      const carriedPurchasePartyIds = new Set(carriedPurchaseParties.map((party) => party.id).filter(Boolean));
+      const referencedTargetPurchasePartyIds = purchaseReferencedPartyIds(targetPurchaseData);
+      const removablePurchasePartyIds = new Set(removableDeletedCarryForwardPartyIds({
+        deletedSourcePartyIds: deletedSourcePurchasePartyIds,
+        referencedTargetPartyIds: referencedTargetPurchasePartyIds,
+        sourcePartyIds: carriedPurchasePartyIds,
+        targetParties: targetPurchaseData.parties,
+      }));
+      removedPurchaseParties = removablePurchasePartyIds.size;
+      const nextParties = targetPurchaseData.parties.filter((party) => !removablePurchasePartyIds.has(party.id));
 
       carriedPurchaseParties.forEach((party) => {
         const existing = targetPartyMap.get(party.id);
@@ -281,7 +319,12 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
           {
             id: crypto.randomUUID(),
             action: "Opening Balances Refreshed",
-            details: `Refreshed opening balances from ${sourceCompany.fiscalYear || sourceCompany.name}.`,
+            details: [
+              `Refreshed opening balances from ${sourceCompany.fiscalYear || sourceCompany.name}.`,
+              removablePurchasePartyIds.size
+                ? `Removed ${removablePurchasePartyIds.size} deleted source purchase part${removablePurchasePartyIds.size === 1 ? "y" : "ies"}.`
+                : "",
+            ].filter(Boolean).join(" "),
             userName: "Master",
             oldValue: sourceCompany.id,
             newValue: targetCompany.id,
@@ -305,6 +348,7 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
           getStockBackupDataForCompany(sourceCompany.id),
           getStockBackupDataForCompany(targetCompany.id),
         ]);
+        targetStockBefore = JSON.parse(JSON.stringify(targetStock)) as StockBackupData;
 
         inventory = await carryForwardStockOpenings({
           asOnDate: sourceFiscalYear.endBs,
@@ -326,6 +370,12 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
       await targetPurchaseRepository.saveData(targetPurchaseBefore).catch((restoreError) => {
         console.error("Purchase opening rollback failed:", restoreError);
       });
+      if (targetStockBefore) {
+        await replaceStockBackupDataForCompany(targetCompany.id, targetStockBefore).catch((restoreError) => {
+          console.error("Stock opening rollback failed:", restoreError);
+        });
+        writeInventoryTrackingSettingForCompany(targetCompany.id, targetInventoryTrackingBefore);
+      }
       writeSuiteSettings(targetPurchaseBefore.settings);
       throw new Error(
         `Carry-forward failed before the target company was refreshed. ` +
@@ -335,13 +385,35 @@ async function carryForwardOpenings(sourceCompany: CompanyProfile, targetCompany
     }
 
     return {
-      accountParties: carriedAccountParties.length,
+      accountParties: accountPartySync.upserted,
       inventory,
       purchaseParties: carriedPurchaseParties.length,
+      removedAccountParties: accountPartySync.removed,
+      removedPurchaseParties,
     };
   } finally {
     setActiveCompanyId(previousActiveCompanyId);
   }
+}
+
+function purchaseReferencedPartyIds(data: AppData) {
+  const referencedPartyIds = new Set<string>();
+  const add = (partyId?: string) => {
+    if (partyId) {
+      referencedPartyIds.add(partyId);
+    }
+  };
+
+  data.purchases.forEach((purchase) => {
+    add(purchase.vendorPartyId);
+    add(purchase.customAgentPartyId);
+    add(purchase.freightIndiaPartyId);
+  });
+  data.localExpenses.forEach((localExpense) => add(localExpense.partyId));
+  data.payments.forEach((payment) => add(payment.partyId));
+  data.ledgerEntries.forEach((entry) => add(entry.partyId));
+
+  return referencedPartyIds;
 }
 
 async function withActiveCompany<T>(companyId: string, operation: () => Promise<T>) {
@@ -2850,9 +2922,12 @@ function YearEndManager({
             `closing qty ${carryForwardResult.inventory.totalClosingQty.toLocaleString("en-IN")}, ` +
             `value NPR ${carryForwardResult.inventory.totalClosingValue.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
           : ` Inventory: skipped (${carryForwardResult.inventory.warnings.join("; ")}).`;
+        const removedPartyMessage = carryForwardResult.removedAccountParties || carryForwardResult.removedPurchaseParties
+          ? ` Removed stale next-year parties: receivables ${carryForwardResult.removedAccountParties}, payables ${carryForwardResult.removedPurchaseParties}.`
+          : "";
         setMessage(
           `Opening balances refreshed. Receivables: ${carryForwardResult.accountParties} parties. ` +
-          `Payables: ${carryForwardResult.purchaseParties} parties.${inventoryMessage}`,
+          `Payables: ${carryForwardResult.purchaseParties} parties.${removedPartyMessage}${inventoryMessage}`,
         );
       }
 
@@ -3287,8 +3362,8 @@ function SuiteSettings({
 
     const nextSettings: AppSettings = {
       ...settingsForm,
-      companyName: settingsForm.companyName.trim() || defaultSettings.companyName,
-      fiscalYear: settingsForm.fiscalYear.trim(),
+      companyName: settingsForm.companyName.trim() || activeCompany.name || defaultSettings.companyName,
+      fiscalYear: activeCompany.fiscalYear || settingsForm.fiscalYear.trim(),
       panVatNo: settingsForm.panVatNo.trim(),
       address: settingsForm.address.trim(),
       phone: settingsForm.phone.trim(),
@@ -3303,7 +3378,7 @@ function SuiteSettings({
           : defaultSettings.agentServiceVatRate,
     };
 
-    writeSuiteSettings(nextSettings);
+    const savedSettings = writeSuiteSettings(nextSettings);
     writeLetterheadSettings(letterheadSettings);
     writeInventoryTrackingSetting(trackInventory);
     onInventorySettingChanged(trackInventory);
@@ -3311,16 +3386,16 @@ function SuiteSettings({
     try {
       const repository = await createDataRepository();
       const currentData = purchaseData ?? (await repository.loadData());
-      const updatedData = { ...currentData, settings: nextSettings };
+      const updatedData = { ...currentData, settings: savedSettings };
 
       await repository.saveData(updatedData);
       setPurchaseData(updatedData);
-      setSettingsForm(nextSettings);
+      setSettingsForm(savedSettings);
       onCompanySaved();
       setMessage("Settings saved for Sales/Collection and Purchase/Payment modules.");
     } catch (error) {
       console.error("Settings save error:", error);
-      setSettingsForm(nextSettings);
+      setSettingsForm(savedSettings);
       onCompanySaved();
       setMessage("Settings saved locally. Purchase database settings could not be updated.");
     } finally {
@@ -3391,8 +3466,8 @@ function SuiteSettings({
           <label>
             Fiscal Year
             <input
-              value={settingsForm.fiscalYear}
-              onChange={(event) => updateTextField("fiscalYear", event.target.value)}
+              readOnly
+              value={activeCompany.fiscalYear || settingsForm.fiscalYear}
               placeholder="2082/83"
             />
           </label>

@@ -17,6 +17,29 @@ const COMPANY_PROFILES_KEY = 'suite-company-profiles'
 
 const isBrowser = () => typeof window !== 'undefined' && Boolean(window.localStorage)
 
+const profileFiscalYearFromId = (id: string) => {
+  const match = id.match(/(?:^|-)(\d{4})-(\d{2})$/)
+  return match ? `${match[1]}/${match[2]}` : ''
+}
+
+const profileNameFromId = (id: string) => {
+  const fiscalYear = profileFiscalYearFromId(id)
+  const fiscalYearSuffix = fiscalYear ? `-${fiscalYear.replace('/', '-')}` : ''
+  const nameSlug = fiscalYearSuffix && id.endsWith(fiscalYearSuffix)
+    ? id.slice(0, -fiscalYearSuffix.length)
+    : id
+
+  return nameSlug
+    .split('-')
+    .filter(Boolean)
+    .map((part) => {
+      if (part === 'pvt') return 'Pvt'
+      if (part === 'ltd') return 'Ltd'
+      return part.charAt(0).toUpperCase() + part.slice(1)
+    })
+    .join(' ')
+}
+
 const normalizeProfile = (value: unknown): CompanyProfile | null => {
   if (!value || typeof value !== 'object') {
     return null
@@ -24,7 +47,9 @@ const normalizeProfile = (value: unknown): CompanyProfile | null => {
 
   const row = value as Partial<CompanyProfile>
   const id = String(row.id ?? '').trim()
-  const name = String(row.name ?? '').trim()
+  const name = String(row.name ?? '').trim() || profileNameFromId(id)
+  const fiscalYearFromId = profileFiscalYearFromId(id)
+  const fiscalYear = fiscalYearFromId || String(row.fiscalYear ?? '').trim()
 
   if (!id || !name) {
     return null
@@ -41,7 +66,7 @@ const normalizeProfile = (value: unknown): CompanyProfile | null => {
     name,
     nextCompanyId: String(row.nextCompanyId ?? ''),
     previousCompanyId: String(row.previousCompanyId ?? ''),
-    fiscalYear: String(row.fiscalYear ?? ''),
+    fiscalYear,
     createdAt: String(row.createdAt ?? now),
     updatedAt: String(row.updatedAt ?? row.createdAt ?? now),
   }
@@ -205,17 +230,28 @@ export function upsertCompanyProfile(profile: Pick<CompanyProfile, 'id' | 'name'
   const now = new Date().toISOString()
   const profiles = getCompanyProfiles()
   const index = profiles.findIndex((item) => item.id === profile.id)
+  const fallbackProfile = profiles[index]
+  const id = String(profile.id ?? '').trim()
+  const name = String(profile.name ?? '').trim() || fallbackProfile?.name || profileNameFromId(id)
+  const fiscalYearFromId = profileFiscalYearFromId(id)
+  const fiscalYear =
+    fiscalYearFromId || String(profile.fiscalYear ?? fallbackProfile?.fiscalYear ?? '').trim()
+
+  if (!id || !name) {
+    throw new Error('Company profile requires a company name.')
+  }
+
   const nextProfile: CompanyProfile = {
-    companyGroupId: profile.companyGroupId ?? profiles[index]?.companyGroupId ?? profile.id,
-    createdAt: profile.createdAt ?? profiles[index]?.createdAt ?? now,
-    fiscalYear: profile.fiscalYear ?? profiles[index]?.fiscalYear ?? '',
-    id: profile.id,
-    isLocked: profile.isLocked ?? profiles[index]?.isLocked ?? false,
-    lastCarryForwardAt: profile.lastCarryForwardAt ?? profiles[index]?.lastCarryForwardAt ?? '',
-    lockedAt: profile.lockedAt ?? profiles[index]?.lockedAt ?? '',
-    name: profile.name.trim(),
-    nextCompanyId: profile.nextCompanyId ?? profiles[index]?.nextCompanyId ?? '',
-    previousCompanyId: profile.previousCompanyId ?? profiles[index]?.previousCompanyId ?? '',
+    companyGroupId: profile.companyGroupId ?? fallbackProfile?.companyGroupId ?? id,
+    createdAt: profile.createdAt ?? fallbackProfile?.createdAt ?? now,
+    fiscalYear,
+    id,
+    isLocked: profile.isLocked ?? fallbackProfile?.isLocked ?? false,
+    lastCarryForwardAt: profile.lastCarryForwardAt ?? fallbackProfile?.lastCarryForwardAt ?? '',
+    lockedAt: profile.lockedAt ?? fallbackProfile?.lockedAt ?? '',
+    name,
+    nextCompanyId: profile.nextCompanyId ?? fallbackProfile?.nextCompanyId ?? '',
+    previousCompanyId: profile.previousCompanyId ?? fallbackProfile?.previousCompanyId ?? '',
     updatedAt: now,
   }
 

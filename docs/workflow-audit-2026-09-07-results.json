@@ -1,0 +1,132 @@
+{
+  "reproduced": 12,
+  "results": [
+    {
+      "scenario": "Year-end accepts current year",
+      "observed": {
+        "source": "audit-2082-83",
+        "target": "audit-2082-83",
+        "finalProfile": {
+          "companyGroupId": "audit-2082-83",
+          "id": "audit-2082-83",
+          "isLocked": false,
+          "lastCarryForwardAt": "",
+          "lockedAt": "",
+          "name": "Audit",
+          "nextCompanyId": "",
+          "previousCompanyId": "audit-2082-83",
+          "fiscalYear": "2082/83",
+          "createdAt": "2026-09-07T15:32:38.442Z",
+          "updatedAt": "2026-09-07T15:32:38.501Z"
+        }
+      }
+    },
+    {
+      "scenario": "Same stock movements produce different closing values",
+      "observed": {
+        "summary": 1500,
+        "register": 2000
+      }
+    },
+    {
+      "scenario": "Refresh does not clear previously carried opening when source becomes inactive zero",
+      "observed": {
+        "targetOpeningBefore": 10,
+        "writes": []
+      }
+    },
+    {
+      "scenario": "Invalid fiscal-year input is accepted or silently defaulted",
+      "observed": {
+        "invalid": {
+          "id": "audit-2083-99",
+          "companyId": "audit",
+          "code": "2083/99",
+          "startBs": "2083/04/01",
+          "endBs": "2084/03/32",
+          "status": "OPEN",
+          "createdAt": "2026-09-07T15:32:38.513Z",
+          "updatedAt": "2026-09-07T15:32:38.513Z"
+        },
+        "fallback": {
+          "id": "audit-2082-83",
+          "companyId": "audit",
+          "code": "2082/83",
+          "startBs": "2082/04/01",
+          "endBs": "2083/03/32",
+          "status": "OPEN",
+          "createdAt": "2026-09-07T15:32:38.514Z",
+          "updatedAt": "2026-09-07T15:32:38.514Z"
+        }
+      }
+    },
+    {
+      "scenario": "Leaving purchase module before autosave loses pending change",
+      "observed": {
+        "saveCalls": 0
+      }
+    },
+    {
+      "scenario": "Failed company deletion restores profile but leaves accounts empty",
+      "observed": {
+        "accountsRows": [],
+        "profileStillPresent": true
+      }
+    },
+    {
+      "scenario": "Accounts reset leaves old journal entries untouched",
+      "observed": {
+        "statements": [
+          "DELETE FROM receipt_allocations",
+          "DELETE FROM activity_logs",
+          "DELETE FROM credit_notes",
+          "DELETE FROM collections",
+          "DELETE FROM sales",
+          "DELETE FROM parties"
+        ]
+      }
+    },
+    {
+      "scenario": "Startup seed merge reintroduces a removed seeded company",
+      "observed": {
+        "restoredId": "audit-2082-83"
+      }
+    },
+    {
+      "scenario": "Awaiting background operation exposes temporary company globally",
+      "observed": {
+        "displayedCompany": "audit-2082-83",
+        "storageCompany": "audit-2083-84"
+      }
+    },
+    {
+      "scenario": "Pending sale inventory lines still allow successful closing-stock carry",
+      "observed": {
+        "status": "completed",
+        "warnings": [],
+        "carriedQty": 10
+      }
+    },
+    {
+      "scenario": "Sale amount and customer edit leave previous receipt allocation intact",
+      "observed": {
+        "sale": {
+          "total_amount": 500,
+          "party_id": "customer-b"
+        },
+        "allocation": {
+          "amount_npr": 800
+        }
+      }
+    },
+    {
+      "scenario": "Failed sale journal replacement leaves edited sale and no journal",
+      "observed": {
+        "sale": {
+          "total_amount": 300
+        },
+        "journalRows": 0
+      }
+    }
+  ]
+}

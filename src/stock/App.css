@@ -27,6 +27,10 @@
   letter-spacing: 0;
 }
 
+.stock-shell.stock-sidebar-collapsed {
+  grid-template-columns: 76px minmax(0, 1fr);
+}
+
 .stock-sidebar {
   position: sticky;
   top: 0;
@@ -49,6 +53,14 @@
   font-size: 26px;
   line-height: 1.08;
   font-weight: 800;
+}
+
+.stock-company-name {
+  margin: 0;
+  color: var(--surface);
+  font-size: 20px;
+  font-weight: 900;
+  line-height: 1.15;
 }
 
 .stock-sidebar-note {
@@ -87,6 +99,27 @@
   text-align: left;
 }
 
+.stock-sidebar nav button {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stock-nav-icon {
+  display: none;
+  min-width: 34px;
+  border-radius: 6px;
+  padding: 4px 0;
+  color: var(--surface);
+  background: color-mix(in srgb, var(--surface) 14%, transparent);
+  font-size: 11px;
+  text-align: center;
+}
+
+.stock-sidebar-toggle {
+  margin-bottom: 8px;
+}
+
 .stock-sidebar button.active,
 .stock-sidebar button:hover {
   color: var(--surface);
@@ -100,6 +133,34 @@
 
 .stock-sidebar .logout-button:hover {
   background: var(--danger);
+}
+
+.stock-sidebar-collapsed .stock-sidebar {
+  gap: 18px;
+  padding: 22px 10px;
+}
+
+.stock-sidebar-collapsed .stock-sidebar > div {
+  display: none;
+}
+
+.stock-sidebar-collapsed .stock-sidebar nav button {
+  justify-content: center;
+  padding: 10px 8px;
+  text-align: center;
+}
+
+.stock-sidebar-collapsed .stock-nav-icon {
+  display: inline-block;
+}
+
+.stock-sidebar-collapsed .stock-nav-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .stock-main {
@@ -1423,8 +1484,34 @@
     grid-template-columns: 1fr;
   }
 
+  .stock-shell.stock-sidebar-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .stock-sidebar {
     min-height: auto;
+  }
+
+  .stock-sidebar-collapsed .stock-sidebar > div {
+    display: block;
+  }
+
+  .stock-sidebar-collapsed .stock-sidebar nav button {
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .stock-sidebar-collapsed .stock-nav-icon {
+    display: none;
+  }
+
+  .stock-sidebar-collapsed .stock-nav-label {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
   }
 
   .stock-form-grid,

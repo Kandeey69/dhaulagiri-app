@@ -1,0 +1,373 @@
+{
+  "generatedAt": "2026-08-10T21:00:35.042845+00:00",
+  "appDataDir": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite",
+  "files": {
+    "fy2082_accounts": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\accounts-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+      "exists": true,
+      "sha256": "d1a2416785aac567b92fad77da67b669919af2fb04d887d293d5cc6bb8d4c77a",
+      "length": 499712
+    },
+    "fy2082_purchase": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+      "exists": true,
+      "sha256": "ebbc853541cc98db3b48e5b0497e03fa32a60c79a43529ff85434ea3c7ed475d",
+      "length": 270336
+    },
+    "fy2082_stock": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\inventorytracked-stock-himalaya-fresh-fruit-traders-pvt-c5657790587582aa.db",
+      "exists": true,
+      "sha256": "4f6369022c178a08d97df93af3c923df2bffb3aab1a6e9e76d6494d11fa781d7",
+      "length": 176128
+    },
+    "fy2083_accounts": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\accounts-himalaya-fresh-fruit-traders-pvt-ltd-208-2.db",
+      "exists": true,
+      "sha256": "91824c34e24074cdf3ac957d8e6bebed35d410c2f22e2be9387b5ff583600091",
+      "length": 106496
+    },
+    "fy2083_purchase": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208-2.db",
+      "exists": true,
+      "sha256": "7972aa2226e9c28fe0adc01d047ea8fad3564ddd3729d9f09fd2e9f2a696c8f8",
+      "length": 155648
+    },
+    "fy2083_stock": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\inventorytracked-stock-himalaya-fresh-fruit-traders-pvt-defc9179629d84d5.db",
+      "exists": true,
+      "sha256": "07ae760f78a30feef5c0f91928d555bd0b478d75f74707018051c876b94d950b",
+      "length": 61440
+    }
+  },
+  "fy2082": {
+    "accounts": {
+      "counts": {
+        "parties": 10,
+        "sales": 180,
+        "collections": 120,
+        "credit_notes": 0,
+        "ledger_entries": 600,
+        "receipt_allocations": 240,
+        "activity_logs": 1,
+        "fiscal_years": 1
+      },
+      "salesRevenue": 1182600.0,
+      "salesInvoices": 180,
+      "collectionsAmount": 946080.0,
+      "collections": 120,
+      "customerBalances": [
+        {
+          "id": "CUST-001",
+          "name": "Everest Mart Pvt Ltd",
+          "balance": 44952.0
+        },
+        {
+          "id": "CUST-002",
+          "name": "Annapurna Grocery Center",
+          "balance": 38288.0
+        },
+        {
+          "id": "CUST-003",
+          "name": "Bagmati Fresh House",
+          "balance": 48240.0
+        },
+        {
+          "id": "CUST-004",
+          "name": "Chitwan Retail Traders",
+          "balance": 34208.0
+        },
+        {
+          "id": "CUST-005",
+          "name": "Gandaki Super Store",
+          "balance": 42160.0
+        },
+        {
+          "id": "CUST-006",
+          "name": "Janaki Food Suppliers",
+          "balance": 16224.0
+        },
+        {
+          "id": "CUST-007",
+          "name": "Koshi Department Store",
+          "balance": 24516.0
+        },
+        {
+          "id": "CUST-008",
+          "name": "Lumbini Mini Mart",
+          "balance": 18064.0
+        },
+        {
+          "id": "CUST-009",
+          "name": "Mechi Wholesale Center",
+          "balance": 22224.0
+        },
+        {
+          "id": "CUST-010",
+          "name": "Sagarmatha Grocers",
+          "balance": 17644.0
+        }
+      ],
+      "receivables": 306520.0
+    },
+    "purchase": {
+      "counts": {
+        "parties": 4,
+        "import_purchases": 12,
+        "local_expenses": 24,
+        "payments": 48,
+        "payment_allocations": 12,
+        "ledger_entries": 180,
+        "activity_logs": 1,
+        "fiscal_years": 1
+      },
+      "vendorBalances": [
+        {
+          "id": "AGENT-001",
+          "name": "Birgunj Customs & Logistics Services",
+          "category": "Custom Agent",
+          "openingPayable": 18000.0,
+          "balance": 21360.0
+        },
+        {
+          "id": "VEND-001",
+          "name": "North India Apple Exports Pvt Ltd",
+          "category": "Indian Suppliers",
+          "openingPayable": 30000.0,
+          "balance": 93360.0
+        },
+        {
+          "id": "VEND-002",
+          "name": "Terai Mango Supply House",
+          "category": "Local Suppliers",
+          "openingPayable": 25000.0,
+          "balance": 95200.0
+        },
+        {
+          "id": "VEND-003",
+          "name": "Narayani Citrus Suppliers",
+          "category": "Local Suppliers",
+          "openingPayable": 15000.0,
+          "balance": 42000.0
+        }
+      ],
+      "payables": 251920.0,
+      "purchasePayments": 498480.0,
+      "paymentCount": 48,
+      "supplierAmountNPR": 253440.0,
+      "agentPayableNPR": 20160.0,
+      "landedCostNPR": 273600.0,
+      "localExpenseNPR": 388800.0
+    },
+    "stock": {
+      "counts": {
+        "stock_items": 3,
+        "stock_purchase_bills": 36,
+        "stock_purchase_lines": 36,
+        "stock_sales_bills": 180,
+        "stock_sales_lines": 540
+      },
+      "items": [
+        {
+          "id": "ITEM-APPLE",
+          "code": "ITEM-APPLE",
+          "name": "Apple",
+          "openingQty": 800.0,
+          "openingRate": 180.0,
+          "closingQty": 440.0,
+          "averageRate": 186.42857142857142,
+          "closingValue": 82028.57142857142
+        },
+        {
+          "id": "ITEM-LEMON",
+          "code": "ITEM-LEMON",
+          "name": "Lemon",
+          "openingQty": 700.0,
+          "openingRate": 80.0,
+          "closingQty": 460.0,
+          "averageRate": 86.3157894736842,
+          "closingValue": 39705.26315789473
+        },
+        {
+          "id": "ITEM-MANGO",
+          "code": "ITEM-MANGO",
+          "name": "Mango",
+          "openingQty": 1000.0,
+          "openingRate": 120.0,
+          "closingQty": 460.0,
+          "averageRate": 126.83544303797468,
+          "closingValue": 58344.303797468354
+        }
+      ],
+      "stockQty": 1360.0,
+      "stockValue": 180078.1383839345
+    },
+    "bank": {
+      "opening": 600000,
+      "movement": 447600.0,
+      "closing": 1047600.0
+    }
+  },
+  "fy2083": {
+    "accounts": {
+      "counts": {
+        "parties": 10,
+        "sales": 0,
+        "collections": 0,
+        "credit_notes": 0,
+        "ledger_entries": 0,
+        "receipt_allocations": 0,
+        "activity_logs": 3,
+        "fiscal_years": 1
+      },
+      "salesRevenue": 0,
+      "salesInvoices": 0,
+      "collectionsAmount": 0,
+      "collections": 0,
+      "customerBalances": [
+        {
+          "id": "CUST-001",
+          "name": "Everest Mart Pvt Ltd",
+          "balance": 44952.0
+        },
+        {
+          "id": "CUST-002",
+          "name": "Annapurna Grocery Center",
+          "balance": 38288.0
+        },
+        {
+          "id": "CUST-003",
+          "name": "Bagmati Fresh House",
+          "balance": 48240.0
+        },
+        {
+          "id": "CUST-004",
+          "name": "Chitwan Retail Traders",
+          "balance": 34208.0
+        },
+        {
+          "id": "CUST-005",
+          "name": "Gandaki Super Store",
+          "balance": 42160.0
+        },
+        {
+          "id": "CUST-006",
+          "name": "Janaki Food Suppliers",
+          "balance": 16224.0
+        },
+        {
+          "id": "CUST-007",
+          "name": "Koshi Department Store",
+          "balance": 24516.0
+        },
+        {
+          "id": "CUST-008",
+          "name": "Lumbini Mini Mart",
+          "balance": 18064.0
+        },
+        {
+          "id": "CUST-009",
+          "name": "Mechi Wholesale Center",
+          "balance": 22224.0
+        },
+        {
+          "id": "CUST-010",
+          "name": "Sagarmatha Grocers",
+          "balance": 17644.0
+        }
+      ],
+      "receivables": 306520.0
+    },
+    "purchase": {
+      "counts": {
+        "parties": 4,
+        "import_purchases": 0,
+        "local_expenses": 0,
+        "payments": 0,
+        "payment_allocations": 0,
+        "ledger_entries": 0,
+        "activity_logs": 2,
+        "fiscal_years": 3
+      },
+      "vendorBalances": [
+        {
+          "id": "AGENT-001",
+          "name": "Birgunj Customs & Logistics Services",
+          "category": "Custom Agent",
+          "openingPayable": 21360.0,
+          "balance": 21360.0
+        },
+        {
+          "id": "VEND-001",
+          "name": "North India Apple Exports Pvt Ltd",
+          "category": "Indian Suppliers",
+          "openingPayable": 93360.0,
+          "balance": 93360.0
+        },
+        {
+          "id": "VEND-002",
+          "name": "Terai Mango Supply House",
+          "category": "Local Suppliers",
+          "openingPayable": 95200.0,
+          "balance": 95200.0
+        },
+        {
+          "id": "VEND-003",
+          "name": "Narayani Citrus Suppliers",
+          "category": "Local Suppliers",
+          "openingPayable": 42000.0,
+          "balance": 42000.0
+        }
+      ],
+      "payables": 251920.0,
+      "purchasePayments": 0,
+      "paymentCount": 0,
+      "supplierAmountNPR": 0,
+      "agentPayableNPR": 0,
+      "landedCostNPR": 0,
+      "localExpenseNPR": 0
+    },
+    "stock": {
+      "counts": {
+        "stock_items": 3,
+        "stock_purchase_bills": 0,
+        "stock_purchase_lines": 0,
+        "stock_sales_bills": 0,
+        "stock_sales_lines": 0
+      },
+      "items": [
+        {
+          "id": "ITEM-APPLE",
+          "code": "ITEM-APPLE",
+          "name": "Apple",
+          "openingQty": 440.0,
+          "openingRate": 186.42857142857142,
+          "closingQty": 440.0,
+          "averageRate": 186.42857142857142,
+          "closingValue": 82028.57142857142
+        },
+        {
+          "id": "ITEM-LEMON",
+          "code": "ITEM-LEMON",
+          "name": "Lemon",
+          "openingQty": 460.0,
+          "openingRate": 86.3157894736842,
+          "closingQty": 460.0,
+          "averageRate": 86.3157894736842,
+          "closingValue": 39705.26315789473
+        },
+        {
+          "id": "ITEM-MANGO",
+          "code": "ITEM-MANGO",
+          "name": "Mango",
+          "openingQty": 460.0,
+          "openingRate": 126.83544303797468,
+          "closingQty": 460.0,
+          "averageRate": 126.83544303797468,
+          "closingValue": 58344.303797468354
+        }
+      ],
+      "stockQty": 1360.0,
+      "stockValue": 180078.1383839345
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "generatedAt": "2026-08-10T19:47:28.708735+00:00",
+  "files": {
+    "accounts": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\accounts-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+      "length": 499712,
+      "sha256": "d1a2416785aac567b92fad77da67b669919af2fb04d887d293d5cc6bb8d4c77a"
+    },
+    "purchase": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+      "length": 270336,
+      "sha256": "ebbc853541cc98db3b48e5b0497e03fa32a60c79a43529ff85434ea3c7ed475d"
+    },
+    "stock_legacy_encoded": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\inventorytracked-stock-0068-0069-006d-0061-006c-0061-0079-0061-002d-0066-0072-0065-0073-0068-002d-0066-0072-0075-0069-0074-002d-0074-0072-0061-0064-0065-0072-0073-002d-0070-0076-0074-002d-006c-0074-0064-002d-0032-0030-0038.db",
+      "length": 159744,
+      "sha256": "3f4466c9e5aed962c8f47982f38825b7b8d01ab9eece1819e056e118248cc3f3"
+    },
+    "profiles_seed": {
+      "path": "C:\\Users\\Kandeey\\AppData\\Roaming\\com.easysolution.businesssuite\\company-profiles.seed.json",
+      "length": 992,
+      "sha256": "97fa84dee462ed18e4e5e09d600bad6ec57a22be007ef63bbe6879bd147e733c"
+    }
+  },
+  "accounts": {
+    "salesInvoices": 180,
+    "salesRevenue": 1182600.0,
+    "collections": 120,
+    "collectionAmount": 946080.0,
+    "receivables": 306520.0
+  },
+  "purchase": {
+    "imports": 12,
+    "local": 24,
+    "purchases": 36,
+    "payments": 48,
+    "paymentAmount": 498480.0,
+    "payables": 251920.0
+  },
+  "stock": {
+    "items": [
+      {
+        "name": "Apple",
+        "closingQty": 440.0,
+        "averageRate": 186.42857142857142,
+        "closingValue": 82028.57142857142
+      },
+      {
+        "name": "Lemon",
+        "closingQty": 460.0,
+        "averageRate": 86.3157894736842,
+        "closingValue": 39705.26315789473
+      },
+      {
+        "name": "Mango",
+        "closingQty": 460.0,
+        "averageRate": 126.83544303797468,
+        "closingValue": 58344.303797468354
+      }
+    ],
+    "totalQty": 1360.0,
+    "totalValue": 180078.1383839345
+  }
+}

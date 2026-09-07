@@ -70,15 +70,16 @@ export function calculatePaymentNpr(currency: Currency, amount: number, exchange
 }
 
 export function hasAgentValues(purchase: Partial<ImportPurchase>) {
+  const freightAffectsAgent = freightCreatesCustomAgentPayable(
+    purchase.freightIndiaStatus ?? 'Paid by custom agent',
+  )
   const fields = [
     purchase.importDutyNPR,
     purchase.customServiceNPR,
     purchase.importVatNPR,
     purchase.terminalChargeWithoutVatNPR,
     purchase.terminalVatNPR,
-    purchase.freightIndiaAmountIC,
-    money(Number(purchase.totalKg ?? 0) * Number(purchase.loadingUnloadingChargePerKg ?? 0)),
-    purchase.loadingUnloadingChargeNPR,
+    freightAffectsAgent ? purchase.freightIndiaAmountIC : 0,
     purchase.otherChargesNPR,
     purchase.agentServiceAmountBeforeVatNPR,
     purchase.agentServiceVatNPR,

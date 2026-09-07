@@ -123,10 +123,17 @@ export default function StockApp({
   const [itemHasOpeningFigure, setItemHasOpeningFigure] = useState(false);
   const [openingFile, setOpeningFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("easysolution:stock-sidebar-collapsed") === "yes",
+  );
 
   useEffect(() => {
     scrollToPageTop();
   }, [view]);
+
+  useEffect(() => {
+    localStorage.setItem("easysolution:stock-sidebar-collapsed", sidebarCollapsed ? "yes" : "no");
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     const nextDoc = sourceDocFromTarget(initialTarget);
@@ -327,10 +334,13 @@ export default function StockApp({
   const showInitialLoading = isLoading && !hasLoaded;
 
   return (
-    <div className="stock-shell">
+    <div className={sidebarCollapsed ? "stock-shell stock-sidebar-collapsed" : "stock-shell"}>
       <Sidebar
+        collapsed={sidebarCollapsed}
+        companyName={companyInfo.companyName}
         onBackToModules={onBackToModules}
         onLogout={onLogout}
+        onToggleCollapsed={() => setSidebarCollapsed((current) => !current)}
         onViewChange={navigateToView}
         userRole={initialUserRole}
         view={view}
@@ -339,7 +349,7 @@ export default function StockApp({
       <main className="stock-main">
         <header className="stock-header">
           <div>
-            <p className="eyebrow">Inventorytracked APK</p>
+            <p className="eyebrow">Inventory Tracked APK</p>
             <h2>{view}</h2>
             <p>
               Inventory lines are entered here after sales and purchase bills are saved in their normal modules.
@@ -347,8 +357,6 @@ export default function StockApp({
             </p>
           </div>
           <div className="stock-header-actions">
-            {onBackToModules && <button type="button" className="ghost" onClick={onBackToModules}>Switch Module</button>}
-            <button type="button" className="ghost" onClick={onLogout}>Logout</button>
             <button type="button" onClick={refreshStockNow}>Refresh Stock</button>
           </div>
         </header>

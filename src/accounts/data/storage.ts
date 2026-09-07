@@ -33,6 +33,9 @@ import {
   postSale,
   type LedgerEntry,
 } from "../../domain/ledger";
+import {
+  removableDeletedCarryForwardPartyIds,
+} from "../../application/carryForwardPartySync";
 
 export type AccountsBackupData = {
   activityLogs: ActivityLog[];
@@ -41,6 +44,16 @@ export type AccountsBackupData = {
   parties: Party[];
   receiptAllocations?: ReceiptAllocation[];
   sales: Sale[];
+};
+
+export type CarryForwardPartySyncResult = {
+  removed: number;
+  skippedRemoval: number;
+  upserted: number;
+};
+
+type CarryForwardPartySyncOptions = {
+  deletedSourcePartyIds?: Iterable<string>;
 };
 
 let dbPromise: Promise<Database> | null = null;
@@ -917,7 +930,10 @@ async function writeCollectionTransactionWithTauri(input: {
     mode: input.mode,
     collectionId: input.collectionId,
     collection: input.collection ?? null,
-    allocations: input.allocations ?? [],
+    allocations: (input.allocations ?? []).map((allocation) => ({
+      ...allocation,
+      amountNpr: allocation.amountNPR,
+    })),
     ledgerEntries: (input.ledgerEntries ?? []).map((entry) => ({
       ...entry,
       partyId: entry.partyId ?? "",
@@ -1358,10 +1374,15 @@ export async function updateParty(input: Omit<Party, "createdAt">): Promise<Part
   };
 }
 
-export async function upsertPartiesForCarryForward(parties: Party[]): Promise<void> {
+export async function upsertPartiesForCarryForward(
+  parties: Party[],
+  options: CarryForwardPartySyncOptions = {},
+): Promise<CarryForwardPartySyncResult> {
   assertActiveCompanyWritable();
   const db = await getDb();
   const now = new Date().toISOString();
+  const sourcePartyIds = new Set(parties.map((party) => party.id).filter(Boolean));
+  let upserted = 0;
 
   for (const party of parties) {
     const name = party.name.trim();
@@ -1402,12 +1423,93 @@ export async function upsertPartiesForCarryForward(parties: Party[]): Promise<vo
         party.createdAt || now,
       ]
     );
+    upserted += 1;
   }
+
+  const deletionCandidates = await targetPartyDeletionCandidates(db, sourcePartyIds, options.deletedSourcePartyIds ?? []);
+  const removableIds = removableDeletedCarryForwardPartyIds({
+    deletedSourcePartyIds: options.deletedSourcePartyIds ?? [],
+    referencedTargetPartyIds: deletionCandidates.referencedPartyIds,
+    sourcePartyIds,
+    targetParties: deletionCandidates.targetParties,
+  });
+
+  for (const partyId of removableIds) {
+    await db.execute(
+      `
+      DELETE FROM parties
+      WHERE id = $1
+      `,
+      [partyId],
+    );
+  }
+
+  const skippedRemoval = deletionCandidates.candidateCount - removableIds.length;
+  const removalDetail = removableIds.length
+    ? ` Removed ${removableIds.length} deleted source part${removableIds.length === 1 ? "y" : "ies"}.`
+    : "";
+  const skippedDetail = skippedRemoval
+    ? ` Kept ${skippedRemoval} deleted source part${skippedRemoval === 1 ? "y" : "ies"} with target-year activity.`
+    : "";
 
   await logActivity(
     "Opening Balances Refreshed",
-    `Carried forward opening balances for ${parties.length} parties.`
+    `Carried forward opening balances for ${upserted} parties.${removalDetail}${skippedDetail}`
   );
+
+  return {
+    removed: removableIds.length,
+    skippedRemoval,
+    upserted,
+  };
+}
+
+async function targetPartyDeletionCandidates(
+  db: Database,
+  sourcePartyIds: Set<string>,
+  deletedSourcePartyIds: Iterable<string>,
+) {
+  const deletedIds = new Set(deletedSourcePartyIds);
+  const targetParties = (await db.select<PartyRow[]>(
+    `
+    SELECT *
+    FROM parties
+    `,
+  )).map(mapParty);
+  const candidateIds = targetParties
+    .map((party) => party.id)
+    .filter((partyId) => partyId && deletedIds.has(partyId) && !sourcePartyIds.has(partyId));
+  const referencedPartyIds = new Set<string>();
+
+  for (const partyId of candidateIds) {
+    const references = await db.select<
+      { salesCount: number; collectionsCount: number; creditNotesCount: number; ledgerCount: number }[]
+    >(
+      `
+      SELECT
+        (SELECT COUNT(*) FROM sales WHERE party_id = $1) AS salesCount,
+        (SELECT COUNT(*) FROM collections WHERE party_id = $1) AS collectionsCount,
+        (SELECT COUNT(*) FROM credit_notes WHERE party_id = $1) AS creditNotesCount,
+        (SELECT COUNT(*) FROM ledger_entries WHERE party_id = $1) AS ledgerCount
+      `,
+      [partyId],
+    );
+    const referenceCount =
+      Number(references[0]?.salesCount || 0) +
+      Number(references[0]?.collectionsCount || 0) +
+      Number(references[0]?.creditNotesCount || 0) +
+      Number(references[0]?.ledgerCount || 0);
+
+    if (referenceCount > 0) {
+      referencedPartyIds.add(partyId);
+    }
+  }
+
+  return {
+    candidateCount: candidateIds.length,
+    referencedPartyIds,
+    targetParties,
+  };
 }
 
 function normalizeDateDisplay(value: string) {

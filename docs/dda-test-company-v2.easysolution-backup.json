@@ -1,0 +1,12 @@
+{
+  "kind": "easysolution-company-backup",
+  "version": 2,
+  "exportedAt": "2026-08-10T17:59:58Z",
+  "company": {
+    "id": "dda-test-easysolution-2082-83",
+    "name": "DDA_TEST_EASYSOLUTION",
+    "fiscalYear": "2082/83",
+    "isLocked": true
+  },
+  "note": "Synthetic DDA V2 fixture. Counts and reconciliation are in docs/dda-automated-results.json."
+}

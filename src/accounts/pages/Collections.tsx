@@ -345,11 +345,6 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
               />
             </label>
 
-            <label>
-              Amount NPR
-              <input readOnly value={formatMoney(numericAmount)} />
-            </label>
-
             <label className="full-width-field">
               Remarks
               <input value={remarks} onChange={(event) => setRemarks(event.target.value)} />

@@ -1,0 +1,436 @@
+{
+  "generatedAt": "2026-08-10T18:44:14Z",
+  "company": {
+    "name": "Himalaya Fresh Fruit Traders Pvt. Ltd.",
+    "shortName": "HFFT-DDA",
+    "id": "himalaya-fresh-fruit-traders-pvt-ltd-208",
+    "nextYearId": "himalaya-fresh-fruit-traders-pvt-ltd-208-2",
+    "fiscalYear": "2082/83"
+  },
+  "removedDummyFiles": [],
+  "counts": {
+    "salesInvoices": 180,
+    "purchaseTransactions": 36,
+    "customerCollections": 120,
+    "payments": 48
+  },
+  "controls": {
+    "salesRevenue": 1182600.0,
+    "customerCollections": 946080.0,
+    "closingReceivables": 306520.0,
+    "stockAcquisitionValue": 662400,
+    "vendorAgentPayments": 498480.0,
+    "closingPayables": 251920.0,
+    "closingBank": 1047600.0,
+    "closingCash": 100000,
+    "inventoryQty": 1360.0,
+    "inventoryValue": 180078.1383839345
+  },
+  "customers": [
+    {
+      "code": "CUST-001",
+      "name": "Everest Mart Pvt Ltd",
+      "opening": 12000,
+      "sales": 164760.0,
+      "collections": 131808.0,
+      "closing": 44952.0
+    },
+    {
+      "code": "CUST-002",
+      "name": "Annapurna Grocery Center",
+      "opening": 8000,
+      "sales": 151440.0,
+      "collections": 121152.0,
+      "closing": 38288.0
+    },
+    {
+      "code": "CUST-003",
+      "name": "Bagmati Fresh House",
+      "opening": 15000,
+      "sales": 166200.0,
+      "collections": 132960.0,
+      "closing": 48240.0
+    },
+    {
+      "code": "CUST-004",
+      "name": "Chitwan Retail Traders",
+      "opening": 5000,
+      "sales": 146040.0,
+      "collections": 116832.0,
+      "closing": 34208.0
+    },
+    {
+      "code": "CUST-005",
+      "name": "Gandaki Super Store",
+      "opening": 10000,
+      "sales": 160800.0,
+      "collections": 128640.0,
+      "closing": 42160.0
+    },
+    {
+      "code": "CUST-006",
+      "name": "Janaki Food Suppliers",
+      "opening": 0,
+      "sales": 81120.0,
+      "collections": 64896.0,
+      "closing": 16224.0
+    },
+    {
+      "code": "CUST-007",
+      "name": "Koshi Department Store",
+      "opening": 7500,
+      "sales": 85080.0,
+      "collections": 68064.0,
+      "closing": 24516.0
+    },
+    {
+      "code": "CUST-008",
+      "name": "Lumbini Mini Mart",
+      "opening": 4000,
+      "sales": 70320.0,
+      "collections": 56256.0,
+      "closing": 18064.0
+    },
+    {
+      "code": "CUST-009",
+      "name": "Mechi Wholesale Center",
+      "opening": 6000,
+      "sales": 81120.0,
+      "collections": 64896.0,
+      "closing": 22224.0
+    },
+    {
+      "code": "CUST-010",
+      "name": "Sagarmatha Grocers",
+      "opening": 2500,
+      "sales": 75720.0,
+      "collections": 60576.0,
+      "closing": 17644.0
+    }
+  ],
+  "vendors": [
+    {
+      "code": "VEND-001",
+      "name": "North India Apple Exports Pvt Ltd",
+      "opening": 30000,
+      "additions": 253440.0,
+      "payments": 190080.0,
+      "closing": 93360.0
+    },
+    {
+      "code": "VEND-002",
+      "name": "Terai Mango Supply House",
+      "opening": 25000,
+      "additions": 280800.0,
+      "payments": 210600.0,
+      "closing": 95200.0
+    },
+    {
+      "code": "VEND-003",
+      "name": "Narayani Citrus Suppliers",
+      "opening": 15000,
+      "additions": 108000.0,
+      "payments": 81000.0,
+      "closing": 42000.0
+    },
+    {
+      "code": "AGENT-001",
+      "name": "Birgunj Customs & Logistics Services",
+      "opening": 18000,
+      "additions": 20160.0,
+      "payments": 16800.0,
+      "closing": 21360.0
+    }
+  ],
+  "stock": [
+    {
+      "code": "ITEM-APPLE",
+      "name": "Apple",
+      "unit": "KG",
+      "openingQty": 800.0,
+      "purchasedQty": 1440.0,
+      "soldQty": 1800.0,
+      "closingQty": 440.0,
+      "averageRate": 186.42857142857142,
+      "closingValue": 82028.57142857142
+    },
+    {
+      "code": "ITEM-LEMON",
+      "name": "Lemon",
+      "unit": "KG",
+      "openingQty": 700.0,
+      "purchasedQty": 1200.0,
+      "soldQty": 1440.0,
+      "closingQty": 460.0,
+      "averageRate": 86.3157894736842,
+      "closingValue": 39705.26315789473
+    },
+    {
+      "code": "ITEM-MANGO",
+      "name": "Mango",
+      "unit": "KG",
+      "openingQty": 1000.0,
+      "purchasedQty": 2160.0,
+      "soldQty": 2700.0,
+      "closingQty": 460.0,
+      "averageRate": 126.83544303797468,
+      "closingValue": 58344.303797468354
+    }
+  ],
+  "monthly": [
+    {
+      "month": 1,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 2,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 3,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 4,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 5,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 6,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 7,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 8,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 9,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 10,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 11,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    },
+    {
+      "month": 12,
+      "salesCount": 15,
+      "salesRevenue": 98550,
+      "collections": 78840,
+      "applePurchaseQty": 120,
+      "mangoPurchaseQty": 180,
+      "lemonPurchaseQty": 100,
+      "appleSalesQty": 150,
+      "mangoSalesQty": 225,
+      "lemonSalesQty": 120,
+      "purchaseCount": 3,
+      "bankNetMovement": 37300
+    }
+  ],
+  "integrityChecks": [
+    {
+      "database": "accounts-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+      "check": "orphan receipt allocations",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "accounts-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+      "check": "unbalanced account ledger batches",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+      "check": "orphan payment allocations",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208.db",
+      "check": "unbalanced purchase ledger batches",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "inventorytracked-stock-0068-0069-006d-0061-006c-0061-0079-0061-002d-0066-0072-0065-0073-0068-002d-0066-0072-0075-0069-0074-002d-0074-0072-0061-0064-0065-0072-0073-002d-0070-0076-0074-002d-006c-0074-0064-002d-0032-0030-0038.db",
+      "check": "orphan stock purchase lines",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "inventorytracked-stock-0068-0069-006d-0061-006c-0061-0079-0061-002d-0066-0072-0065-0073-0068-002d-0066-0072-0075-0069-0074-002d-0074-0072-0061-0064-0065-0072-0073-002d-0070-0076-0074-002d-006c-0074-0064-002d-0032-0030-0038.db",
+      "check": "orphan stock sales lines",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "inventorytracked-stock-0068-0069-006d-0061-006c-0061-0079-0061-002d-0066-0072-0065-0073-0068-002d-0066-0072-0075-0069-0074-002d-0074-0072-0061-0064-0065-0072-0073-002d-0070-0076-0074-002d-006c-0074-0064-002d-0032-0030-0038.db",
+      "check": "duplicate stock item codes",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "accounts-himalaya-fresh-fruit-traders-pvt-ltd-208-2.db",
+      "check": "orphan receipt allocations",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "accounts-himalaya-fresh-fruit-traders-pvt-ltd-208-2.db",
+      "check": "unbalanced account ledger batches",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208-2.db",
+      "check": "orphan payment allocations",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "import-purchases-himalaya-fresh-fruit-traders-pvt-ltd-208-2.db",
+      "check": "unbalanced purchase ledger batches",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "inventorytracked-stock-0068-0069-006d-0061-006c-0061-0079-0061-002d-0066-0072-0065-0073-0068-002d-0066-0072-0075-0069-0074-002d-0074-0072-0061-0064-0065-0072-0073-002d-0070-0076-0074-002d-006c-0074-0064-002d-0032-0030-0038-002d-0032.db",
+      "check": "orphan stock purchase lines",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "inventorytracked-stock-0068-0069-006d-0061-006c-0061-0079-0061-002d-0066-0072-0065-0073-0068-002d-0066-0072-0075-0069-0074-002d-0074-0072-0061-0064-0065-0072-0073-002d-0070-0076-0074-002d-006c-0074-0064-002d-0032-0030-0038-002d-0032.db",
+      "check": "orphan stock sales lines",
+      "badRows": 0,
+      "result": "PASS"
+    },
+    {
+      "database": "inventorytracked-stock-0068-0069-006d-0061-006c-0061-0079-0061-002d-0066-0072-0065-0073-0068-002d-0066-0072-0075-0069-0074-002d-0074-0072-0061-0064-0065-0072-0073-002d-0070-0076-0074-002d-006c-0074-0064-002d-0032-0030-0038-002d-0032.db",
+      "check": "duplicate stock item codes",
+      "badRows": 0,
+      "result": "PASS"
+    }
+  ]
+}

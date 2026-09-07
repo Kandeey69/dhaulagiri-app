@@ -16,6 +16,7 @@ import {
   assertCompanyWritable,
   getActiveAccountsDatabaseUrl,
   getActiveCompanyId,
+  getCompanyProfiles,
   getLegacyStockDatabaseFilenameForCompanyId,
   getStockDatabaseFilenameForCompanyId,
   getActiveStockDatabaseUrl,
@@ -25,6 +26,7 @@ import {
   resolveActiveCompanyId,
   setActiveCompanyId,
   stockDatabaseSafeCompanyId,
+  upsertCompanyProfile,
 } from '../src/companyContext.ts'
 import {
   createSequentialAllocations,
@@ -72,6 +74,10 @@ import {
   validatePaymentAllocationDraft,
 } from '../src/application/paymentAllocationUi.ts'
 import { createDraftKey, createDraftSnapshot, shouldRestoreDraft } from '../src/application/draftAutosave.ts'
+import {
+  deletedPartyIdsFromCarryForwardSourceLogs,
+  removableDeletedCarryForwardPartyIds,
+} from '../src/application/carryForwardPartySync.ts'
 import { purchaseClosingParties } from '../src/application/purchaseCarryForward.ts'
 import { filterByFiscalYear, reportMovementTotals, textMatchesSearch } from '../src/application/reportFilters.ts'
 import { validatePurchaseFormForUi } from '../src/application/purchaseFormValidation.ts'
@@ -408,7 +414,10 @@ test('balances import purchase posting with nonzero per-KG loading and unloading
   assert.equal(breakdown.loadingUnloadingNPR, 300)
   assert.equal(totals.landedCostNPR, 21800)
   assert.equal(totals.totalAgentPayableNPR, 1500)
-  assert.equal(hasAgentValues({ totalKg: 100, loadingUnloadingChargePerKg: 3 } as ImportPurchase), true)
+  assert.equal(hasAgentValues({ totalKg: 100, loadingUnloadingChargePerKg: 3 } as ImportPurchase), false)
+  assert.equal(hasAgentValues({ freightIndiaStatus: 'To be paid by us', freightIndiaAmountIC: 1000 } as ImportPurchase), false)
+  assert.equal(hasAgentValues({ freightIndiaStatus: 'Paid by custom agent', freightIndiaAmountIC: 1000 } as ImportPurchase), true)
+  assert.equal(hasAgentValues({ customServiceNPR: 1 } as ImportPurchase), true)
 
   const entries = postPurchase({
     id: 'HFFT-LU-NONZERO',
@@ -954,6 +963,31 @@ test('persists import loading and landed-cost fields through the Rust purchase c
   assert.match(source, /\.bind\(json_number\(payload, "landedCostNPR"\)\)/)
 })
 
+test('native collection payload keeps receipt allocation amount casing compatible', () => {
+  const frontend = readFileSync('src/accounts/data/storage.ts', 'utf8')
+  const backend = readFileSync('src-tauri/src/lib.rs', 'utf8')
+
+  assert.match(frontend, /amountNpr: allocation\.amountNPR/)
+  assert.match(backend, /#\[serde\(alias = "amountNPR", alias = "amount_npr"\)\]/)
+})
+
+test('native import purchase update preserves existing payment allocations', () => {
+  const source = readFileSync('src-tauri/src/lib.rs', 'utf8')
+  const start = source.indexOf('async fn write_import_purchase_transaction')
+  const end = source.indexOf('async fn write_local_purchase_transaction', start)
+  const body = source.slice(start, end)
+  const deleteBranch = body.indexOf('if normalized_mode == "delete"')
+  const allocationDelete = body.indexOf('DELETE FROM payment_allocations WHERE purchaseId = ?')
+
+  assert.notEqual(deleteBranch, -1)
+  assert.notEqual(allocationDelete, -1)
+  assert.ok(allocationDelete > deleteBranch)
+  assert.doesNotMatch(
+    body.slice(0, deleteBranch),
+    /DELETE FROM payment_allocations WHERE purchaseId = \?/,
+  )
+})
+
 test('rebuilds import purchase ledger entries when an existing purchase is updated', () => {
   const source = readFileSync('src/purchase/App.tsx', 'utf8')
 
@@ -1003,6 +1037,40 @@ test('carries forward customs agent payable from total agent payable without dou
   })
 
   assert.equal(carried.find((party) => party.id === 'AGENT-001')?.openingPayable, 18280)
+})
+
+test('removes only source-deleted carry-forward parties without target-year references', () => {
+  const deletedIds = deletedPartyIdsFromCarryForwardSourceLogs([
+    {
+      action: 'Party Deleted',
+      detail: 'Deleted party stale-customer.',
+    },
+    {
+      action: 'Hard deleted party',
+      details: 'KANCHAN with 0 import purchase(s), 0 local expense(s), 0 payment(s)',
+      oldValue: JSON.stringify({ party: { id: 'stale-supplier', name: 'KANCHAN' } }),
+    },
+    {
+      action: 'Party Created',
+      detail: 'Created party keep-me.',
+    },
+  ])
+
+  assert.deepEqual([...deletedIds].sort(), ['stale-customer', 'stale-supplier'])
+  assert.deepEqual(
+    removableDeletedCarryForwardPartyIds({
+      deletedSourcePartyIds: deletedIds,
+      referencedTargetPartyIds: new Set(['stale-supplier']),
+      sourcePartyIds: new Set(['active-source-party']),
+      targetParties: [
+        { id: 'stale-customer' },
+        { id: 'stale-supplier' },
+        { id: 'target-year-only' },
+        { id: 'active-source-party' },
+      ],
+    }),
+    ['stale-customer'],
+  )
 })
 
 test('builds payment allocation rows, auto allocates oldest, and rejects over-allocation', () => {
@@ -1209,6 +1277,56 @@ test('merges seed company profiles without replacing persisted user profiles', (
   assert.equal(merged.find((profile) => profile.id === 'hfft-2082-83')?.name, 'User Edited HFFT')
   assert.equal(merged.find((profile) => profile.id === 'hfft-2082-83')?.isLocked, false)
   assert.equal(merged.find((profile) => profile.id === 'hfft-2083-84')?.previousCompanyId, 'hfft-2082-83')
+})
+
+test('recovers corrupted company profile names and fiscal years from year-specific ids', () => {
+  const profiles = parseCompanyProfiles(JSON.stringify([
+    {
+      companyGroupId: 'dhaulagiri-micro-mineral-pvt-ltd-2082-83',
+      fiscalYear: '2082/83',
+      id: 'dhaulagiri-micro-mineral-pvt-ltd-2083-84',
+      isLocked: false,
+      name: '',
+      previousCompanyId: 'dhaulagiri-micro-mineral-pvt-ltd-2082-83',
+    },
+  ]))
+
+  assert.equal(profiles.length, 1)
+  assert.equal(profiles[0].id, 'dhaulagiri-micro-mineral-pvt-ltd-2083-84')
+  assert.equal(profiles[0].name, 'Dhaulagiri Micro Mineral Pvt Ltd')
+  assert.equal(profiles[0].fiscalYear, '2083/84')
+})
+
+test('company profile upsert preserves existing identity when settings are blank or stale', () => {
+  installLocalStorage({
+    'suite-company-profiles': JSON.stringify([
+      {
+        companyGroupId: 'dhaulagiri-micro-mineral-pvt-ltd-2082-83',
+        createdAt: '2026-08-18T00:00:00.000Z',
+        fiscalYear: '2083/84',
+        id: 'dhaulagiri-micro-mineral-pvt-ltd-2083-84',
+        isLocked: false,
+        lastCarryForwardAt: '',
+        lockedAt: '',
+        name: 'Dhaulagiri Micro Mineral Pvt Ltd',
+        nextCompanyId: '',
+        previousCompanyId: 'dhaulagiri-micro-mineral-pvt-ltd-2082-83',
+        updatedAt: '2026-08-18T00:00:00.000Z',
+      },
+    ]),
+  })
+
+  const saved = upsertCompanyProfile({
+    fiscalYear: '2082/83',
+    id: 'dhaulagiri-micro-mineral-pvt-ltd-2083-84',
+    name: '',
+  })
+  const profiles = getCompanyProfiles()
+
+  assert.equal(saved.name, 'Dhaulagiri Micro Mineral Pvt Ltd')
+  assert.equal(saved.fiscalYear, '2083/84')
+  assert.equal(profiles[0].name, 'Dhaulagiri Micro Mineral Pvt Ltd')
+  assert.equal(profiles[0].fiscalYear, '2083/84')
 })
 
 test('resolves active company safely for empty, seeded, stale, duplicate, and restart states', () => {

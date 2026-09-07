@@ -32,6 +32,7 @@ struct ReceiptAllocationPayload {
     id: String,
     receipt_id: String,
     sale_id: String,
+    #[serde(alias = "amountNPR", alias = "amount_npr")]
     amount_npr: f64,
     created_at: String,
     updated_at: String,
@@ -553,11 +554,6 @@ async fn write_import_purchase_transaction(
         .await
         .map_err(|error| error.to_string())?;
 
-    sqlx::query("DELETE FROM payment_allocations WHERE purchaseId = ?")
-        .bind(&normalized_purchase_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
     sqlx::query("DELETE FROM ledger_entries WHERE sourceType = 'PURCHASE' AND sourceId = ?")
         .bind(&normalized_purchase_id)
         .execute(&mut *tx)
@@ -565,6 +561,11 @@ async fn write_import_purchase_transaction(
         .map_err(|error| error.to_string())?;
 
     let purchase_rows = if normalized_mode == "delete" {
+        sqlx::query("DELETE FROM payment_allocations WHERE purchaseId = ?")
+            .bind(&normalized_purchase_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
         sqlx::query("DELETE FROM import_purchases WHERE id = ?")
             .bind(&normalized_purchase_id)
             .execute(&mut *tx)
