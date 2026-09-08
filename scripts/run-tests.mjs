@@ -21,6 +21,11 @@ const files = [
   'src/accounts/data/storage.ts',
   'src/accounts/utils/settings.ts',
   'src/application/carryForwardPartySync.ts',
+  'src/application/persistence.ts',
+  'src/application/atomicSql.ts',
+  'src/application/backupValidation.ts',
+  'src/application/openingReconciliation.ts',
+  'src/application/recovery.ts',
   'src/application/draftAutosave.ts',
   'src/application/paymentAllocationUi.ts',
   'src/application/purchaseCarryForward.ts',
@@ -39,6 +44,7 @@ const files = [
   'src/stock/services/stockTransactions.ts',
   'src/stock/storage.ts',
   'tests/domain.test.ts',
+  'tests/workflows.test.ts',
 ]
 
 const rewriteImports = (source) =>
@@ -60,7 +66,7 @@ await writeFile(
 )
 await writeFile(
   path.join(sqlStubRoot, 'index.js'),
-  "export default { load() { throw new Error('Tauri SQL plugin is unavailable in domain tests.'); } };\n",
+  "export default { load(url) { if (globalThis.__auditDatabaseLoader) return globalThis.__auditDatabaseLoader(url); throw new Error('Tauri SQL plugin is unavailable in domain tests.'); } };\n",
   'utf8',
 )
 
@@ -82,7 +88,7 @@ for (const file of files) {
 }
 
 const testFile = path.join(outRoot, 'tests/domain.test.mjs')
-const result = spawnSync(process.execPath, ['--test', testFile], {
+const result = spawnSync(process.execPath, ['--test', testFile, path.join(outRoot, 'tests/workflows.test.mjs')], {
   cwd: root,
   stdio: 'inherit',
 })

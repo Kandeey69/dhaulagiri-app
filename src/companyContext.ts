@@ -1,3 +1,5 @@
+import { assertRecoveryAvailable } from "./application/recovery";
+import { assertReopenDependencies } from "./application/openingReconciliation";
 export type CompanyProfile = {
   companyGroupId: string
   createdAt: string
@@ -182,8 +184,10 @@ export function getCompanyProfile(companyId: string) {
 }
 
 export function assertCompanyWritable(companyId: string) {
+  assertRecoveryAvailable();
   const profile = getCompanyProfile(companyId)
 
+  assertReopenDependencies(companyId, getCompanyProfiles());
   if (profile?.isLocked) {
     throw new Error(
       `${profile.name}${profile.fiscalYear ? ` FY ${profile.fiscalYear}` : ''} is closed. Entries cannot be added, edited, or deleted in a closed fiscal year.`,
@@ -277,20 +281,20 @@ export function companyStorageKey(key: string, companyId = getActiveCompanyId())
   return companyId && companyId !== 'default' ? `${key}:${companyId}` : key
 }
 
-export function getCompanySetting(key: string, fallback = '') {
+export function getCompanySetting(key: string, fallback = '', companyId = getActiveCompanyId()) {
   if (!isBrowser()) {
     return fallback
   }
 
-  return localStorage.getItem(companyStorageKey(key)) ?? fallback
+  return localStorage.getItem(companyStorageKey(key, companyId)) ?? fallback
 }
 
-export function setCompanySetting(key: string, value: string) {
+export function setCompanySetting(key: string, value: string, companyId = getActiveCompanyId()) {
   if (!isBrowser()) {
     return
   }
 
-  localStorage.setItem(companyStorageKey(key), value)
+  localStorage.setItem(companyStorageKey(key, companyId), value)
 }
 
 export function copyCompanySettings(sourceCompanyId: string, targetCompanyId: string, keys: string[]) {
@@ -305,6 +309,21 @@ export function copyCompanySettings(sourceCompanyId: string, targetCompanyId: st
       localStorage.setItem(companyStorageKey(key, targetCompanyId), value)
     }
   })
+}
+/** Seed data is a one-time bootstrap; persisted profiles and settings remain authoritative. */
+export function applyCompanySeed(seedText: string, initializeSettings: (profile: CompanyProfile, raw: Record<string, unknown>) => void) {
+  if (localStorage.getItem('suite-seed-import-v1')) return getCompanyProfiles();
+  const raw: unknown = JSON.parse(seedText || '[]');
+  if (!Array.isArray(raw)) throw new Error('Company seed must be an array.');
+  const persisted = getCompanyProfiles();
+  const seeds = parseCompanyProfiles(seedText);
+  for (const profile of seeds) if (!persisted.some(row => row.id === profile.id)) {
+    initializeSettings(profile, raw.find(row => row && row.id === profile.id) ?? {});
+  }
+  const merged = mergeCompanyProfiles(persisted, seeds);
+  saveCompanyProfiles(merged);
+  localStorage.setItem('suite-seed-import-v1', 'done');
+  return merged;
 }
 
 export function removeCompanySetting(key: string) {
@@ -333,15 +352,13 @@ export function removeCompanyScopedSettings(companyId: string) {
   keysToRemove.forEach((key) => localStorage.removeItem(key))
 }
 
-export function getActiveAccountsDatabaseUrl() {
-  const companyId = getActiveCompanyId()
+export function getActiveAccountsDatabaseUrl(companyId = getActiveCompanyId()) {
   return companyId && companyId !== 'default'
     ? `sqlite:accounts-${companyId}.db`
     : 'sqlite:accounts.db'
 }
 
-export function getActivePurchaseDatabaseUrl() {
-  const companyId = getActiveCompanyId()
+export function getActivePurchaseDatabaseUrl(companyId = getActiveCompanyId()) {
   return companyId && companyId !== 'default'
     ? `sqlite:import-purchases-${companyId}.db`
     : 'sqlite:import-purchases.db'
@@ -404,4 +421,17 @@ export function getStockDatabaseUrlForCompanyId(companyId: string) {
 
 export function getActiveStockDatabaseUrl() {
   return getStockDatabaseUrlForCompanyId(getActiveCompanyId())
+}
+
+export type CompanyDatabaseContext = Readonly<{
+  companyId: string; fiscalYear: string; accountsUrl: string; purchaseUrl: string; stockUrl: string
+}>
+export function companyDatabaseContext(companyId = getActiveCompanyId() || 'default'): CompanyDatabaseContext {
+  const profile = getCompanyProfile(companyId)
+  return Object.freeze({
+    companyId, fiscalYear: profile?.fiscalYear || '2082/83',
+    accountsUrl: getActiveAccountsDatabaseUrl(companyId),
+    purchaseUrl: getActivePurchaseDatabaseUrl(companyId),
+    stockUrl: getStockDatabaseUrlForCompanyId(companyId),
+  })
 }

@@ -1,5 +1,5 @@
 use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{Connection, SqliteConnection};
+use sqlx::{Column, Connection, Row, SqliteConnection, TypeInfo, ValueRef};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
@@ -145,7 +145,7 @@ async fn open_sqlite_connection(path: &std::path::Path) -> Result<SqliteConnecti
         .execute(&mut connection)
         .await
         .map_err(|error| error.to_string())?;
-    sqlx::query("PRAGMA synchronous = NORMAL")
+    sqlx::query("PRAGMA synchronous = FULL")
         .execute(&mut connection)
         .await
         .map_err(|error| error.to_string())?;
@@ -254,6 +254,14 @@ async fn delete_sale_with_stock_cleanup(
     let accounts_path = app_data_dir.join(&accounts_filename);
     let mut accounts = open_sqlite_connection(&accounts_path).await?;
 
+    let stock_path = app_data_dir.join(&stock_filename);
+    let has_stock = !stock_filename.trim().is_empty() && stock_path.exists();
+    // Attached writes roll back together on errors. The application recovery journal
+    // restores both stores after a process/power interruption during cross-store commit.
+    if has_stock {
+        sqlx::query("ATTACH DATABASE ? AS linked_stock").bind(stock_path.to_string_lossy().as_ref()).execute(&mut accounts).await.map_err(|e| e.to_string())?;
+        sqlx::query("PRAGMA linked_stock.synchronous=FULL").execute(&mut accounts).await.map_err(|e| e.to_string())?;
+    }
     let mut account_tx = accounts.begin().await.map_err(|error| error.to_string())?;
     sqlx::query("DELETE FROM receipt_allocations WHERE sale_id = ?")
         .bind(&normalized_sale_id)
@@ -288,34 +296,14 @@ async fn delete_sale_with_stock_cleanup(
     .await
     .map_err(|error| error.to_string())?;
 
-    account_tx
-        .commit()
-        .await
-        .map_err(|error| error.to_string())?;
-
     let mut stock_deleted = 0;
-    if !stock_filename.trim().is_empty() {
-        let stock_path = app_data_dir.join(&stock_filename);
-        if stock_path.exists() {
-            let mut stock = open_sqlite_connection(&stock_path).await?;
-            let mut stock_tx = stock.begin().await.map_err(|error| error.to_string())?;
-            sqlx::query(
-                "DELETE FROM stock_sales_lines WHERE bill_id IN (SELECT id FROM stock_sales_bills WHERE id = ? AND source_type = 'Sale')",
-            )
-            .bind(&normalized_sale_id)
-            .execute(&mut *stock_tx)
-            .await
-            .map_err(|error| error.to_string())?;
-            stock_deleted =
-                sqlx::query("DELETE FROM stock_sales_bills WHERE id = ? AND source_type = 'Sale'")
-                    .bind(&normalized_sale_id)
-                    .execute(&mut *stock_tx)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .rows_affected();
-            stock_tx.commit().await.map_err(|error| error.to_string())?;
-        }
+    if has_stock {
+        sqlx::query("DELETE FROM linked_stock.stock_sales_lines WHERE bill_id IN (SELECT id FROM linked_stock.stock_sales_bills WHERE id = ? AND source_type = 'Sale')")
+            .bind(&normalized_sale_id).execute(&mut *account_tx).await.map_err(|e| e.to_string())?;
+        stock_deleted = sqlx::query("DELETE FROM linked_stock.stock_sales_bills WHERE id = ? AND source_type = 'Sale'")
+            .bind(&normalized_sale_id).execute(&mut *account_tx).await.map_err(|e| e.to_string())?.rows_affected();
     }
+    account_tx.commit().await.map_err(|error| error.to_string())?;
 
     Ok(format!(
         "deleted_sale_rows:{deleted_sale};deleted_stock_bill_rows:{stock_deleted}"
@@ -512,6 +500,16 @@ async fn write_collection_transaction(
         .await
         .map_err(|error| error.to_string())?;
 
+    let invalid: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM receipt_allocations a LEFT JOIN sales s ON s.id=a.sale_id LEFT JOIN collections c ON c.id=a.receipt_id WHERE s.id IS NULL OR c.id IS NULL OR s.party_id<>c.party_id OR a.amount_npr<=0"
+    ).fetch_one(&mut *tx).await.map_err(|error| error.to_string())?;
+    let excess_sales: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (SELECT a.sale_id FROM receipt_allocations a JOIN sales s ON s.id=a.sale_id GROUP BY a.sale_id HAVING SUM(a.amount_npr)>MAX(s.total_amount)+0.000001)"
+    ).fetch_one(&mut *tx).await.map_err(|error| error.to_string())?;
+    let excess_receipts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (SELECT a.receipt_id FROM receipt_allocations a JOIN collections c ON c.id=a.receipt_id GROUP BY a.receipt_id HAVING SUM(a.amount_npr)>MAX(c.amount)+0.000001)"
+    ).fetch_one(&mut *tx).await.map_err(|error| error.to_string())?;
+    if invalid + excess_sales + excess_receipts > 0 { return Err("Receipt allocations are inconsistent. No changes were committed.".to_string()); }
     tx.commit().await.map_err(|error| error.to_string())?;
 
     Ok(format!(
@@ -953,6 +951,9 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             read_company_seed,
+            commit_sqlite_batch,
+            read_recovery_journal,
+            write_recovery_journal,
             delete_sale_with_stock_cleanup,
             write_collection_transaction,
             write_import_purchase_transaction,
@@ -962,4 +963,140 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Easysolution")
         .run(|_, _| {});
+}
+
+#[derive(serde::Deserialize)]
+struct SqlStatement {
+    sql: String,
+    params: Vec<serde_json::Value>,
+    expected: Option<serde_json::Value>,
+}
+
+fn bind_statement(statement: &SqlStatement) -> sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> {
+    let mut query = sqlx::query(&statement.sql);
+    for value in &statement.params {
+        query = match value {
+            serde_json::Value::Null => query.bind(None::<String>),
+            serde_json::Value::Bool(value) => query.bind(*value),
+            serde_json::Value::Number(value) if value.is_i64() => query.bind(value.as_i64().unwrap()),
+            serde_json::Value::Number(value) => query.bind(value.as_f64().unwrap()),
+            serde_json::Value::String(value) => query.bind(value.clone()),
+            _ => query.bind(value.to_string()),
+        };
+    }
+    query
+}
+
+fn normalized_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Number(number) => serde_json::json!(number.as_f64()),
+        serde_json::Value::Array(items) => serde_json::Value::Array(items.into_iter().map(normalized_json).collect()),
+        serde_json::Value::Object(items) => serde_json::Value::Object(items.into_iter().map(|(key, value)| (key, normalized_json(value))).collect()),
+        value => value,
+    }
+}
+
+#[tauri::command]
+async fn commit_sqlite_batch(
+    app: tauri::AppHandle, filename: String, reads: Vec<SqlStatement>, writes: Vec<SqlStatement>,
+) -> Result<(), String> {
+    if filename.starts_with("accounts") { validate_accounts_database_filename(&filename)?; }
+    else if filename.starts_with("import-purchases") { validate_purchase_database_filename(&filename)?; }
+    else { validate_stock_database_filename(&filename)?; }
+    let directory = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let mut connection = open_sqlite_connection(&directory.join(filename)).await?;
+    execute_sqlite_batch(&mut connection, reads, writes).await
+}
+
+async fn execute_sqlite_batch(connection: &mut SqliteConnection, reads: Vec<SqlStatement>, writes: Vec<SqlStatement>) -> Result<(), String> {
+    let mut transaction = connection.begin().await.map_err(|error| error.to_string())?;
+    for statement in &reads {
+        let rows = bind_statement(statement).fetch_all(&mut *transaction).await.map_err(|error| error.to_string())?;
+        let mut values = Vec::new();
+        for row in rows {
+            let mut object = serde_json::Map::new();
+            for column in row.columns() {
+                let index = column.ordinal();
+                let raw = row.try_get_raw(index).map_err(|error| error.to_string())?;
+                let value = if raw.is_null() { serde_json::Value::Null }
+                else {
+                    match raw.type_info().name() {
+                        "INTEGER" | "BOOLEAN" => serde_json::json!(row.try_get::<i64, _>(index).map_err(|error| error.to_string())?),
+                        "REAL" => serde_json::json!(row.try_get::<f64, _>(index).map_err(|error| error.to_string())?),
+                        _ => serde_json::json!(row.try_get::<String, _>(index).map_err(|error| error.to_string())?),
+                    }
+                };
+                object.insert(column.name().to_string(), value);
+            }
+            values.push(serde_json::Value::Object(object));
+        }
+        if normalized_json(serde_json::Value::Array(values)) != normalized_json(statement.expected.clone().unwrap_or(serde_json::Value::Null)) {
+            return Err("Data changed during validation. Reload and retry; nothing was saved.".to_string());
+        }
+    }
+    for statement in &writes {
+        bind_statement(statement).execute(&mut *transaction).await.map_err(|error| error.to_string())?;
+    }
+    transaction.commit().await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn read_recovery_journal(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let path = app.path().app_data_dir().map_err(|error| error.to_string())?.join("workflow-recovery.json");
+    if !path.exists() { return Ok(None); }
+    std::fs::read_to_string(path).map(Some).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn write_recovery_journal(app: tauri::AppHandle, payload: Option<String>) -> Result<(), String> {
+    use std::io::Write;
+    let directory = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join("workflow-recovery.json");
+    if let Some(payload) = payload {
+        if path.exists() { return Err("An unfinished recovery snapshot already exists.".into()); }
+        let staging = directory.join("workflow-recovery.pending");
+        let mut file = std::fs::File::create(&staging).map_err(|error| error.to_string())?;
+        file.write_all(payload.as_bytes()).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        std::fs::rename(staging, path).map_err(|error| error.to_string())
+    } else if path.exists() {
+        std::fs::remove_file(path).map_err(|error| error.to_string())
+    } else { Ok(()) }
+}
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+    fn statement(sql: &str) -> SqlStatement { SqlStatement { sql: sql.into(), params: vec![], expected: None } }
+
+    #[test]
+    fn native_batch_rolls_back_journal_failure_and_remains_writable() {
+        tauri::async_runtime::block_on(async {
+            let mut db = SqliteConnection::connect(":memory:").await.unwrap();
+            sqlx::query("CREATE TABLE sale(id INTEGER PRIMARY KEY, amount REAL)").execute(&mut db).await.unwrap();
+            sqlx::query("INSERT INTO sale VALUES(1,1000)").execute(&mut db).await.unwrap();
+            let failed = execute_sqlite_batch(&mut db, vec![], vec![statement("UPDATE sale SET amount=1200"), statement("INSERT INTO missing_journal VALUES(1)")]).await;
+            assert!(failed.is_err());
+            let amount: f64 = sqlx::query_scalar("SELECT amount FROM sale").fetch_one(&mut db).await.unwrap();
+            assert_eq!(amount, 1000.0);
+            execute_sqlite_batch(&mut db, vec![], vec![statement("UPDATE sale SET amount=1500")]).await.unwrap();
+            let amount: f64 = sqlx::query_scalar("SELECT amount FROM sale").fetch_one(&mut db).await.unwrap();
+            assert_eq!(amount, 1500.0);
+        });
+    }
+
+    #[test]
+    fn native_batch_checks_reads_and_parameter_binding_before_writes() {
+        tauri::async_runtime::block_on(async {
+            let mut db = SqliteConnection::connect(":memory:").await.unwrap();
+            sqlx::query("CREATE TABLE sale(id INTEGER PRIMARY KEY, amount REAL)").execute(&mut db).await.unwrap();
+            sqlx::query("INSERT INTO sale VALUES(1,1000)").execute(&mut db).await.unwrap();
+            let read = || SqlStatement { sql: "SELECT amount FROM sale WHERE id=$1".into(), params: vec![serde_json::json!(1)], expected: Some(serde_json::json!([{"amount":1000}])) };
+            execute_sqlite_batch(&mut db, vec![read()], vec![statement("UPDATE sale SET amount=1200")]).await.unwrap();
+            assert!(execute_sqlite_batch(&mut db, vec![read()], vec![statement("DELETE FROM sale")]).await.unwrap_err().contains("Data changed"));
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sale").fetch_one(&mut db).await.unwrap();
+            assert_eq!(count, 1);
+        });
+    }
 }

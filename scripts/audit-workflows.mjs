@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
-import { DatabaseSync } from 'node:sqlite'
+import { spawnSync } from 'node:child_process'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const read = (file) => readFileSync(path.join(root, file), 'utf8')
@@ -40,172 +40,245 @@ globalThis.localStorage = {
   removeItem: (key) => storage.delete(key),
 }
 globalThis.window = { localStorage }
-const company = sourceModule('src/companyContext.ts', ['getCompanyProfiles', 'saveCompanyProfiles', 'upsertCompanyProfile', 'getCompanyProfile', 'setActiveCompanyId', 'getActiveCompanyId', 'createCompanyYearId', 'mergeCompanyProfiles'])
+const company = sourceModule('src/companyContext.ts', ['companyDatabaseContext', 'companyStorageKey', 'applyCompanySeed', 'getCompanyProfiles', 'saveCompanyProfiles', 'upsertCompanyProfile', 'getCompanyProfile', 'setActiveCompanyId', 'getActiveCompanyId', 'createCompanyYearId', 'mergeCompanyProfiles'])
 const ledger = sourceModule('src/stock/services/stockLedger.ts', ['buildStockRows', 'buildStockRegisterRows'])
 const stockDocs = sourceModule('src/stock/services/stockDocuments.ts', ['isStockDocumentEligible'])
-const stockCalc = sourceModule('src/stock/services/stockCalculations.ts', ['validStockBillsForSourceDocs'], stockDocs)
-const carry = sourceModule('src/stock/services/stockCarryForward.ts', ['buildStockCarryForwardPlan', 'carryForwardStockOpenings'], { ...stockDocs, ...stockCalc, ...ledger })
-const fiscal = sourceModule('src/domain/fiscalYear.ts', ['createFiscalYearFromCode'])
-const results = []
-const record = (scenario, observed) => results.push({ scenario, observed })
+const stockCalc = sourceModule('src/stock/services/stockCalculations.ts', ['validStockBillsForSourceDocs', 'buildSourceDocs'], stockDocs)
+const carry = sourceModule('src/stock/services/stockCarryForward.ts', ['buildStockCarryForwardPlan', 'carryForwardStockOpenings', 'assessYearEndReadiness'], { ...stockDocs, ...stockCalc, ...ledger })
+const fiscal = sourceModule('src/domain/fiscalYear.ts', ['createFiscalYearFromCode', 'parseFiscalYear', 'getSuccessorFiscalYear', 'validateFiscalYearTransition'])
 
-// 1. Execute the actual year-end handler, stubbing only persistence and UI.
+const results = []
+const record = scenario => results.push({ scenario, passed: true })
+const persistence = sourceModule('src/application/persistence.ts', ['persistBusinessAction', 'flushPendingWrites', 'acknowledgeRecoveredWrites'])
+const reconciliation = sourceModule('src/application/openingReconciliation.ts', ['reconcileOpening', 'assertReopenDependencies'])
+const recovery = sourceModule('src/application/recovery.ts', ['runRecoverable'], persistence)
 const original = company.upsertCompanyProfile({ id: 'audit-2082-83', name: 'Audit', fiscalYear: '2082/83' })
 company.setActiveCompanyId(original.id)
-let carryTarget
-const noop = () => {}
+const before = JSON.stringify(company.getCompanyProfiles())
+let carryWrites = 0
+let message = ''
 const lock = sourceFunction('src/App.tsx', 'lockCompany', {
-  ...company, company: original, companies: [original], linkedNextCompany: null,
-  carryForward: true, nextYear: '2082/83', lockPassword: 'test', YEAR_END_PASSWORD: 'test',
-  setMessage: noop, setIsBusy: noop, setLockPassword: noop, onCompaniesChanged: noop,
-  readSuiteSettings: () => ({}), writeSuiteSettings: noop,
-  carryForwardOpenings: async (source, target) => {
-    carryTarget = { source: source.id, target: target.id }
-    return { accountParties: 1, purchaseParties: 1, inventory: { status: 'skipped', warnings: [] } }
-  },
+  ...company, ...fiscal, ...persistence, ...reconciliation,
+  company: original, linkedNextCompany: null, carryForward: true, nextYear: '2082/83',
+  lockPassword: 'test', YEAR_END_PASSWORD: 'test', legacyOpeningPolicy: '',
+  setMessage: value => { message = value }, setIsBusy: () => {}, setLockPassword: () => {},
+  onCompaniesChanged: () => {}, validateCompanyYearEnd: async () => {},
+  recoverableCompanyOperation: async (_companies, work) => work(),
+  carryForwardOpenings: async () => { carryWrites++; return {} },
 })
 await lock()
-assert.equal(carryTarget.source, carryTarget.target)
-assert.equal(company.getCompanyProfile(original.id).isLocked, false)
-record('Year-end accepts current year', { ...carryTarget, finalProfile: company.getCompanyProfile(original.id) })
+assert.match(message, /exact next/)
+assert.equal(carryWrites, 0)
+assert.equal(JSON.stringify(company.getCompanyProfiles()), before)
+record('Self-carry rejects before any profile or opening mutation')
 
-// 2. Stock summary uses periodic average; register uses moving average.
 const item = { id: 'item', code: 'APPLE', name: 'Apple', unit: 'KG', openingQty: 10, openingRate: 100, reorderLevel: 0, isActive: true, createdAt: '' }
-const purchase = { id: 'purchase', billNo: '2', dateBs: '2082/04/03', source: 'Local Purchase', items: [{ id: 'p-line', itemId: item.id, quantity: 10, rate: 200, amount: 2000 }] }
-const sale = { id: 'sale', billNo: '1', dateBs: '2082/04/02', items: [{ id: 's-line', itemId: item.id, quantity: 10, rate: 150, amount: 1500 }] }
-const summary = ledger.buildStockRows([item], [purchase], [sale])[0]
-const register = ledger.buildStockRegisterRows([item], [purchase], [sale]).at(-1)
-assert.equal(summary.closingValue, 1500)
-assert.equal(register.balanceAmount, 2000)
-record('Same stock movements produce different closing values', { summary: summary.closingValue, register: register.balanceAmount })
+const purchase = { id: 'purchase', billNo: '2', dateBs: '2082/04/03', source: 'Local Purchase', items: [{ id: 'p', itemId: item.id, quantity: 10, rate: 200, amount: 2000 }] }
+const sale = { id: 'sale', billNo: '1', dateBs: '2082/04/02', items: [{ id: 's', itemId: item.id, quantity: 10, rate: 150, amount: 1500 }] }
+assert.equal(ledger.buildStockRows([item], [purchase], [sale])[0].closingValue, 2000)
+assert.equal(ledger.buildStockRegisterRows([item], [purchase], [sale]).at(-1).balanceAmount, 2000)
+record('Full depletion then purchase closes at NPR 2000 in every calculation')
 
-// 3. Previously carried item becomes inactive with zero closing stock.
 const plan = carry.buildStockCarryForwardPlan({ asOnDate: '2083/03/32', sourceDocs: [], sourceFiscalYearId: 'fy', sourceStock: { items: [{ ...item, openingQty: 0, isActive: false }], purchaseBills: [], salesBills: [] }, targetItems: [{ ...item, openingQty: 10 }] })
-assert.equal(plan.items.length, 0)
-assert.equal(plan.skippedInactiveZero, 1)
-record('Refresh does not clear previously carried opening when source becomes inactive zero', { targetOpeningBefore: 10, writes: plan.items })
+assert.equal(plan.items[0].openingQty, 0)
+record('Inactive zero item explicitly clears derived target opening')
 
-// 4. Fiscal year codes are accepted without semantic validation.
-const invalid = fiscal.createFiscalYearFromCode('audit', '2083/99')
-const fallback = fiscal.createFiscalYearFromCode('audit', 'nonsense')
-assert.equal(invalid.code, '2083/99')
-assert.equal(fallback.code, '2082/83')
-record('Invalid fiscal-year input is accepted or silently defaulted', { invalid, fallback })
+for (const code of ['2083/99', 'nonsense']) assert.throws(() => fiscal.createFiscalYearFromCode('audit', code))
+record('Malformed fiscal-year codes fail instead of falling back')
 
-// 5. Execute the actual purchase autosave effect and its unmount cleanup.
-const effectSource = findNode('src/purchase/App.tsx', (node) => ts.isCallExpression(node) && node.expression.getText() === 'useEffect' && node.arguments[0]?.getText().includes('const saveTimer'))
-let cleanup
-let pendingTimer
-let saves = 0
-const fakeWindow = { setTimeout: (callback) => { pendingTimer = callback; return 1 }, clearTimeout: () => { pendingTimer = undefined } }
-new Function('useEffect', 'window', 'repository', 'isStorageReady', 'data', 'lastSavedSnapshotRef', compile(effectSource))(
-  (callback) => { cleanup = callback() }, fakeWindow, { saveData: async () => { saves++ } }, true, { payments: ['new payment'] }, { current: '{}' },
-)
-assert.equal(typeof pendingTimer, 'function')
-cleanup()
-if (pendingTimer) await pendingTimer()
-assert.equal(saves, 0)
-record('Leaving purchase module before autosave loses pending change', { saveCalls: saves })
-
-// 6. Company deletion has no compensating data restore on second-store failure.
-let accountsRows = ['sale']
-company.upsertCompanyProfile({ ...original, isLocked: true })
-const clearCompany = sourceFunction('src/App.tsx', 'clearCompanyData', {
-  ...company,
-  withActiveCompany: async (_id, operation) => operation(),
-  restoreAccountsBackupData: async () => { accountsRows = [] },
-  emptyAccountsBackupData: {}, getEmptyData: () => ({}),
-  createDataRepository: async () => ({ saveData: async () => { throw new Error('Injected purchase write failure') } }),
-  replaceStockBackupDataForCompany: noop, emptyStockBackupData: {}, writeInventoryTrackingSettingForCompany: noop,
-})
-await assert.rejects(clearCompany(original), /Injected/)
-assert.deepEqual(accountsRows, [])
-assert.equal(company.getCompanyProfile(original.id).isLocked, true)
-record('Failed company deletion restores profile but leaves accounts empty', { accountsRows, profileStillPresent: Boolean(company.getCompanyProfile(original.id)) })
-
-// 7. Execute actual restore against an isolated statement-recording adapter.
-const statements = []
-const restore = sourceFunction('src/accounts/data/storage.ts', 'restoreAccountsBackupData', {
-  assertActiveCompanyWritable: noop,
-  getDb: async () => ({ execute: async (sql) => { statements.push(sql.trim()) } }),
-  logActivity: async () => {},
-})
-await restore({})
-assert.ok(statements.includes('DELETE FROM sales'))
-assert.ok(!statements.some((sql) => /ledger_entries/i.test(sql)))
-record('Accounts reset leaves old journal entries untouched', { statements })
-
-// 8. Deleted seed companies are reintroduced by the startup merge.
-const merged = company.mergeCompanyProfiles([], [original])
-assert.equal(merged[0].id, original.id)
-record('Startup seed merge reintroduces a removed seeded company', { restoredId: merged[0].id })
-
-// 9. Temporary company selection is visible to every concurrent operation.
-company.setActiveCompanyId(original.id)
-const target = company.upsertCompanyProfile({ id: 'audit-2083-84', name: 'Audit', fiscalYear: '2083/84' })
 let release
-const gate = new Promise((resolve) => { release = resolve })
-const withActiveCompany = sourceFunction('src/App.tsx', 'withActiveCompany', company)
-const background = withActiveCompany(target.id, async () => gate)
-assert.equal(company.getActiveCompanyId(), target.id)
-record('Awaiting background operation exposes temporary company globally', { displayedCompany: original.id, storageCompany: company.getActiveCompanyId() })
+const gate = new Promise(resolve => { release = resolve })
+let saved = false, navigated = false
+const saving = persistence.persistBusinessAction('audit', async () => { await gate; saved = true })
+const leaving = persistence.flushPendingWrites().then(() => { navigated = true })
+await Promise.resolve()
+assert.equal(navigated, false)
 release()
-await background
-assert.equal(company.getActiveCompanyId(), original.id)
+await Promise.all([saving, leaving])
+assert.equal(saved, true)
+record('Immediate navigation awaits durable business save')
 
-// 10. A pending inventory document does not prevent completed carry-forward.
-let inventoryWrites = 0
-const incompleteCarry = await carry.carryForwardStockOpenings({
+let state = { accounts: ['sale'], purchase: ['payment'] }, journal = null
+const snapshot = structuredClone(state)
+await assert.rejects(recovery.runRecoverable(snapshot, async () => { state.accounts = []; throw new Error('Injected') }, async original => { state = original }, { read: async () => journal, write: async value => { journal = value } }), /restored/)
+assert.deepEqual(state, snapshot)
+assert.equal(journal, null)
+record('Second-store deletion failure restores all original data')
+
+company.applyCompanySeed(JSON.stringify([original]), () => {})
+company.saveCompanyProfiles([])
+company.applyCompanySeed(JSON.stringify([original]), () => { throw new Error('Settings must not be reapplied') })
+assert.equal(company.getCompanyProfiles().length, 0)
+record('Seed deletion survives repeated startup')
+
+company.upsertCompanyProfile(original)
+const target = company.upsertCompanyProfile({ id: 'audit-2083-84', name: 'Audit', fiscalYear: '2083/84' })
+company.setActiveCompanyId(original.id)
+let continueRefresh
+const paused = new Promise(resolve => { continueRefresh = resolve })
+const withContext = sourceFunction('src/App.tsx', 'withCompanyContext', company)
+const refresh = withContext(target.id, async context => { assert.equal(context.companyId, target.id); await paused })
+assert.equal(company.getActiveCompanyId(), original.id)
+company.setActiveCompanyId(target.id)
+continueRefresh()
+await refresh
+assert.equal(company.getActiveCompanyId(), target.id)
+record('Paused background work neither changes nor restores visible company selection')
+
+let writes = 0
+await assert.rejects(carry.carryForwardStockOpenings({
   asOnDate: '2083/03/32', sourceFiscalYearId: 'fy',
-  sourceDocs: [{ documentId: 'missing-lines', type: 'Sale', fiscalYearId: 'fy', lifecycleStatus: 'POSTED', amount: 500, grandTotal: 565, vatAmount: 65, date: '2082/04/02' }],
+  sourceDocs: [{ documentId: 'missing', type: 'Sale', fiscalYearId: 'fy', lifecycleStatus: 'POSTED', amount: 500, grandTotal: 500, vatAmount: 0, date: '2082/04/02' }],
   sourceStock: { items: [item], purchaseBills: [], salesBills: [] },
   targetStock: { items: [], purchaseBills: [], salesBills: [] },
-  writeOpenings: async () => { inventoryWrites++; return { created: 1, updated: 0 } },
-})
-assert.equal(incompleteCarry.status, 'completed')
-assert.equal(inventoryWrites, 1)
-assert.equal(incompleteCarry.warnings.length, 0)
-record('Pending sale inventory lines still allow successful closing-stock carry', { status: incompleteCarry.status, warnings: incompleteCarry.warnings, carriedQty: incompleteCarry.totalClosingQty })
+  writeOpenings: async () => { writes++; return { created: 1, updated: 0 } },
+}), /not ready/)
+assert.equal(writes, 0)
+record('Missing stock lines block year end before writes')
 
-// 11-12. Run the actual sale update against an in-memory SQLite database.
-const sqlite = new DatabaseSync(':memory:')
-sqlite.exec(`CREATE TABLE sales (id TEXT PRIMARY KEY, bill_no TEXT, fiscal_year_id TEXT, date_bs TEXT, date_ad TEXT, party_id TEXT, quantity REAL, rate REAL, amount REAL, sales_amount REAL, vat_amount REAL, total_amount REAL, remarks TEXT);
-CREATE TABLE receipt_allocations (sale_id TEXT, amount_npr REAL);
-CREATE TABLE ledger_entries (source_type TEXT, source_id TEXT, status TEXT);
-INSERT INTO sales (id, bill_no, total_amount, party_id) VALUES ('s1', '1', 1000, 'customer-a');
-INSERT INTO receipt_allocations VALUES ('s1', 800);
-INSERT INTO ledger_entries VALUES ('SALE', 's1', 'ACTIVE');`)
-const db = {
-  select: async (sql, parameters = []) => sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...parameters),
-  execute: async (sql, parameters = []) => sqlite.prepare(sql.replace(/\$\d+/g, '?')).run(...parameters),
+assert.equal(reconciliation.reconcileOpening(120, 200, { derived: 100, override: false }).value, 120)
+record('Manual target opening remains independent of recalculated source')
+
+let localFallbacks = 0
+const failedRepository = sourceFunction('src/purchase/repository.ts', 'createDataRepository', {
+  isTauriRuntime: () => true,
+  createSqliteRepository: async () => { throw new Error('Injected SQLite initialization failure') },
+  createLocalRepository: () => { localFallbacks++; return {} },
+})
+await assert.rejects(failedRepository({ companyId: 'isolated' }), /database unavailable/)
+assert.equal(localFallbacks, 0)
+record('Desktop SQLite initialization failure never opens browser fallback')
+
+const suite = spawnSync(process.execPath, ['scripts/run-tests.mjs'], { cwd: root, encoding: 'utf8' })
+assert.equal(suite.status, 0, suite.stdout + suite.stderr)
+assert.match(suite.stdout, /real SQLite: durable saves/)
+record('In-memory SQLite sale amount and party changes enforce existing allocations')
+record('In-memory SQLite journal and restore failures roll back; backup lifecycle and journals round-trip')
+
+const partySync = sourceModule('src/application/carryForwardPartySync.ts', ['deletedPartyIdsFromCarryForwardSourceLogs', 'removableDeletedCarryForwardPartyIds'])
+const domain = sourceModule('src/purchase/domain.ts', ['normalizeFreightIndiaStatus'])
+const payable = sourceModule('src/application/purchaseCarryForward.ts', ['purchaseClosingParties'], domain)
+const accounts = new Map(), purchases = new Map(), stocks = new Map()
+company.saveCompanyProfiles([])
+const chain = ['2082/83', '2083/84', '2084/85'].map((fiscalYear, i) => company.upsertCompanyProfile({ id: 'chain-' + i, name: 'Chain', fiscalYear, companyGroupId: 'chain' }))
+for (const year of chain) {
+  accounts.set(year.id, { parties: [], sales: [], collections: [], creditNotes: [], activityLogs: [] })
+  purchases.set(year.id, { settings: { companyName: year.name, fiscalYear: year.fiscalYear }, parties: [], purchases: [], payments: [], localExpenses: [], ledgerEntries: [], activityLogs: [] })
+  stocks.set(year.id, { items: [], purchaseBills: [], salesBills: [] })
 }
-let failLedger = false
-const replacePosting = sourceFunction('src/accounts/data/storage.ts', 'replaceLedgerPosting', {
-  insertLedgerEntries: async () => {
-    if (failLedger) throw new Error('Injected ledger insert failure')
-    sqlite.exec("INSERT INTO ledger_entries VALUES ('SALE', 's1', 'ACTIVE')")
+const buyer = { id: 'buyer', name: 'Buyer', openingBalance: 100, isActive: true }
+const vendor = { id: 'vendor', name: 'Vendor', openingPayable: 100, isActive: true }
+accounts.get(chain[0].id).parties.push(buyer)
+purchases.get(chain[0].id).parties.push(vendor)
+stocks.get(chain[0].id).items.push(structuredClone(item))
+function addActivity(year, saleQty, salePrice, purchaseQty, purchasePrice, payment) {
+  const id = year.id, code = year.fiscalYear.slice(0, 4), fy = fiscal.createFiscalYearFromCode(id, year.fiscalYear).id
+  const saleId = id + '-sale', purchaseId = id + '-local'
+  accounts.get(id).sales.push({ id: saleId, fiscalYearId: fy, lifecycleStatus: 'POSTED', dateBs: code + '/04/02', billNo: '1', partyId: 'buyer', salesAmount: saleQty * salePrice, vatAmount: 0, totalAmount: saleQty * salePrice })
+  accounts.get(id).collections.push({ id: id + '-receipt', partyId: 'buyer', amount: payment })
+  purchases.get(id).localExpenses.push({ id: purchaseId, fiscalYearId: fy, lifecycleStatus: 'POSTED', partyId: 'vendor', billNumber: '2', billDate: code + '/04/03', expenseType: 'Stock', expenseHead: 'Stock', amountBeforeVatNPR: purchaseQty * purchasePrice, vatNPR: 0, totalAmountNPR: purchaseQty * purchasePrice })
+  purchases.get(id).payments.push({ id: id + '-payment', fiscalYearId: fy, partyId: 'vendor', amountNPR: payment })
+  stocks.get(id).salesBills.push({ ...sale, id: saleId, customerName: 'Buyer', dateBs: code + '/04/02', items: [{ ...sale.items[0], itemId: stocks.get(id).items[0].id, quantity: saleQty, rate: salePrice, amount: saleQty * salePrice }] })
+  stocks.get(id).purchaseBills.push({ ...purchase, id: purchaseId, supplierName: 'Vendor', sourceType: 'Local Purchase', dateBs: code + '/04/03', items: [{ ...purchase.items[0], itemId: stocks.get(id).items[0].id, quantity: purchaseQty, rate: purchasePrice, amount: purchaseQty * purchasePrice }] })
+}
+addActivity(chain[0], 10, 150, 10, 200, 300)
+const orchestration = sourceFunction('src/App.tsx', 'carryForwardOpenings', {
+  ...company, ...fiscal, ...reconciliation, ...partySync, ...payable, ...stockCalc, ...carry,
+  getAccountsBackupData: async context => structuredClone(accounts.get(context.companyId)),
+  getAccountOutstanding: async context => {
+    const data = accounts.get(context.companyId)
+    return data.parties.map(party => ({ partyId: party.id, outstanding: party.openingBalance + data.sales.filter(row => row.partyId === party.id).reduce((sum, row) => sum + row.totalAmount, 0) - data.collections.filter(row => row.partyId === party.id).reduce((sum, row) => sum + row.amount, 0) }))
+  },
+  createDataRepository: async context => ({ loadData: async () => structuredClone(purchases.get(context.companyId)), saveData: async value => purchases.set(context.companyId, structuredClone(value)) }),
+  isInventoryTrackingEnabledForCompany: () => true,
+  getStockBackupDataForCompany: async id => structuredClone(stocks.get(id)),
+  purchaseReferencedPartyIds: sourceFunction('src/App.tsx', 'purchaseReferencedPartyIds'),
+  writeSuiteSettings: () => {}, writeInventoryTrackingSettingForCompany: () => {},
+  upsertPartiesForCarryForward: async (parties, _options, context) => {
+    const data = accounts.get(context.companyId)
+    for (const party of parties) {
+      const existing = data.parties.find(row => row.id === party.id)
+      if (existing) existing.openingBalance = party.openingBalance
+      else data.parties.push(structuredClone(party))
+    }
+    return { upserted: parties.length, removed: 0, skippedRemoval: 0 }
+  },
+  upsertStockOpeningItemsForCompany: async (id, items) => {
+    const data = stocks.get(id)
+    let created = 0, updated = 0
+    for (const item of items) {
+      const old = data.items.find(row => row.code === item.code)
+      if (old) { Object.assign(old, item); updated++ }
+      else { data.items.push({ ...item, id: id + '-' + item.code }); created++ }
+    }
+    return { created, updated }
   },
 })
-const updateSale = sourceFunction('src/accounts/data/storage.ts', 'updateSale', {
-  assertActiveCompanyWritable: noop, getDb: async () => db,
-  normalizeWholeNumber: (value) => value, normalizeDateInput: (value) => value,
-  resolveFiscalYearId: async () => 'fy', calculateVatAmount: () => 0,
-  replaceLedgerPosting: replacePosting, postSale: () => [], accountPostingContext: () => ({}), logActivity: async () => {},
-})
-await updateSale({ id: 's1', billNo: '1', dateBs: '2082/04/01', partyId: 'customer-b', salesAmount: 500 })
-const changedSale = sqlite.prepare('SELECT total_amount, party_id FROM sales').get()
-const allocation = sqlite.prepare('SELECT amount_npr FROM receipt_allocations').get()
-assert.equal(changedSale.total_amount, 500)
-assert.equal(changedSale.party_id, 'customer-b')
-assert.equal(allocation.amount_npr, 800)
-record('Sale amount and customer edit leave previous receipt allocation intact', { sale: changedSale, allocation })
-failLedger = true
-await assert.rejects(updateSale({ id: 's1', billNo: '1', dateBs: '2082/04/01', partyId: 'customer-b', salesAmount: 300 }), /Injected/)
-const partiallySaved = sqlite.prepare('SELECT total_amount FROM sales').get()
-const remainingJournal = sqlite.prepare('SELECT COUNT(*) AS count FROM ledger_entries').get().count
-assert.equal(partiallySaved.total_amount, 300)
-assert.equal(remainingJournal, 0)
-record('Failed sale journal replacement leaves edited sale and no journal', { sale: partiallySaved, journalRows: remainingJournal })
-sqlite.close()
+company.setActiveCompanyId(chain[0].id)
+await orchestration(chain[0], chain[1])
+assert.equal(stocks.get(chain[1].id).items[0].openingQty * stocks.get(chain[1].id).items[0].openingRate, 2000)
+assert.equal(purchases.get(chain[1].id).parties[0].openingPayable, 1800)
+assert.equal(accounts.get(chain[1].id).parties[0].openingBalance, 1300)
+chain[0] = company.upsertCompanyProfile({ ...chain[0], nextCompanyId: chain[1].id, isLocked: true })
+chain[1] = company.upsertCompanyProfile({ ...chain[1], previousCompanyId: chain[0].id })
+addActivity(chain[1], 2, 300, 2, 400, 100)
+await orchestration(chain[1], chain[2])
+assert.equal(stocks.get(chain[2].id).items[0].openingQty * stocks.get(chain[2].id).items[0].openingRate, 2400)
+assert.equal(purchases.get(chain[2].id).parties[0].openingPayable, 2500)
+assert.equal(accounts.get(chain[2].id).parties[0].openingBalance, 1800)
+chain[1] = company.upsertCompanyProfile({ ...chain[1], nextCompanyId: chain[2].id, isLocked: true })
+assert.throws(() => reconciliation.assertReopenDependencies(chain[0].id, company.getCompanyProfiles()), /newest to oldest/)
+chain[1] = company.upsertCompanyProfile({ ...chain[1], isLocked: false })
+chain[0] = company.upsertCompanyProfile({ ...chain[0], isLocked: false })
+accounts.get(chain[1].id).parties[0].openingBalance = 999
+accounts.get(chain[1].id).parties[0].name = 'Renamed target buyer'
+accounts.set(chain[0].id, { parties: [], sales: [], collections: [], creditNotes: [], activityLogs: [] })
+purchases.set(chain[0].id, { ...purchases.get(chain[0].id), parties: [], purchases: [], payments: [], localExpenses: [] })
+stocks.set(chain[0].id, { items: [], purchaseBills: [], salesBills: [] })
+await orchestration(chain[0], chain[1])
+assert.equal(accounts.get(chain[1].id).parties[0].openingBalance, 999)
+assert.equal(accounts.get(chain[1].id).parties[0].name, 'Renamed target buyer')
+assert.equal(accounts.get(chain[1].id).sales.length, 1)
+assert.equal(purchases.get(chain[1].id).parties[0].openingPayable, 0)
+assert.equal(purchases.get(chain[1].id).localExpenses.length, 1)
+assert.equal(stocks.get(chain[1].id).items[0].openingQty, 0)
+assert.equal(stocks.get(chain[1].id).salesBills.length, 1)
+assert.equal(company.getActiveCompanyId(), chain[0].id)
+record('Actual carry orchestration across three years: receivables, payables, moving inventory, dependency guards, deleted sources and protected target activity')
 
-console.log(JSON.stringify({ reproduced: results.length, results }, null, 2))
+let closeMessage = ''
+const closeActualYear = sourceFunction('src/App.tsx', 'lockCompany', {
+  ...company, ...fiscal, ...persistence, ...reconciliation,
+  company: chain[0], linkedNextCompany: chain[1], carryForward: true, nextYear: chain[1].fiscalYear,
+  lockPassword: 'test', YEAR_END_PASSWORD: 'test', legacyOpeningPolicy: '',
+  setMessage: value => { closeMessage = value }, setIsBusy: () => {}, setLockPassword: () => {}, onCompaniesChanged: () => {},
+  validateCompanyYearEnd: async () => {}, setStoredFiscalYearStatus: async (_company, status) => { assert.equal(status, 'CLOSED') },
+  recoverableCompanyOperation: async (_companies, work) => work(), carryForwardOpenings: orchestration,
+})
+await closeActualYear()
+assert.equal(company.getCompanyProfile(chain[0].id).isLocked, true, closeMessage)
+assert.equal(company.getCompanyProfile(chain[0].id).nextCompanyId, chain[1].id)
+assert.equal(company.getCompanyProfile(chain[1].id).isLocked, false)
+record('Successful close keeps the source locked after writing its successor link')
+
+chain[0] = company.upsertCompanyProfile({ ...chain[0], isLocked: false })
+accounts.get(chain[0].id).parties = [structuredClone(buyer)]
+purchases.get(chain[0].id).parties = [structuredClone(vendor)]
+stocks.get(chain[0].id).items = [structuredClone(item)]
+addActivity(chain[0], 10, 150, 10, 200, 300)
+const legacyKey = company.companyStorageKey('suite-opening-provenance', chain[1].id)
+localStorage.removeItem(legacyKey)
+stocks.get(chain[1].id).items[0].openingQty = 10
+stocks.get(chain[1].id).items[0].openingRate = 150
+const untouched = JSON.stringify([accounts.get(chain[1].id), purchases.get(chain[1].id), stocks.get(chain[1].id)])
+await assert.rejects(orchestration(chain[0], chain[1]), /existing openings without carry history/)
+assert.equal(JSON.stringify([accounts.get(chain[1].id), purchases.get(chain[1].id), stocks.get(chain[1].id)]), untouched)
+await orchestration(chain[0], chain[1], 'derived')
+assert.equal(stocks.get(chain[1].id).items[0].openingQty * stocks.get(chain[1].id).items[0].openingRate, 2000)
+localStorage.removeItem(legacyKey)
+stocks.get(chain[1].id).items[0].openingRate = 150
+const manualResult = await orchestration(chain[0], chain[1], 'manual')
+assert.equal(stocks.get(chain[1].id).items[0].openingQty * stocks.get(chain[1].id).items[0].openingRate, 1500)
+assert.ok(manualResult.manualOverrides > 0)
+record('Legacy opening ownership requires an explicit decision: repair NPR 1500 to 2000, or preserve a confirmed manual figure')
+console.log(JSON.stringify({ accepted: results.length, results }, null, 2))

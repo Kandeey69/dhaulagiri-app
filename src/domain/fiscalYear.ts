@@ -20,7 +20,40 @@ export type FiscalYearValidationResult = {
   error?: string
 }
 
-const FISCAL_YEAR_CODE_PATTERN = /^(\d{4})\s*\/\s*(\d{2})$/
+export function parseFiscalYear(code: string) {
+  const match = String(code ?? '').trim().match(/^(\d{4})\s*\/\s*(\d{2})$/)
+  if (!match || Number(match[1]) < 1000 || Number(match[1]) >= 9999 || (Number(match[1]) + 1) % 100 !== Number(match[2])) {
+    throw new Error('Fiscal year must be consecutive, for example 2082/83.')
+  }
+  return { startYear: Number(match[1]), code: `${match[1]}/${match[2]}` }
+}
+
+export function getSuccessorFiscalYear(code: string) {
+  const { startYear } = parseFiscalYear(code)
+  return parseFiscalYear(`${startYear + 1}/${String((startYear + 2) % 100).padStart(2, '0')}`).code
+}
+
+export type FiscalYearLink = { id: string; fiscalYear: string; previousCompanyId: string; nextCompanyId: string }
+export function validateFiscalYearTransition(source: FiscalYearLink, target: FiscalYearLink, profiles: FiscalYearLink[]) {
+  if (source.id === target.id) throw new Error('A fiscal year cannot carry into itself.')
+  for (const row of [source, target]) if (row.previousCompanyId === row.id || row.nextCompanyId === row.id) throw new Error('Fiscal year has a self-link.')
+  if (parseFiscalYear(target.fiscalYear).code !== getSuccessorFiscalYear(source.fiscalYear)) throw new Error('Carry-forward requires the exact next fiscal year.')
+  if (source.nextCompanyId && source.nextCompanyId !== target.id) throw new Error('Source already has a different successor.')
+  if (target.previousCompanyId && target.previousCompanyId !== source.id) throw new Error('Target already has a different predecessor.')
+  const byId = new Map([...profiles, source, target].map(row => [row.id, row]))
+  const visited = new Set([source.id])
+  let current: FiscalYearLink | undefined = target
+  while (current) {
+    if (visited.has(current.id)) throw new Error('Fiscal-year links would form a cycle.')
+    visited.add(current.id)
+    if (current.previousCompanyId === current.id) throw new Error('Fiscal year has a self-link.')
+    const next: FiscalYearLink | undefined = byId.get(current.nextCompanyId)
+    if (current.nextCompanyId && !next) throw new Error("Linked successor is missing.")
+    if (next && parseFiscalYear(next.fiscalYear).code !== getSuccessorFiscalYear(current.fiscalYear)) throw new Error("Existing successor chain is not consecutive.")
+    current = next
+  }
+}
+
 
 export function normalizeBsDate(value: string) {
   const raw = String(value ?? '').trim()
@@ -67,9 +100,7 @@ export function createFiscalYearFromCode(
   status: FiscalYearStatus = 'OPEN',
   timestamp = new Date().toISOString(),
 ): FiscalYear {
-  const match = code.trim().match(FISCAL_YEAR_CODE_PATTERN)
-  const startYear = match ? Number(match[1]) : 2082
-  const normalizedCode = match ? `${match[1]}/${match[2]}` : '2082/83'
+  const { startYear, code: normalizedCode } = parseFiscalYear(code)
 
   return {
     id: fiscalYearId(companyId, normalizedCode),

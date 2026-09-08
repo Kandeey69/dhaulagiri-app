@@ -1,7 +1,7 @@
 import type { StockBackupData, StockOpeningCarryForwardWriteSummary } from "../storage";
 import type { StockDocumentReference, StockItem, StockPurchaseBill, StockSalesBill } from "../types";
 import { validStockBillsForSourceDocs } from "./stockCalculations";
-import { buildStockRows } from "./stockLedger";
+import { buildStockRows, buildStockRegisterRows } from "./stockLedger";
 import { isStockDocumentEligible } from "./stockDocuments";
 
 export type StockCarryForwardPlanItem = {
@@ -121,10 +121,7 @@ export function buildStockCarryForwardPlan({
       return [];
     }
 
-    if (!sourceItem.isActive && row.closingQty === 0) {
-      skippedInactiveZero += 1;
-      return [];
-    }
+    if (!sourceItem.isActive && row.closingQty === 0) skippedInactiveZero += 1;
 
     const openingRate = stockRate(row);
     const planItem: StockCarryForwardPlanItem = {
@@ -188,6 +185,8 @@ export async function carryForwardStockOpenings(input: {
     sourceStock: input.sourceStock,
     targetItems: input.targetStock.items,
   });
+  const readiness = assessYearEndReadiness(input, plan);
+  if (!readiness.ready) throw new Error("Year-end inventory is not ready:\n" + readiness.blockingIssues.join("\n"));
   const writeSummary = await input.writeOpenings(plan.items);
 
   return {
@@ -196,4 +195,36 @@ export async function carryForwardStockOpenings(input: {
     updated: writeSummary.updated,
     status: "completed" as const,
   };
+}
+
+export function assessYearEndReadiness(input: BuildStockCarryForwardPlanInput, plan = buildStockCarryForwardPlan(input)) {
+  const validation = validStockBillsForSourceDocs(
+    input.sourceDocs.filter(doc => isStockDocumentEligible(doc, input.sourceFiscalYearId)),
+    input.sourceStock.purchaseBills, input.sourceStock.salesBills,
+  );
+  const blockingIssues = validation.statuses.filter(row => row.status !== "Entered")
+    .map(row => `${row.type} ${row.billNo || row.documentId}: ${row.status}`);
+  for (const doc of input.sourceDocs) if (doc.lifecycleStatus === "DRAFT") blockingIssues.push(`Document ${doc.billNo}: draft must be posted or removed before closing`);
+  const sourceKeys = new Set(input.sourceDocs.map(doc => doc.type + ":" + doc.documentId));
+  for (const bill of input.sourceStock.purchaseBills) {
+    const type = bill.sourceType ?? (bill.source === "Importation" ? "Import Purchase" : "Local Purchase");
+    if (bill.items.length && !sourceKeys.has(type + ":" + bill.id)) blockingIssues.push(`Inventory bill ${bill.billNo}: source document is missing`);
+  }
+  for (const bill of input.sourceStock.salesBills) if (bill.items.length && !sourceKeys.has("Sale:" + bill.id)) blockingIssues.push(`Inventory bill ${bill.billNo}: source sale is missing`);
+  const ids = new Set(input.sourceStock.items.map(item => item.id));
+  for (const item of input.sourceStock.items) if (![item.openingQty, item.openingRate].every(value => Number.isFinite(value) && value >= 0)) blockingIssues.push(`${item.code}: invalid opening stock`);
+  for (const doc of input.sourceDocs.filter(doc => isStockDocumentEligible(doc, input.sourceFiscalYearId))) if (doc.date > input.asOnDate) blockingIssues.push(`Document ${doc.billNo}: date exceeds fiscal-year closing date`);
+  for (const bill of [...input.sourceStock.purchaseBills, ...input.sourceStock.salesBills]) {
+    for (const line of bill.items) {
+      if (!ids.has(line.itemId)) blockingIssues.push(`Document ${bill.billNo}: missing item ${line.itemId}`);
+      if (![line.quantity, line.rate, line.amount].every(value => Number.isFinite(value) && value >= 0)) blockingIssues.push(`Document ${bill.billNo}: invalid stock line value`);
+    }
+  }
+  for (const row of buildStockRegisterRows(input.sourceStock.items, validation.purchaseBills, validation.salesBills)) {
+    if (row.balanceQty < 0) blockingIssues.push(`${row.code}: negative stock at ${row.date}`);
+    if (![row.balanceAmount, row.balanceQty, row.balanceRate].every(Number.isFinite)) blockingIssues.push(`${row.code}: invalid valuation`);
+  }
+  blockingIssues.push(...plan.conflicts, ...plan.warnings);
+  if (plan.skippedInvalid) blockingIssues.push(`${plan.skippedInvalid} invalid stock item(s)`);
+  return { ready: blockingIssues.length === 0, blockingIssues };
 }

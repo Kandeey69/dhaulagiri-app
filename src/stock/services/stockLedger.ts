@@ -85,12 +85,14 @@ export function buildStockRows(
     });
   });
 
-  rows.forEach((row) => {
-    const inwardQty = row.openingQty + row.localPurchaseQty + row.importationQty;
-    const inwardValue = row.openingValue + row.localPurchaseValue + row.importationValue;
-    row.closingQty = inwardQty - row.salesQty;
-    row.averageRate = inwardQty > 0 ? inwardValue / inwardQty : 0;
-    row.closingValue = row.closingQty * row.averageRate;
+  const lastByItem = new Map<string, StockRegisterRow>();
+  buildStockRegisterRows(items, purchaseBills.filter(bill => includeDate(bill.dateBs)), salesBills.filter(bill => includeDate(bill.dateBs)))
+    .forEach(row => lastByItem.set(row.itemId, row));
+  rows.forEach(row => {
+    const closing = lastByItem.get(row.itemId);
+    row.closingQty = closing?.balanceQty ?? 0;
+    row.closingValue = closing?.balanceAmount ?? 0;
+    row.averageRate = closing?.balanceRate ?? 0;
   });
 
   return rows;
@@ -107,6 +109,8 @@ type RegisterTransaction = {
   issuedSalesRate: number;
   sortGroup: number;
   sortDate: string;
+  createdAt: string;
+  documentId: string;
 };
 
 function rateFromAmount(amount: number, quantity: number) {
@@ -115,12 +119,6 @@ function rateFromAmount(amount: number, quantity: number) {
 
 function registerSortDate(value: string) {
   return value === "Opening" ? "" : normalizeStockDate(value);
-}
-
-function registerRowSortGroup(row: StockRegisterRow) {
-  if (row.id.startsWith("opening-")) return 0;
-  if (row.receivedQty) return 1;
-  return 2;
 }
 
 export function buildStockRegisterRows(
@@ -145,6 +143,7 @@ export function buildStockRegisterRows(
       issuedSalesRate: 0,
       sortDate: "",
       sortGroup: 0,
+      createdAt: "", documentId: item.id,
     });
   });
 
@@ -167,6 +166,7 @@ export function buildStockRegisterRows(
         issuedSalesRate: 0,
         sortDate: billDate,
         sortGroup: 1,
+        createdAt: bill.createdAt || "", documentId: bill.id,
       });
     });
   });
@@ -185,6 +185,7 @@ export function buildStockRegisterRows(
         issuedSalesRate: Number(line.rate || 0),
         sortDate: billDate,
         sortGroup: 2,
+        createdAt: bill.createdAt || "", documentId: bill.id,
       });
     });
   });
@@ -208,16 +209,18 @@ export function buildStockRegisterRows(
     itemTransactions
       .sort((first, second) => (
         first.sortDate.localeCompare(second.sortDate)
-        || first.sortGroup - second.sortGroup
-        || first.particulars.localeCompare(second.particulars)
+        || first.createdAt.localeCompare(second.createdAt)
+        || first.documentId.localeCompare(second.documentId)
+        || first.id.localeCompare(second.id)
       ))
       .forEach((transaction) => {
         const balanceRateBeforeIssue = rateFromAmount(balanceAmount, balanceQty);
-        const issuedAmount = Number((transaction.issuedQty * balanceRateBeforeIssue).toFixed(2));
+        const issuedAmount = transaction.issuedQty * balanceRateBeforeIssue;
         const receivedRate = rateFromAmount(transaction.receivedAmount, transaction.receivedQty);
 
-        balanceQty += transaction.receivedQty - transaction.issuedQty;
+        balanceQty = Number((balanceQty + transaction.receivedQty - transaction.issuedQty).toFixed(9));
         balanceAmount += transaction.receivedAmount - issuedAmount;
+        if (balanceQty === 0) balanceAmount = 0;
 
         rows.push({
           id: transaction.id,
@@ -241,10 +244,10 @@ export function buildStockRegisterRows(
       });
   });
 
+  const sequence = new Map(rows.map((row, index) => [row, index]));
   return rows.sort((first, second) => (
     registerSortDate(first.date).localeCompare(registerSortDate(second.date))
-    || registerRowSortGroup(first) - registerRowSortGroup(second)
     || first.code.localeCompare(second.code)
-    || first.particulars.localeCompare(second.particulars)
+    || (sequence.get(first)! - sequence.get(second)!)
   ));
 }

@@ -1,3 +1,6 @@
+import { stageSqlTransaction } from '../src/application/atomicSql'
+import { persistBusinessAction, flushPendingWrites, acknowledgeRecoveredWrites } from '../src/application/persistence'
+import { parseFiscalYear, getSuccessorFiscalYear, validateFiscalYearTransition } from '../src/domain/fiscalYear'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -928,27 +931,17 @@ test('maps HFFT Apple import purchase landed-cost fields from repository rows', 
   assert.equal(mapped.lifecycleStatus, 'POSTED')
 })
 
-test('keeps purchase snapshot commit outside activity log loop', () => {
-  const source = readFileSync('src/purchase/repository.ts', 'utf8')
-  const lines = source.split(/\r?\n/)
-  const loopLine = lines.findIndex((line) => line.includes('for (const log of data.activityLogs)'))
-  const commitLine = lines.findIndex((line, index) => index > loopLine && line.includes("await db.execute('COMMIT')"))
-
-  assert.notEqual(loopLine, -1)
-  assert.notEqual(commitLine, -1)
-
-  let loopDepth = 0
-  for (const line of lines.slice(loopLine, commitLine)) {
-    for (const character of line) {
-      if (character === '{') {
-        loopDepth += 1
-      } else if (character === '}') {
-        loopDepth -= 1
-      }
-    }
-  }
-
-  assert.equal(loopDepth, 0)
+test('commits a staged snapshot once after all activity logs, and never after staging failure', async () => {
+  let commits = 0
+  const db = { select: async () => [], execute: async () => { throw new Error('unstaged write') } }
+  const commit = async (_filename: string, _reads: unknown[], writes: { sql: string }[]) => { commits++; assert.deepEqual(writes.map(row => row.sql), ['snapshot', 'log1', 'log2']) }
+  await stageSqlTransaction(db as never, 'test.db', async tx => {
+    await tx.execute('snapshot')
+    for (const log of ['log1', 'log2']) await tx.execute(log)
+  }, commit)
+  assert.equal(commits, 1)
+  await assert.rejects(stageSqlTransaction(db as never, 'test.db', async tx => { await tx.execute('snapshot'); throw new Error('log failure') }, commit), /log failure/)
+  assert.equal(commits, 1)
 })
 
 test('persists import loading and landed-cost fields through the Rust purchase command payload', () => {
@@ -1713,6 +1706,25 @@ test('only stock-headed local purchases become stock source documents', () => {
   ])
 })
 
+test('explicit writes survive immediate navigation and failures stop the persistence barrier', async () => {
+  let release!: () => void
+  acknowledgeRecoveredWrites()
+  let saved = false
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const save = persistBusinessAction('test', async () => { await gate; saved = true })
+  let navigated = false
+  const navigation = flushPendingWrites().then(() => { navigated = true })
+  await Promise.resolve()
+  assert.equal(navigated, false)
+  release()
+  await Promise.all([save, navigation])
+  assert.equal(saved, true)
+  await assert.rejects(persistBusinessAction('test', async () => { throw new Error('disk full') }))
+  await assert.rejects(flushPendingWrites(), /save failed/)
+  await persistBusinessAction('test', async () => {})
+  await flushPendingWrites()
+})
+
 test('keeps purchase stock identity by source document type, not bill number alone', () => {
   const sourceDocs = [
     {
@@ -2409,19 +2421,19 @@ test('plans stock carry-forward from eligible closing stock into target openings
     targetItems: [],
   })
 
-  assert.equal(firstRun.eligibleItemCount, 2)
-  assert.equal(firstRun.created, 2)
+  assert.equal(firstRun.eligibleItemCount, 3)
+  assert.equal(firstRun.created, 3)
   assert.equal(firstRun.updated, 0)
   assert.equal(firstRun.skippedInactiveZero, 1)
   assert.equal(firstRun.totalClosingQty, 14)
   assert.equal(Number(firstRun.totalClosingValue.toFixed(2)), 1543.33)
-  assert.deepEqual(firstRun.items.map((item) => item.code), ['IRON', 'MIX'])
+  assert.deepEqual(firstRun.items.map((item) => item.code), ['IRON', 'OLD', 'MIX'])
   assert.equal(firstRun.items[0].openingQty, 11)
   assert.equal(Number(firstRun.items[0].openingRate.toFixed(6)), 126.666667)
   assert.equal(Number(firstRun.items[0].sourceClosingValue.toFixed(2)), 1393.33)
-  assert.equal(firstRun.items[1].openingQty, 3)
-  assert.equal(firstRun.items[1].openingRate, 50)
-  assert.equal(firstRun.items[1].sourceClosingValue, 150)
+  assert.equal(firstRun.items[2].openingQty, 3)
+  assert.equal(firstRun.items[2].openingRate, 50)
+  assert.equal(firstRun.items[2].sourceClosingValue, 150)
 
   const secondRun = buildStockCarryForwardPlan({
     asOnDate: fiscalYear.endBs,
@@ -2442,9 +2454,10 @@ test('plans stock carry-forward from eligible closing stock into target openings
   })
 
   assert.equal(secondRun.created, 0)
-  assert.equal(secondRun.updated, 2)
+  assert.equal(secondRun.updated, 3)
   assert.deepEqual(secondRun.items.map((item) => [item.code, item.openingQty, item.openingRate]), [
     ['IRON', 11, firstRun.items[0].openingRate],
+    ['OLD', 0, 0],
     ['MIX', 3, 50],
   ])
 })
@@ -2525,6 +2538,20 @@ test('serializes concurrent stock transactions on the same database connection',
     'second-write',
     'COMMIT',
   ])
+})
+
+test('strict fiscal year transitions reject invalid successors and cycles without mutations', async () => {
+  const a = { id: 'a', fiscalYear: '2082/83', nextCompanyId: '', previousCompanyId: '' }
+  const b = { id: 'b', fiscalYear: '2083/84', nextCompanyId: '', previousCompanyId: '' }
+  const before = JSON.stringify([a, b])
+  assert.equal(getSuccessorFiscalYear(a.fiscalYear), b.fiscalYear)
+  validateFiscalYearTransition(a, b, [a, b])
+  for (const code of ['2083/99', 'nonsense', '', '2082/82']) assert.throws(() => parseFiscalYear(code))
+  assert.throws(() => validateFiscalYearTransition(a, a, [a]))
+  assert.throws(() => validateFiscalYearTransition(a, { ...b, fiscalYear: '2084/85' }, [a,b]))
+  assert.throws(() => validateFiscalYearTransition(a, { ...b, nextCompanyId: a.id }, [a,b]))
+  assert.throws(() => validateFiscalYearTransition(a, { ...b, previousCompanyId: 'other' }, [a,b]))
+  assert.equal(JSON.stringify([a,b]), before)
 })
 
 test('serializes stock transactions by database URL across connection objects', async () => {

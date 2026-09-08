@@ -1,0 +1,69 @@
+{
+  "accepted": 16,
+  "results": [
+    {
+      "scenario": "Self-carry rejects before any profile or opening mutation",
+      "passed": true
+    },
+    {
+      "scenario": "Full depletion then purchase closes at NPR 2000 in every calculation",
+      "passed": true
+    },
+    {
+      "scenario": "Inactive zero item explicitly clears derived target opening",
+      "passed": true
+    },
+    {
+      "scenario": "Malformed fiscal-year codes fail instead of falling back",
+      "passed": true
+    },
+    {
+      "scenario": "Immediate navigation awaits durable business save",
+      "passed": true
+    },
+    {
+      "scenario": "Second-store deletion failure restores all original data",
+      "passed": true
+    },
+    {
+      "scenario": "Seed deletion survives repeated startup",
+      "passed": true
+    },
+    {
+      "scenario": "Paused background work neither changes nor restores visible company selection",
+      "passed": true
+    },
+    {
+      "scenario": "Missing stock lines block year end before writes",
+      "passed": true
+    },
+    {
+      "scenario": "Manual target opening remains independent of recalculated source",
+      "passed": true
+    },
+    {
+      "scenario": "Desktop SQLite initialization failure never opens browser fallback",
+      "passed": true
+    },
+    {
+      "scenario": "In-memory SQLite sale amount and party changes enforce existing allocations",
+      "passed": true
+    },
+    {
+      "scenario": "In-memory SQLite journal and restore failures roll back; backup lifecycle and journals round-trip",
+      "passed": true
+    },
+    {
+      "scenario": "Actual carry orchestration across three years: receivables, payables, moving inventory, dependency guards, deleted sources and protected target activity",
+      "passed": true
+    },
+    {
+      "scenario": "Successful close keeps the source locked after writing its successor link",
+      "passed": true
+    },
+    {
+      "scenario": "Legacy opening ownership requires an explicit decision: repair NPR 1500 to 2000, or preserve a confirmed manual figure",
+      "passed": true
+    }
+  ]
+}

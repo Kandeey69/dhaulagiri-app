@@ -1,3 +1,5 @@
+import { persistBusinessAction } from "../application/persistence";
+import { stageSqlTransaction } from "../application/atomicSql";
 import Database from "@tauri-apps/plugin-sql";
 import {
   assertActiveCompanyWritable,
@@ -17,8 +19,6 @@ import type {
   StockPurchaseBill,
   StockPurchaseLine,
   StockSourceSnapshot,
-  StockRegisterRow,
-  StockRow,
   StockSalesBill,
   StockSalesLine,
   StockSource,
@@ -732,7 +732,7 @@ export async function getStockItems(): Promise<StockItem[]> {
   return runSerializedStockOperation(stockDbUrl, () => getStockItemsFromDb(db));
 }
 
-export async function saveStockItem(input: Omit<StockItem, "id" | "createdAt">) {
+async function saveStockItemImpl(input: Omit<StockItem, "id" | "createdAt">) {
   assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
@@ -793,7 +793,7 @@ export async function saveStockItem(input: Omit<StockItem, "id" | "createdAt">) 
   return item;
 }
 
-export async function upsertOpeningStockItem(input: Omit<StockItem, "id" | "createdAt">) {
+async function upsertOpeningStockItemImpl(input: Omit<StockItem, "id" | "createdAt">) {
   assertActiveCompanyWritable();
   const code = normalizeStockItemCode(input.code);
   const items = await getStockItems();
@@ -814,7 +814,7 @@ export async function upsertOpeningStockItem(input: Omit<StockItem, "id" | "crea
   return saveStockItem({ ...input, code });
 }
 
-export async function updateStockItem(input: Omit<StockItem, "createdAt">) {
+async function updateStockItemImpl(input: Omit<StockItem, "createdAt">) {
   assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
@@ -864,7 +864,7 @@ export async function updateStockItem(input: Omit<StockItem, "createdAt">) {
   return { ...input, code, name, unit, createdAt: "" };
 }
 
-export async function deleteStockItem(itemId: string) {
+async function deleteStockItemImpl(itemId: string) {
   assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
@@ -1091,7 +1091,7 @@ async function restoreSalesDocumentSnapshot(db: Database, snapshot: SalesDocumen
   }
 }
 
-export async function setStockPurchaseLinesForDocument(input: StockPurchaseDocumentInput) {
+async function setStockPurchaseLinesForDocumentImpl(input: StockPurchaseDocumentInput) {
   assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
@@ -1112,7 +1112,7 @@ export async function setStockPurchaseLinesForDocument(input: StockPurchaseDocum
     const previous = await readPurchaseDocumentSnapshot(db, billId, documentId, sourceDocumentType);
 
     try {
-      await runStockDbTransaction(db, async () => {
+      await withStockTransaction(db, stockDbUrl, async (db) => {
         await db.execute(
           `
           DELETE FROM stock_purchase_lines
@@ -1204,7 +1204,7 @@ export async function setStockPurchaseLinesForDocument(input: StockPurchaseDocum
             [line.id, billId, line.itemId, line.quantity, line.rate, line.amount, line.entryRate, line.entryAmount],
           );
         }
-      }, { queueKey: stockDbUrl });
+      });
     } catch (error) {
       await executeWithRetry(
         db,
@@ -1224,7 +1224,7 @@ export async function setStockPurchaseLinesForDocument(input: StockPurchaseDocum
   });
 }
 
-export async function setStockSalesLinesForDocument(input: StockSalesDocumentInput) {
+async function setStockSalesLinesForDocumentImpl(input: StockSalesDocumentInput) {
   assertActiveCompanyWritable();
   const stockDbUrl = getActiveStockDatabaseUrl();
   const db = await getDb(stockDbUrl);
@@ -1240,7 +1240,7 @@ export async function setStockSalesLinesForDocument(input: StockSalesDocumentInp
     const previous = await readSalesDocumentSnapshot(db, documentId);
 
     try {
-      await runStockDbTransaction(db, async () => {
+      await withStockTransaction(db, stockDbUrl, async (db) => {
         await db.execute(
           `
           DELETE FROM stock_sales_lines
@@ -1320,7 +1320,7 @@ export async function setStockSalesLinesForDocument(input: StockSalesDocumentInp
             [line.id, documentId, line.itemId, line.quantity, line.rate, line.amount],
           );
         }
-      }, { queueKey: stockDbUrl });
+      });
     } catch (error) {
       await executeWithRetry(
         db,
@@ -1440,7 +1440,7 @@ export async function getStockBackupDataForCompany(companyId: string): Promise<S
   });
 }
 
-function validateStockBackupData(data: StockBackupData) {
+export function validateStockBackupData(data: StockBackupData) {
   const itemCodes = new Set<string>();
   const itemIds = new Set<string>();
 
@@ -1450,6 +1450,7 @@ function validateStockBackupData(data: StockBackupData) {
       throw new Error("Stock backup contains an invalid item record.");
     }
     assertNonNegativeStockItemValues(item);
+    if (itemIds.has(item.id)) throw new Error("Stock backup contains duplicate item IDs.");
     if (itemCodes.has(code)) {
       throw new Error(`Stock backup contains duplicate item code ${code}.`);
     }
@@ -1466,7 +1467,7 @@ function validateStockBackupData(data: StockBackupData) {
     }
     purchaseKeys.add(key);
     bill.items.forEach((line) => {
-      if (!line.id || !itemIds.has(line.itemId) || Number(line.quantity) < 0 || Number(line.rate) < 0) {
+      if (!line.id || !itemIds.has(line.itemId) || ![line.quantity, line.rate, line.amount].every(value => Number.isFinite(value) && value >= 0)) {
         throw new Error(`Stock backup contains an invalid purchase line for ${key}.`);
       }
     });
@@ -1480,7 +1481,7 @@ function validateStockBackupData(data: StockBackupData) {
     }
     salesKeys.add(key);
     bill.items.forEach((line) => {
-      if (!line.id || !itemIds.has(line.itemId) || Number(line.quantity) < 0 || Number(line.rate) < 0) {
+      if (!line.id || !itemIds.has(line.itemId) || ![line.quantity, line.rate, line.amount].every(value => Number.isFinite(value) && value >= 0)) {
         throw new Error(`Stock backup contains an invalid sales line for ${key}.`);
       }
     });
@@ -1493,7 +1494,7 @@ export async function replaceStockBackupDataForCompany(companyId: string, data: 
   const stockDbUrl = getStockDatabaseUrlForCompanyId(companyId);
   const db = await getDb(stockDbUrl, companyId);
 
-  await runSerializedStockOperation(stockDbUrl, () => runStockDbTransaction(db, async () => {
+  await runSerializedStockOperation(stockDbUrl, () => withStockTransaction(db, stockDbUrl, async (db) => {
     await db.execute("DELETE FROM stock_purchase_lines");
     await db.execute("DELETE FROM stock_sales_lines");
     await db.execute("DELETE FROM stock_purchase_bills");
@@ -1657,7 +1658,7 @@ export async function replaceStockBackupDataForCompany(companyId: string, data: 
         );
       }
     }
-  }, { queueKey: stockDbUrl }));
+  }));
 }
 
 export async function upsertStockOpeningItemsForCompany(
@@ -1673,7 +1674,7 @@ export async function upsertStockOpeningItemsForCompany(
     const existingItems = await getStockItemsFromDb(db);
     const existingByCode = new Map(existingItems.map((item) => [normalizeStockItemCode(item.code), item] as const));
 
-    await runStockDbTransaction(db, async () => {
+    await withStockTransaction(db, stockDbUrl, async (db) => {
     for (const item of items) {
       const code = normalizeStockItemCode(item.code);
       const existing = existingByCode.get(code);
@@ -1741,227 +1742,45 @@ export async function upsertStockOpeningItemsForCompany(
         summary.created += 1;
       }
       }
-    }, { queueKey: stockDbUrl });
+    });
   });
 
   return summary;
 }
 
-export function buildStockRows(
-  items: StockItem[],
-  purchaseBills: StockPurchaseBill[],
-  salesBills: StockSalesBill[],
-  asOnDate = "",
-): StockRow[] {
-  const normalizedAsOnDate = normalizeOptionalDate(asOnDate);
-  const includeDate = (value: string) =>
-    !normalizedAsOnDate || !value || normalizeOptionalDate(value) <= normalizedAsOnDate;
-
-  const rows = items.map((item) => ({
-      itemId: item.id,
-      code: item.code,
-      name: item.name,
-      unit: item.unit,
-      openingQty: item.openingQty,
-      openingValue: item.openingQty * item.openingRate,
-      localPurchaseQty: 0,
-      localPurchaseValue: 0,
-      importationQty: 0,
-      importationValue: 0,
-      salesQty: 0,
-      salesValue: 0,
-      closingQty: 0,
-      averageRate: 0,
-      closingValue: 0,
-      reorderLevel: item.reorderLevel,
-  }));
-  const rowByItemId = new Map(rows.map((row) => [row.itemId, row] as const));
-
-  purchaseBills.forEach((bill) => {
-    if (!includeDate(bill.dateBs)) return;
-    bill.items.forEach((line) => {
-      const row = rowByItemId.get(line.itemId);
-      if (!row) return;
-      if (bill.source === "Importation") {
-        row.importationQty += line.quantity;
-        row.importationValue += line.amount;
-      } else {
-        row.localPurchaseQty += line.quantity;
-        row.localPurchaseValue += line.amount;
-      }
-    });
-  });
-
-  salesBills.forEach((bill) => {
-    if (!includeDate(bill.dateBs)) return;
-    bill.items.forEach((line) => {
-      const row = rowByItemId.get(line.itemId);
-      if (!row) return;
-      row.salesQty += line.quantity;
-      row.salesValue += line.amount;
-    });
-  });
-
-  rows.forEach((row) => {
-    const inwardQty = row.openingQty + row.localPurchaseQty + row.importationQty;
-    const inwardValue = row.openingValue + row.localPurchaseValue + row.importationValue;
-    row.closingQty = inwardQty - row.salesQty;
-    row.averageRate = inwardQty > 0 ? inwardValue / inwardQty : 0;
-    row.closingValue = row.closingQty * row.averageRate;
-  });
-
-  return rows;
+export { buildStockRows, buildStockRegisterRows } from "./services/stockLedger";
+async function withStockTransaction<T>(db: Database, url: string, work: (db: Database) => Promise<T>) {
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+    return stageSqlTransaction(db, url.slice(7), work);
+  }
+  return runStockDbTransaction(db, () => work(db), { queueKey: url });
+}
+export async function saveStockItem(...args: Parameters<typeof saveStockItemImpl>) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => saveStockItemImpl(...args));
 }
 
-type RegisterTransaction = {
-  id: string;
-  date: string;
-  itemId: string;
-  particulars: string;
-  receivedQty: number;
-  receivedAmount: number;
-  issuedQty: number;
-  issuedSalesRate: number;
-  sortGroup: number;
-  sortDate: string;
-};
-
-function rateFromAmount(amount: number, quantity: number) {
-  return quantity ? amount / quantity : 0;
+export async function upsertOpeningStockItem(...args: Parameters<typeof upsertOpeningStockItemImpl>) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => upsertOpeningStockItemImpl(...args));
 }
 
-function registerSortDate(value: string) {
-  return value === "Opening" ? "" : normalizeOptionalDate(value);
+export async function updateStockItem(...args: Parameters<typeof updateStockItemImpl>) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => updateStockItemImpl(...args));
 }
 
-function registerRowSortGroup(row: StockRegisterRow) {
-  if (row.id.startsWith("opening-")) return 0;
-  if (row.receivedQty) return 1;
-  return 2;
+export async function deleteStockItem(...args: Parameters<typeof deleteStockItemImpl>) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => deleteStockItemImpl(...args));
 }
 
-export function buildStockRegisterRows(
-  items: StockItem[],
-  purchaseBills: StockPurchaseBill[],
-  salesBills: StockSalesBill[],
-): StockRegisterRow[] {
-  const itemById = new Map(items.map((item) => [item.id, item] as const));
-  const transactions: RegisterTransaction[] = [];
+export async function setStockPurchaseLinesForDocument(...args: Parameters<typeof setStockPurchaseLinesForDocumentImpl>) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => setStockPurchaseLinesForDocumentImpl(...args));
+}
 
-  items.forEach((item) => {
-    const openingAmount = Number(item.openingQty || 0) * Number(item.openingRate || 0);
-    if (!item.openingQty && !openingAmount) return;
-    transactions.push({
-      id: `opening-${item.id}`,
-      date: "Opening",
-      itemId: item.id,
-      particulars: "Opening Stock",
-      receivedQty: Number(item.openingQty || 0),
-      receivedAmount: openingAmount,
-      issuedQty: 0,
-      issuedSalesRate: 0,
-      sortDate: "",
-      sortGroup: 0,
-    });
-  });
-
-  purchaseBills.forEach((bill) => {
-    const billDate = normalizeOptionalDate(bill.dateBs);
-    bill.items.forEach((line) => {
-      transactions.push({
-        id: line.id,
-        date: bill.dateBs,
-        itemId: line.itemId,
-        particulars: [
-          bill.source === "Importation" ? "Received - Import Purchase" : "Received - Local Purchase",
-          bill.billNo,
-          bill.referenceNo,
-          bill.supplierName,
-        ].filter(Boolean).join(" - "),
-        receivedQty: Number(line.quantity || 0),
-        receivedAmount: Number(line.amount || 0),
-        issuedQty: 0,
-        issuedSalesRate: 0,
-        sortDate: billDate,
-        sortGroup: 1,
-      });
-    });
-  });
-
-  salesBills.forEach((bill) => {
-    const billDate = normalizeOptionalDate(bill.dateBs);
-    bill.items.forEach((line) => {
-      transactions.push({
-        id: line.id,
-        date: bill.dateBs,
-        itemId: line.itemId,
-        particulars: ["Issued - Sales Bill", bill.billNo, bill.customerName].filter(Boolean).join(" - "),
-        receivedQty: 0,
-        receivedAmount: 0,
-        issuedQty: Number(line.quantity || 0),
-        issuedSalesRate: Number(line.rate || 0),
-        sortDate: billDate,
-        sortGroup: 2,
-      });
-    });
-  });
-
-  const transactionsByItemId = new Map<string, RegisterTransaction[]>();
-  transactions.forEach((transaction) => {
-    transactionsByItemId.set(transaction.itemId, [
-      ...(transactionsByItemId.get(transaction.itemId) ?? []),
-      transaction,
-    ]);
-  });
-
-  const rows: StockRegisterRow[] = [];
-  transactionsByItemId.forEach((itemTransactions, itemId) => {
-    const item = itemById.get(itemId);
-    if (!item) return;
-
-    let balanceQty = 0;
-    let balanceAmount = 0;
-
-    itemTransactions
-      .sort((first, second) => (
-        first.sortDate.localeCompare(second.sortDate)
-        || first.sortGroup - second.sortGroup
-        || first.particulars.localeCompare(second.particulars)
-      ))
-      .forEach((transaction) => {
-        const balanceRateBeforeIssue = rateFromAmount(balanceAmount, balanceQty);
-        const issuedAmount = Number((transaction.issuedQty * balanceRateBeforeIssue).toFixed(2));
-        const receivedRate = rateFromAmount(transaction.receivedAmount, transaction.receivedQty);
-
-        balanceQty += transaction.receivedQty - transaction.issuedQty;
-        balanceAmount += transaction.receivedAmount - issuedAmount;
-
-        rows.push({
-          id: transaction.id,
-          date: transaction.date,
-          itemId,
-          code: item.code,
-          itemName: item.name,
-          particulars: transaction.particulars,
-          unit: item.unit,
-          receivedQty: transaction.receivedQty,
-          receivedRate,
-          receivedAmount: transaction.receivedAmount,
-          issuedQty: transaction.issuedQty,
-          issuedRate: transaction.issuedQty ? balanceRateBeforeIssue : 0,
-          issuedSalesRate: transaction.issuedQty ? transaction.issuedSalesRate : 0,
-          issuedAmount,
-          balanceQty,
-          balanceRate: rateFromAmount(balanceAmount, balanceQty),
-          balanceAmount,
-        });
-      });
-  });
-
-  return rows.sort((first, second) => (
-    registerSortDate(first.date).localeCompare(registerSortDate(second.date))
-    || registerRowSortGroup(first) - registerRowSortGroup(second)
-    || first.code.localeCompare(second.code)
-    || first.particulars.localeCompare(second.particulars)
-  ));
+export async function setStockSalesLinesForDocument(...args: Parameters<typeof setStockSalesLinesForDocumentImpl>) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => setStockSalesLinesForDocumentImpl(...args));
 }

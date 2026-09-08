@@ -83,6 +83,14 @@ export function assertTransactionTransition(
     throw new Error(validation.error ?? `Invalid lifecycle transition ${from} to ${to}.`)
   }
 }
+/** Operational screens permit audited corrections of posted entries in OPEN years.
+ * Callers must replace the journal and validate allocations in the same transaction.
+ * Reversed/void history remains immutable. */
+export function assertOperationalCorrection(status: TransactionLifecycleStatus | undefined, fiscalYear: Pick<FiscalYear, 'status'>) {
+  if (fiscalYear.status !== 'OPEN' || (status && status !== 'DRAFT' && status !== 'POSTED')) {
+    throw new Error('Only draft or posted entries in an open fiscal year can be corrected. Reversed and void history cannot be edited or deleted.');
+  }
+}
 
 export function canModifyFinancialFields(status: TransactionLifecycleStatus, fiscalYear: Pick<FiscalYear, 'status'>) {
   return fiscalYear.status !== 'CLOSED' && status === 'DRAFT'

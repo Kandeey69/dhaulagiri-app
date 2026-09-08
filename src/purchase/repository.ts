@@ -1,3 +1,4 @@
+import { stageSqlTransaction } from "../application/atomicSql";
 import schemaSql from './db/schema.sql?raw'
 import {
   defaultSettings,
@@ -16,10 +17,9 @@ import {
 import { mapImportPurchaseRowFromDb } from './repositoryMapping'
 import { loadData as loadLocalData, saveData as saveLocalData } from './storage'
 import {
-  assertActiveCompanyWritable,
-  getActiveCompanyId,
-  getActiveCompanyProfile,
-  getActivePurchaseDatabaseUrl,
+  assertCompanyWritable,
+  companyDatabaseContext,
+  type CompanyDatabaseContext,
 } from '../companyContext'
 import {
   createFiscalYearFromCode,
@@ -40,20 +40,6 @@ const wait = (milliseconds: number) => new Promise((resolve) => globalThis.setTi
 
 function isDatabaseLockedError(error: unknown) {
   return String(error instanceof Error ? error.message : error).toLowerCase().includes('database is locked')
-}
-
-async function beginImmediateTransaction(db: SqlDatabase) {
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    try {
-      await db.execute('BEGIN IMMEDIATE TRANSACTION')
-      return
-    } catch (error) {
-      if (!isDatabaseLockedError(error) || attempt === 11) {
-        throw error
-      }
-      await wait(350 * (attempt + 1))
-    }
-  }
 }
 
 export type DataRepository = {
@@ -85,18 +71,13 @@ const splitSql = (sql: string) =>
 
 const boolFromDb = (value: unknown) => value === 1 || value === true
 
-const activeCompanyId = () => getActiveCompanyId() || 'default'
-
-const activeFiscalYearCode = (settings?: AppSettings) =>
-  getActiveCompanyProfile()?.fiscalYear || settings?.fiscalYear || defaultSettings.fiscalYear
-
 const fiscalYearForDate = (
   date: string,
   fiscalYears: FiscalYear[],
   settings?: AppSettings,
 ) =>
   (date ? findFiscalYearByBsDate(date, fiscalYears) : undefined) ??
-  getOrCreateMigrationFiscalYear(activeCompanyId(), fiscalYears, activeFiscalYearCode(settings))
+  getOrCreateMigrationFiscalYear(fiscalYears[0]?.companyId ?? (() => { throw new Error('Explicit fiscal-year company context is required.') })(), fiscalYears, settings?.fiscalYear || fiscalYears[0]?.code)
 
 const importPurchaseFiscalDateFromDb = (row: Record<string, unknown>) =>
   String(row.debitNoteDate ?? '') || String(row.agentServiceBillDate ?? '')
@@ -109,7 +90,7 @@ const importPurchaseFiscalYearId = (
 
 const fiscalYearFromDb = (row: Record<string, unknown>): FiscalYear => ({
   id: String(row.id ?? ''),
-  companyId: String(row.companyId ?? activeCompanyId()),
+  companyId: String(row.companyId ?? ''),
   code: String(row.code ?? defaultSettings.fiscalYear),
   startBs: String(row.startBs ?? ''),
   endBs: String(row.endBs ?? ''),
@@ -347,7 +328,7 @@ function isDuplicateColumnError(error: unknown) {
     .includes('duplicate column name')
 }
 
-async function ensureAccountingModel(db: SqlDatabase) {
+async function ensureAccountingModel(db: SqlDatabase, context: CompanyDatabaseContext) {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS fiscal_years (
       id TEXT PRIMARY KEY,
@@ -435,8 +416,8 @@ async function ensureAccountingModel(db: SqlDatabase) {
   await db.execute('CREATE INDEX IF NOT EXISTS idx_ledger_fiscal_year ON ledger_entries(fiscalYearId)')
   await db.execute('CREATE INDEX IF NOT EXISTS idx_ledger_party ON ledger_entries(partyId)')
 
-  const companyId = activeCompanyId()
-  const code = activeFiscalYearCode()
+  const companyId = context.companyId
+  const code = context.fiscalYear
   const fiscalYear = createFiscalYearFromCode(companyId, code)
   await db.execute(
     `INSERT OR IGNORE INTO fiscal_years (
@@ -461,9 +442,9 @@ async function ensureAccountingModel(db: SqlDatabase) {
   await db.execute("UPDATE import_purchases SET calculatedAt = COALESCE(NULLIF(updatedAt, ''), createdAt) WHERE calculatedAt = ''")
 }
 
-async function createSqliteRepository(): Promise<DataRepository> {
+async function createSqliteRepository(context: CompanyDatabaseContext): Promise<DataRepository> {
   const { default: Database } = await import('@tauri-apps/plugin-sql')
-  const databaseUrl = getActivePurchaseDatabaseUrl()
+  const databaseUrl = context.purchaseUrl
   const db = await Database.load(databaseUrl)
 
   await db.execute('PRAGMA busy_timeout = 10000')
@@ -474,14 +455,12 @@ async function createSqliteRepository(): Promise<DataRepository> {
   await ensureActivityLogColumns(db)
   await ensureSupplierCurrencyColumns(db)
   await ensureFreightIndiaPartyColumn(db)
-  await ensureAccountingModel(db)
+  await ensureAccountingModel(db, context)
 
-  const saveSnapshot = async (data: AppData) => {
-    await beginImmediateTransaction(db)
-    try {
+  const saveSnapshot = async (data: AppData) => stageSqlTransaction(db as import('@tauri-apps/plugin-sql').default, context.purchaseUrl.slice(7), async (db) => {
       const fiscalYears = data.fiscalYears.length
         ? data.fiscalYears
-        : [createFiscalYearFromCode(activeCompanyId(), activeFiscalYearCode(data.settings))]
+        : [createFiscalYearFromCode(context.companyId, context.fiscalYear)]
 
       await db.execute('DELETE FROM payment_allocations')
       await db.execute('DELETE FROM ledger_entries')
@@ -758,12 +737,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
       )
     }
 
-      await db.execute('COMMIT')
-    } catch (error) {
-      await db.execute('ROLLBACK').catch(() => undefined)
-      throw error
-    }
-  }
+  })
 
   const saveSnapshotWithRetry = async (data: AppData) => {
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -806,9 +780,9 @@ async function createSqliteRepository(): Promise<DataRepository> {
       const settings = settingsFromDb(settingsRows[0])
       const fiscalYears = fiscalYearRows.map(fiscalYearFromDb)
       const migrationFiscalYear = getOrCreateMigrationFiscalYear(
-        activeCompanyId(),
+        context.companyId,
         fiscalYears,
-        activeFiscalYearCode(settings),
+        context.fiscalYear,
       )
       const normalizedFiscalYears = fiscalYears.some((item) => item.id === migrationFiscalYear.id)
         ? fiscalYears
@@ -833,7 +807,7 @@ async function createSqliteRepository(): Promise<DataRepository> {
       }
     },
     saveData: async (data) => {
-      assertActiveCompanyWritable()
+      assertCompanyWritable(context.companyId)
       const previousSave = sqliteSaveQueues.get(databaseUrl) ?? Promise.resolve()
       const nextSave = previousSave.catch(() => undefined).then(() => saveSnapshotWithRetry(data))
       sqliteSaveQueues.set(databaseUrl, nextSave.catch(() => undefined))
@@ -842,27 +816,26 @@ async function createSqliteRepository(): Promise<DataRepository> {
   }
 }
 
-function createLocalRepository(): DataRepository {
+function createLocalRepository(context: CompanyDatabaseContext): DataRepository {
   return {
     kind: 'localStorage',
-    loadData: async () => loadLocalData(),
+    loadData: async () => loadLocalData(context.companyId),
     saveData: async (data) => {
-      assertActiveCompanyWritable()
-      return saveLocalData(data)
+      assertCompanyWritable(context.companyId)
+      return saveLocalData(data, context.companyId)
     },
   }
 }
 
-export async function createDataRepository(): Promise<DataRepository> {
+export async function createDataRepository(context = companyDatabaseContext()): Promise<DataRepository> {
   if (!isTauriRuntime()) {
-    return createLocalRepository()
+    return createLocalRepository(context)
   }
 
   try {
-    return await createSqliteRepository()
+    return await createSqliteRepository(context)
   } catch (error) {
-    console.error('SQLite storage failed to initialize, using localStorage fallback.', error)
-    return createLocalRepository()
+    throw new Error('Purchase database unavailable. No fallback store was opened. Retry opening the module or recover a verified backup.', { cause: error })
   }
 }
 

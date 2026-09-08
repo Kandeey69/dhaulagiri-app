@@ -1,6 +1,14 @@
+import { recoverCompanyChange } from "../../application/recovery";
+import { assertOperationalCorrection } from "../../domain/lifecycle";
+import { ACCOUNT_TABLES, validateRawAccounts, type RawAccountTables } from "../../application/backupValidation";
+import { stageSqlTransaction } from "../../application/atomicSql";
+import { persistBusinessAction } from "../../application/persistence";
 import Database from "@tauri-apps/plugin-sql";
 import {
   assertActiveCompanyWritable,
+  assertCompanyWritable,
+  companyDatabaseContext,
+  type CompanyDatabaseContext,
   getActiveAccountsDatabaseUrl,
   getActiveCompanyId,
   getActiveCompanyProfile,
@@ -38,6 +46,8 @@ import {
 } from "../../application/carryForwardPartySync";
 
 export type AccountsBackupData = {
+  schemaVersion?: 3;
+  rawTables?: RawAccountTables;
   activityLogs: ActivityLog[];
   collections: Collection[];
   creditNotes: CreditNote[];
@@ -76,8 +86,8 @@ function sqliteFilenameFromUrl(databaseUrl: string) {
   return filename;
 }
 
-async function getDb() {
-  const activeDbUrl = getActiveAccountsDatabaseUrl();
+async function getDb(context?: CompanyDatabaseContext) {
+  const activeDbUrl = context?.accountsUrl ?? getActiveAccountsDatabaseUrl();
 
   if (!dbPromise || dbUrl !== activeDbUrl) {
     dbUrl = activeDbUrl;
@@ -85,15 +95,15 @@ async function getDb() {
   }
 
   const db = await dbPromise;
-  await ensureDbInitialized(db, activeDbUrl);
+  await ensureDbInitialized(db, activeDbUrl, context);
   return db;
 }
 
-async function ensureDbInitialized(db: Database, activeDbUrl: string) {
+async function ensureDbInitialized(db: Database, activeDbUrl: string, context?: CompanyDatabaseContext) {
   let initPromise = dbInitPromises.get(activeDbUrl);
 
   if (!initPromise) {
-    initPromise = initDb(db).catch((error) => {
+    initPromise = initDb(db, context).catch((error) => {
       dbInitPromises.delete(activeDbUrl);
       throw error;
     });
@@ -193,15 +203,15 @@ function mapFiscalYear(row: Record<string, unknown>): FiscalYear {
   };
 }
 
-async function getFiscalYears(db: Database) {
+async function getFiscalYears(db: Database, context = companyDatabaseContext()) {
   const rows = await db.select<Record<string, unknown>[]>(
     "SELECT * FROM fiscal_years ORDER BY startBs DESC"
   );
   const fiscalYears = rows.map(mapFiscalYear);
   const migrationFiscalYear = getOrCreateMigrationFiscalYear(
-    getActiveCompanyId() || "default",
+    context.companyId,
     fiscalYears,
-    getActiveFiscalYearCode()
+    context.fiscalYear
   );
 
   return fiscalYears.some((fiscalYear) => fiscalYear.id === migrationFiscalYear.id)
@@ -209,12 +219,12 @@ async function getFiscalYears(db: Database) {
     : [migrationFiscalYear, ...fiscalYears];
 }
 
-async function resolveFiscalYearId(db: Database, dateBs: string) {
-  const fiscalYears = await getFiscalYears(db);
+async function resolveFiscalYearId(db: Database, dateBs: string, context = companyDatabaseContext()) {
+  const fiscalYears = await getFiscalYears(db, context);
   const activeFiscalYear = getOrCreateMigrationFiscalYear(
-    getActiveCompanyId() || "default",
+    context.companyId,
     fiscalYears,
-    getActiveFiscalYearCode()
+    context.fiscalYear
   );
   const validation = validateDateInFiscalYear(dateBs, activeFiscalYear, "Date BS");
 
@@ -229,12 +239,12 @@ function activeFiscalYearForFiltering() {
   return createFiscalYearFromCode(getActiveCompanyId() || "default", getActiveFiscalYearCode());
 }
 
-function filterByActiveBsFiscalYear<T>(rows: T[], dateOf: (row: T) => string) {
-  const fiscalYear = activeFiscalYearForFiltering();
+function filterByActiveBsFiscalYear<T>(rows: T[], dateOf: (row: T) => string, context?: CompanyDatabaseContext) {
+  const fiscalYear = context ? createFiscalYearFromCode(context.companyId, context.fiscalYear) : activeFiscalYearForFiltering();
   return rows.filter((row) => isBsDateInFiscalYear(dateOf(row), fiscalYear));
 }
 
-async function ensureAccountingModel(db: Database) {
+async function ensureAccountingModel(db: Database, context?: CompanyDatabaseContext) {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS fiscal_years (
       id TEXT PRIMARY KEY,
@@ -307,8 +317,8 @@ async function ensureAccountingModel(db: Database) {
   await db.execute("CREATE INDEX IF NOT EXISTS idx_accounts_ledger_party ON ledger_entries(party_id)");
 
   const fiscalYear = createFiscalYearFromCode(
-    getActiveCompanyId() || "default",
-    getActiveFiscalYearCode()
+    context?.companyId ?? (getActiveCompanyId() || "default"),
+    context?.fiscalYear ?? getActiveFiscalYearCode()
   );
   await db.execute(
     `
@@ -344,7 +354,7 @@ async function ensureLifecycleColumns(db: Database, tableName: string) {
   await ensureColumn(db, tableName, "replacement_transaction_id", "TEXT NOT NULL DEFAULT ''");
 }
 
-async function initDb(db: Database) {
+async function initDb(db: Database, context?: CompanyDatabaseContext) {
   await db.execute("PRAGMA busy_timeout = 10000");
   await db.execute("PRAGMA journal_mode = WAL");
   await db.execute("PRAGMA synchronous = NORMAL");
@@ -448,7 +458,7 @@ async function initDb(db: Database) {
     "idx_credit_notes_no_unique_number"
   );
 
-  await ensureAccountingModel(db);
+  await ensureAccountingModel(db, context);
 }
 
 function normalizeWholeNumber(value: string, fieldName: string) {
@@ -717,6 +727,7 @@ async function beginTransaction(db: Database, operationId: string) {
 
 type DbTransactionOptions = {
   operationId?: string;
+  queueKey?: string;
 };
 
 export async function runDbTransaction<T>(
@@ -724,7 +735,7 @@ export async function runDbTransaction<T>(
   work: () => Promise<T>,
   options: DbTransactionOptions = {},
 ) {
-  const transactionQueueKey = getActiveAccountsDatabaseUrl();
+  const transactionQueueKey = options.queueKey ?? getActiveAccountsDatabaseUrl();
   const operationId = options.operationId ?? `ACCOUNTS-TX-${Date.now()}`;
   const previousTransaction = dbTransactionQueues.get(transactionQueueKey) ?? Promise.resolve();
   let releaseCurrentTransaction!: () => void;
@@ -856,9 +867,9 @@ async function createReceiptAllocations(
   }));
 }
 
-function accountPostingContext(fiscalYearId: string) {
-  const companyId = getActiveCompanyId() || "default";
-  const fiscalYear = createFiscalYearFromCode(companyId, getActiveFiscalYearCode());
+function accountPostingContext(fiscalYearId: string, context = companyDatabaseContext()) {
+  const companyId = context.companyId;
+  const fiscalYear = createFiscalYearFromCode(companyId, context.fiscalYear);
   return {
     companyId,
     fiscalYearId,
@@ -947,17 +958,22 @@ async function writeCollectionTransactionWithTauri(input: {
   return true;
 }
 
-export async function getAccountsBackupData(): Promise<AccountsBackupData> {
+export async function getAccountsBackupData(context = companyDatabaseContext()): Promise<AccountsBackupData> {
   const [parties, sales, collections, creditNotes, activityLogs, receiptAllocations] = await Promise.all([
-    getParties(),
-    getSales(),
-    getCollections(),
-    getCreditNotes(),
-    getActivityLogs(100000),
-    getReceiptAllocations(),
+    getParties(context),
+    getSales(context),
+    getCollections(context),
+    getCreditNotes(context),
+    getActivityLogs(100000, context),
+    getReceiptAllocations(context),
   ]);
 
+  const db = await getDb(context);
+  const rawTables: RawAccountTables = {};
+  for (const table of ACCOUNT_TABLES) rawTables[table] = await db.select<Record<string, unknown>[]>(`SELECT * FROM ${table}`);
   return {
+    schemaVersion: 3,
+    rawTables,
     activityLogs,
     collections,
     creditNotes,
@@ -967,8 +983,8 @@ export async function getAccountsBackupData(): Promise<AccountsBackupData> {
   };
 }
 
-export async function getReceiptAllocations(): Promise<ReceiptAllocation[]> {
-  const db = await getDb();
+export async function getReceiptAllocations(context = companyDatabaseContext()): Promise<ReceiptAllocation[]> {
+  const db = await getDb(context);
   const rows = await db.select<{ id: string; receipt_id: string; sale_id: string; amount_npr: number; created_at: string; updated_at: string }[]>(
     "SELECT * FROM receipt_allocations ORDER BY created_at ASC"
   );
@@ -985,10 +1001,49 @@ export async function getReceiptAllocations(): Promise<ReceiptAllocation[]> {
 
 export async function restoreAccountsBackupData(
   data: Partial<AccountsBackupData>,
-  options: { fiscalYears?: FiscalYear[] } = {},
+  options: { fiscalYears?: FiscalYear[]; context?: CompanyDatabaseContext } = {},
 ): Promise<void> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+  const context = options.context ?? companyDatabaseContext();
+  if (data.rawTables) validateRawAccounts(data.rawTables);
+  else {
+    for (const row of [...(data.sales ?? []), ...(data.collections ?? []), ...(data.creditNotes ?? [])]) {
+      if (row.lifecycleStatus && row.lifecycleStatus !== "POSTED") throw new Error("Legacy backup cannot restore non-posted lifecycle history without complete journals. Export a version 3 backup.");
+    }
+    const parties = new Set((data.parties ?? []).map(row => row.id));
+    for (const row of [...(data.sales ?? []), ...(data.collections ?? []), ...(data.creditNotes ?? [])]) if (!parties.has(row.partyId)) throw new Error("Legacy backup has a missing party reference.");
+    const sums = new Map<string, number>();
+    for (const allocation of data.receiptAllocations ?? []) {
+      const sale = data.sales?.find(row => row.id === allocation.saleId), receipt = data.collections?.find(row => row.id === allocation.receiptId);
+      if (!sale || !receipt || sale.partyId !== receipt.partyId || !Number.isFinite(allocation.amountNPR) || allocation.amountNPR <= 0) throw new Error("Legacy backup has invalid receipt allocations.");
+      for (const [id, cap] of [[sale.id, sale.totalAmount], [receipt.id, receipt.amount]] as const) {
+        const sum = (sums.get(id) ?? 0) + allocation.amountNPR;
+        if (sum > cap + 0.000001) throw new Error("Legacy backup has excessive receipt allocations.");
+        sums.set(id, sum);
+      }
+    }
+  }
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
+  if (data.rawTables) {
+    // Column allowlists are checked before staging a single destructive statement.
+    const columnLists = new Map<string, Set<string>>();
+    for (const table of ACCOUNT_TABLES) {
+      const columns = await db.select<{ name: string }[]>(`PRAGMA table_info(${table})`);
+      columnLists.set(table, new Set(columns.map(column => column.name)));
+      for (const row of data.rawTables[table]) for (const column of Object.keys(row)) {
+        if (!columnLists.get(table)!.has(column)) throw new Error(`Unsupported backup column ${table}.${column}.`);
+      }
+    }
+    for (const table of [...ACCOUNT_TABLES].reverse()) await db.execute(`DELETE FROM ${table}`);
+    for (const table of ACCOUNT_TABLES) for (const row of data.rawTables[table]) {
+      const columns = Object.keys(row);
+      await db.execute(`INSERT INTO ${table} (${columns.map(column => '"' + column + '"').join(",")}) VALUES (${columns.map((_, index) => "$" + (index + 1)).join(",")})`, Object.values(row));
+    }
+    return;
+  }
   const parties = data.parties ?? [];
   const sales = data.sales ?? [];
   const collections = data.collections ?? [];
@@ -996,6 +1051,7 @@ export async function restoreAccountsBackupData(
   const activityLogs = data.activityLogs ?? [];
   const receiptAllocations = data.receiptAllocations ?? [];
 
+  await db.execute("DELETE FROM ledger_entries");
   await db.execute("DELETE FROM receipt_allocations");
   await db.execute("DELETE FROM activity_logs");
   await db.execute("DELETE FROM credit_notes");
@@ -1057,7 +1113,7 @@ export async function restoreAccountsBackupData(
   }
 
   for (const sale of sales) {
-    const fiscalYearId = sale.fiscalYearId || await resolveFiscalYearId(db, sale.dateBs);
+    const fiscalYearId = sale.fiscalYearId || await resolveFiscalYearId(db, sale.dateBs, context);
     await db.execute(
       `
       INSERT INTO sales (
@@ -1098,7 +1154,7 @@ export async function restoreAccountsBackupData(
   }
 
   for (const collection of collections) {
-    const fiscalYearId = collection.fiscalYearId || await resolveFiscalYearId(db, collection.dateBs);
+    const fiscalYearId = collection.fiscalYearId || await resolveFiscalYearId(db, collection.dateBs, context);
     await db.execute(
       `
       INSERT INTO collections (
@@ -1131,7 +1187,7 @@ export async function restoreAccountsBackupData(
   }
 
   for (const creditNote of creditNotes) {
-    const fiscalYearId = creditNote.fiscalYearId || await resolveFiscalYearId(db, creditNote.dateBs);
+    const fiscalYearId = creditNote.fiscalYearId || await resolveFiscalYearId(db, creditNote.dateBs, context);
     await db.execute(
       `
       INSERT INTO credit_notes (
@@ -1163,6 +1219,11 @@ export async function restoreAccountsBackupData(
         creditNote.createdAt || new Date().toISOString(),
       ]
     );
+  }
+
+  for (const [table, rows] of [["sales", sales], ["collections", collections], ["credit_notes", creditNotes]] as const) for (const row of rows) {
+    await db.execute(`UPDATE ${table} SET lifecycle_status=$1, posted_at=$2, posted_by=$3, voided_at=$4, reversed_at=$5, reversal_reason=$6, replacement_transaction_id=$7 WHERE id=$8`,
+      [row.lifecycleStatus ?? "POSTED", row.postedAt ?? row.createdAt ?? "", row.postedBy ?? "", row.voidedAt ?? "", row.reversedAt ?? "", row.reversalReason ?? "", row.replacementTransactionId ?? "", row.id]);
   }
 
   for (const allocation of receiptAllocations) {
@@ -1198,11 +1259,25 @@ export async function restoreAccountsBackupData(
     );
   }
 
-  await logActivity("Backup Imported", `Imported backup with ${parties.length} parties.`);
+  // Legacy backups did not contain journals. Rebuild posted journals explicitly.
+  for (const sale of sales) {
+    await insertLedgerEntries(db, postSale({ id: sale.id, lifecycleStatus: "DRAFT", fiscalYearId: sale.fiscalYearId || createFiscalYearFromCode(context.companyId, context.fiscalYear).id, date: sale.dateBs, partyId: sale.partyId, salesAmount: sale.salesAmount, vatAmount: sale.vatAmount, totalAmount: sale.totalAmount, reference: sale.billNo }, accountPostingContext(sale.fiscalYearId || createFiscalYearFromCode(context.companyId, context.fiscalYear).id, context)));
+  }
+  for (const receipt of collections) {
+    const fiscalYearId = receipt.fiscalYearId || createFiscalYearFromCode(context.companyId, context.fiscalYear).id;
+    await insertLedgerEntries(db, postCustomerReceipt({ id: receipt.id, lifecycleStatus: "DRAFT", fiscalYearId, date: receipt.dateBs, partyId: receipt.partyId, amountNPR: receipt.amount, reference: receipt.receiptNo || receipt.id }, accountPostingContext(fiscalYearId, context)));
+  }
+  for (const note of creditNotes) {
+    const fiscalYearId = note.fiscalYearId || createFiscalYearFromCode(context.companyId, context.fiscalYear).id;
+    await insertLedgerEntries(db, postCreditNote({ id: note.id, lifecycleStatus: "DRAFT", fiscalYearId, date: note.dateBs, partyId: note.partyId, amount: note.amount, vatAmount: note.vatAmount, totalAmount: note.totalAmount, reference: note.creditNoteNo }, accountPostingContext(fiscalYearId, context)));
+  }
+  await logActivity("Backup Imported", `Imported backup with ${parties.length} parties.`, context);
+
+  }));
 }
 
-export async function getParties(): Promise<Party[]> {
-  const db = await getDb();
+export async function getParties(context = companyDatabaseContext()): Promise<Party[]> {
+  const db = await getDb(context);
 
   const rows = await db.select<PartyRow[]>(`
     SELECT *
@@ -1216,8 +1291,12 @@ export async function getParties(): Promise<Party[]> {
 export async function saveParty(
   input: Omit<Party, "id" | "createdAt">
 ): Promise<Party> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+  const context = companyDatabaseContext();
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
 
   const name = input.name.trim();
 
@@ -1274,6 +1353,8 @@ export async function saveParty(
 
   await logActivity("Party Created", `Created party ${party.name}.`);
   return party;
+
+  }));
 }
 
 function mapActivityLog(row: ActivityLogRow): ActivityLog {
@@ -1285,9 +1366,9 @@ function mapActivityLog(row: ActivityLogRow): ActivityLog {
   };
 }
 
-export async function logActivity(action: string, detail: string): Promise<void> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+export async function logActivity(action: string, detail: string, context = companyDatabaseContext()): Promise<void> {
+  assertCompanyWritable(context.companyId);
+  const db = await getDb(context);
 
   await db.execute(
     `
@@ -1298,8 +1379,8 @@ export async function logActivity(action: string, detail: string): Promise<void>
   );
 }
 
-export async function getActivityLogs(limit = 50): Promise<ActivityLog[]> {
-  const db = await getDb();
+export async function getActivityLogs(limit = 50, context = companyDatabaseContext()): Promise<ActivityLog[]> {
+  const db = await getDb(context);
   const rows = await db.select<ActivityLogRow[]>(
     `
     SELECT *
@@ -1314,8 +1395,12 @@ export async function getActivityLogs(limit = 50): Promise<ActivityLog[]> {
 }
 
 export async function updateParty(input: Omit<Party, "createdAt">): Promise<Party> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+  const context = companyDatabaseContext();
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
 
   if (!input.id) {
     throw new Error("Party ID is required.");
@@ -1372,14 +1457,20 @@ export async function updateParty(input: Omit<Party, "createdAt">): Promise<Part
     openingBalance: Number(input.openingBalance || 0),
     createdAt: "",
   };
+
+  }));
 }
 
 export async function upsertPartiesForCarryForward(
   parties: Party[],
   options: CarryForwardPartySyncOptions = {},
+  context = companyDatabaseContext(),
 ): Promise<CarryForwardPartySyncResult> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
   const now = new Date().toISOString();
   const sourcePartyIds = new Set(parties.map((party) => party.id).filter(Boolean));
   let upserted = 0;
@@ -1405,12 +1496,7 @@ export async function upsertPartiesForCarryForward(
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        address = excluded.address,
-        phone = excluded.phone,
-        pan_no = excluded.pan_no,
-        opening_balance = excluded.opening_balance,
-        is_active = excluded.is_active
+        opening_balance = excluded.opening_balance
       `,
       [
         party.id,
@@ -1454,7 +1540,7 @@ export async function upsertPartiesForCarryForward(
 
   await logActivity(
     "Opening Balances Refreshed",
-    `Carried forward opening balances for ${upserted} parties.${removalDetail}${skippedDetail}`
+    `Carried forward opening balances for ${upserted} parties.${removalDetail}${skippedDetail}`, context
   );
 
   return {
@@ -1462,6 +1548,8 @@ export async function upsertPartiesForCarryForward(
     skippedRemoval,
     upserted,
   };
+
+  }));
 }
 
 async function targetPartyDeletionCandidates(
@@ -1534,12 +1622,16 @@ function normalizeDateDisplay(value: string) {
 }
 
 export async function deleteParty(partyId: string): Promise<void> {
-  assertActiveCompanyWritable();
+  const context = companyDatabaseContext();
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
   if (!partyId) {
     throw new Error("Party ID is required.");
   }
 
-  const db = await getDb();
   const references = await db.select<
     { salesCount: number; collectionsCount: number; creditNotesCount: number }[]
   >(
@@ -1570,10 +1662,12 @@ export async function deleteParty(partyId: string): Promise<void> {
   );
 
   await logActivity("Party Deleted", `Deleted party ${partyId}.`);
+
+  }));
 }
 
-export async function getSales(): Promise<Sale[]> {
-  const db = await getDb();
+export async function getSales(context = companyDatabaseContext()): Promise<Sale[]> {
+  const db = await getDb(context);
 
   const rows = await db.select<SaleRow[]>(`
     SELECT *
@@ -1581,19 +1675,23 @@ export async function getSales(): Promise<Sale[]> {
     ORDER BY CAST(bill_no AS INTEGER) ASC
   `);
 
-  return filterByActiveBsFiscalYear(rows.map(mapSale), (sale) => sale.dateBs);
+  return filterByActiveBsFiscalYear(rows.map(mapSale), (sale) => sale.dateBs, context);
 }
 
 export async function saveSale(
   input: Omit<Sale, "id" | "createdAt">
 ): Promise<Sale> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+  const context = companyDatabaseContext();
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
 
   const billNo = normalizeWholeNumber(input.billNo, "Bill number");
 
   const dateBs = normalizeDateInput(input.dateBs);
-  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs, context);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -1696,17 +1794,24 @@ export async function saveSale(
         totalAmount: sale.totalAmount,
         reference: sale.billNo,
       },
-      accountPostingContext(sale.fiscalYearId ?? "")
+      accountPostingContext(sale.fiscalYearId ?? "", context)
     )
   );
 
   await logActivity("Sale Created", `Created sale bill no. ${sale.billNo}.`);
   return sale;
+
+  }));
 }
 
 export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+  const context = companyDatabaseContext();
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
+  const beforeCorrection = await assertMutableAccountRecord(db, "sales", input.id);
 
   if (!input.id) {
     throw new Error("Sale ID is required.");
@@ -1715,7 +1820,7 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
   const billNo = normalizeWholeNumber(input.billNo, "Bill number");
 
   const dateBs = normalizeDateInput(input.dateBs);
-  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs, context);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -1744,9 +1849,16 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
     throw new Error("Sales amount must be greater than zero.");
   }
 
+  const allocationRows = await db.select<{ allocated: number; incompatible: number }[]>(
+    "SELECT COALESCE(SUM(a.amount_npr),0) AS allocated, COALESCE(SUM(CASE WHEN c.party_id <> $1 THEN 1 ELSE 0 END),0) AS incompatible FROM receipt_allocations a JOIN collections c ON c.id = a.receipt_id WHERE a.sale_id = $2",
+    [input.partyId, input.id],
+  );
   const vatAmount = calculateVatAmount(salesAmount);
   const totalAmount = Number((salesAmount + vatAmount).toFixed(2));
 
+  if (Number(allocationRows[0]?.incompatible || 0) > 0 || Number(allocationRows[0]?.allocated || 0) > totalAmount + 0.000001) {
+    throw new Error("This edit conflicts with existing receipt allocations. Unallocate receipts before changing the customer or reducing the sale.");
+  }
   await db.execute(
     `
     UPDATE sales
@@ -1801,11 +1913,11 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
         totalAmount,
         reference: billNo,
       },
-      accountPostingContext(fiscalYearId)
+      accountPostingContext(fiscalYearId, context)
     )
   );
 
-  await logActivity("Sale Updated", `Updated sale bill no. ${billNo}.`);
+  await logActivity("Sale Updated", `Updated sale bill no. ${billNo}. Before: ${JSON.stringify(beforeCorrection)}. After: ${JSON.stringify(input)}.`);
   return {
     ...input,
     billNo,
@@ -1815,13 +1927,15 @@ export async function updateSale(input: Omit<Sale, "createdAt">): Promise<Sale> 
     totalAmount,
     createdAt: "",
   };
+
+  }));
 }
 
 type DeleteSaleOptions = {
   deleteLinkedStock?: boolean;
 };
 
-export async function deleteSale(saleId: string, options: DeleteSaleOptions = {}): Promise<void> {
+async function deleteSaleImpl(saleId: string, options: DeleteSaleOptions = {}): Promise<void> {
   const operationId = `SALE-DELETE-${Date.now()}`;
   const activeCompany = getActiveCompanyProfile();
   const activeCompanyId = getActiveCompanyId();
@@ -1836,6 +1950,7 @@ export async function deleteSale(saleId: string, options: DeleteSaleOptions = {}
     throw new Error("Sale ID is required.");
   }
 
+  await assertMutableAccountRecord(await getDb(), "sales", saleId);
   if (isTauriRuntime()) {
     const stockDbUrl = options.deleteLinkedStock ? getActiveStockDatabaseUrl() : "";
     debugAccountsOperation(operationId, "backend-delete-start", {
@@ -1870,17 +1985,14 @@ export async function deleteSale(saleId: string, options: DeleteSaleOptions = {}
       [saleId]
     );
     debugAccountsOperation(operationId, "delete-sale-complete");
+    await writeActivity(db, "Sale Deleted", `Deleted sale ${saleId}.`);
   }, { operationId });
 
-  debugAccountsOperation(operationId, "activity-log-start");
-  await logActivity("Sale Deleted", `Deleted sale ${saleId}.`).catch((error) => {
-    console.error("Could not log sale deletion.", error);
-  });
   debugAccountsOperation(operationId, "complete");
 }
 
-export async function getCollections(): Promise<Collection[]> {
-  const db = await getDb();
+export async function getCollections(context = companyDatabaseContext()): Promise<Collection[]> {
+  const db = await getDb(context);
 
   const rows = await db.select<CollectionRow[]>(`
     SELECT *
@@ -1888,10 +2000,10 @@ export async function getCollections(): Promise<Collection[]> {
     ORDER BY CAST(reference_no AS INTEGER) ASC
   `);
 
-  return filterByActiveBsFiscalYear(rows.map(mapCollection), (collection) => collection.dateBs);
+  return filterByActiveBsFiscalYear(rows.map(mapCollection), (collection) => collection.dateBs, context);
 }
 
-export async function saveCollection(
+async function saveCollectionImpl(
   input: Omit<Collection, "id" | "createdAt">
 ): Promise<Collection> {
   assertActiveCompanyWritable();
@@ -2042,11 +2154,12 @@ export async function saveCollection(
   return collection;
 }
 
-export async function updateCollection(
+async function updateCollectionImpl(
   input: Omit<Collection, "createdAt">
 ): Promise<Collection> {
   assertActiveCompanyWritable();
   const db = await getDb();
+  await assertMutableAccountRecord(db, "collections", input.id);
 
   if (!input.id) {
     throw new Error("Collection ID is required.");
@@ -2196,13 +2309,14 @@ export async function updateCollection(
   return collection;
 }
 
-export async function deleteCollection(collectionId: string): Promise<void> {
+async function deleteCollectionImpl(collectionId: string): Promise<void> {
   assertActiveCompanyWritable();
   if (!collectionId) {
     throw new Error("Collection ID is required.");
   }
 
   const db = await getDb();
+  await assertMutableAccountRecord(db, "collections", collectionId);
 
   if (await writeCollectionTransactionWithTauri({
     mode: "delete",
@@ -2238,8 +2352,8 @@ export async function deleteCollection(collectionId: string): Promise<void> {
   });
 }
 
-export async function getCreditNotes(): Promise<CreditNote[]> {
-  const db = await getDb();
+export async function getCreditNotes(context = companyDatabaseContext()): Promise<CreditNote[]> {
+  const db = await getDb(context);
 
   const rows = await db.select<CreditNoteRow[]>(`
     SELECT *
@@ -2247,21 +2361,25 @@ export async function getCreditNotes(): Promise<CreditNote[]> {
     ORDER BY CAST(credit_note_no AS INTEGER) ASC
   `);
 
-  return filterByActiveBsFiscalYear(rows.map(mapCreditNote), (creditNote) => creditNote.dateBs);
+  return filterByActiveBsFiscalYear(rows.map(mapCreditNote), (creditNote) => creditNote.dateBs, context);
 }
 
 export async function saveCreditNote(
   input: Omit<CreditNote, "id" | "createdAt">
 ): Promise<CreditNote> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+  const context = companyDatabaseContext();
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
 
   const creditNoteNo = normalizeWholeNumber(
     input.creditNoteNo,
     "Credit note number"
   );
   const dateBs = normalizeDateInput(input.dateBs);
-  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs, context);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -2354,7 +2472,7 @@ export async function saveCreditNote(
         totalAmount: creditNote.totalAmount,
         reference: creditNote.creditNoteNo,
       },
-      accountPostingContext(creditNote.fiscalYearId ?? "")
+      accountPostingContext(creditNote.fiscalYearId ?? "", context)
     )
   );
 
@@ -2363,13 +2481,20 @@ export async function saveCreditNote(
     `Created credit note no. ${creditNote.creditNoteNo}.`
   );
   return creditNote;
+
+  }));
 }
 
 export async function updateCreditNote(
   input: Omit<CreditNote, "createdAt">
 ): Promise<CreditNote> {
-  assertActiveCompanyWritable();
-  const db = await getDb();
+  const context = companyDatabaseContext();
+  assertCompanyWritable(context.companyId);
+  return persistBusinessAction(context.companyId, () => atomicAccountsWrite(context, async (db) => {
+    const logActivity = (action: string, detail: string, _context?: CompanyDatabaseContext) => { void _context; return writeActivity(db, action, detail); };
+
+  assertCompanyWritable(context.companyId);
+  await assertMutableAccountRecord(db, "credit_notes", input.id);
 
   if (!input.id) {
     throw new Error("Credit note ID is required.");
@@ -2380,7 +2505,7 @@ export async function updateCreditNote(
     "Credit note number"
   );
   const dateBs = normalizeDateInput(input.dateBs);
-  const fiscalYearId = await resolveFiscalYearId(db, dateBs);
+  const fiscalYearId = await resolveFiscalYearId(db, dateBs, context);
 
   if (!input.partyId) {
     throw new Error("Party is required.");
@@ -2461,7 +2586,7 @@ export async function updateCreditNote(
         totalAmount,
         reference: creditNoteNo,
       },
-      accountPostingContext(fiscalYearId)
+      accountPostingContext(fiscalYearId, context)
     )
   );
 
@@ -2479,17 +2604,18 @@ export async function updateCreditNote(
     totalAmount,
     createdAt: "",
   };
+
+  }));
 }
 
-export async function deleteCreditNote(creditNoteId: string): Promise<void> {
+async function deleteCreditNoteImpl(creditNoteId: string): Promise<void> {
   assertActiveCompanyWritable();
   if (!creditNoteId) {
     throw new Error("Credit note ID is required.");
   }
 
-  const db = await getDb();
-
-  await runDbTransaction(db, async () => {
+  await atomicAccountsWrite(companyDatabaseContext(), async (db) => {
+    await assertMutableAccountRecord(db, "credit_notes", creditNoteId);
     await db.execute("DELETE FROM ledger_entries WHERE source_type = 'CREDIT_NOTE' AND source_id = $1", [creditNoteId]);
     await db.execute(
       `
@@ -2513,77 +2639,18 @@ export async function deleteCreditNote(creditNoteId: string): Promise<void> {
   });
 }
 
-export async function getOutstanding(): Promise<OutstandingRow[]> {
-  const db = await getDb();
-
-  const rows = await db.select<
-    {
-      partyId: string;
-      partyName: string;
-      openingBalance: number;
-      totalSales: number;
-      totalCollections: number;
-      totalAdjustments: number;
-      outstanding: number;
-    }[]
-  >(`
-    SELECT
-      p.id AS partyId,
-      p.name AS partyName,
-      p.opening_balance AS openingBalance,
-
-      COALESCE((
-        SELECT SUM(COALESCE(NULLIF(s.total_amount, 0), s.amount, 0))
-        FROM sales s
-        WHERE s.party_id = p.id
-      ), 0) AS totalSales,
-
-      COALESCE((
-        SELECT SUM(c.amount)
-        FROM collections c
-        WHERE c.party_id = p.id
-      ), 0) AS totalCollections,
-
-      COALESCE((
-        SELECT SUM(COALESCE(NULLIF(cn.total_amount, 0), cn.amount + cn.vat_amount, 0))
-        FROM credit_notes cn
-        WHERE cn.party_id = p.id
-      ), 0) AS totalAdjustments,
-
-      p.opening_balance
-        + COALESCE((
-          SELECT SUM(COALESCE(NULLIF(s2.total_amount, 0), s2.amount, 0))
-          FROM sales s2
-          WHERE s2.party_id = p.id
-        ), 0)
-        - COALESCE((
-          SELECT SUM(c2.amount)
-          FROM collections c2
-          WHERE c2.party_id = p.id
-        ), 0)
-        - COALESCE((
-          SELECT SUM(COALESCE(NULLIF(cn2.total_amount, 0), cn2.amount + cn2.vat_amount, 0))
-          FROM credit_notes cn2
-          WHERE cn2.party_id = p.id
-        ), 0) AS outstanding
-
-    FROM parties p
-    ORDER BY p.name ASC
-  `);
-
-  return rows.map((row) => ({
-    partyId: row.partyId,
-    partyName: row.partyName,
-    openingBalance: Number(row.openingBalance || 0),
-    totalSales: Number(row.totalSales || 0),
-    totalCollections: Number(row.totalCollections || 0),
-    totalAdjustments: Number(row.totalAdjustments || 0),
-    outstanding: Number(row.outstanding || 0),
-  }));
+export async function getOutstanding(context = companyDatabaseContext()): Promise<OutstandingRow[]> {
+  const [parties, sales, collections, creditNotes] = await Promise.all([getParties(context), getSales(context), getCollections(context), getCreditNotes(context)]);
+  const rows = new Map(parties.map(party => [party.id, { partyId: party.id, partyName: party.name, openingBalance: party.openingBalance, totalSales: 0, totalCollections: 0, totalAdjustments: 0, outstanding: party.openingBalance }]));
+  for (const sale of sales) if ((sale.lifecycleStatus ?? "POSTED") === "POSTED") { const row = rows.get(sale.partyId); if (row) row.totalSales += sale.totalAmount; }
+  for (const receipt of collections) if ((receipt.lifecycleStatus ?? "POSTED") === "POSTED") { const row = rows.get(receipt.partyId); if (row) row.totalCollections += receipt.amount; }
+  for (const note of creditNotes) if ((note.lifecycleStatus ?? "POSTED") === "POSTED") { const row = rows.get(note.partyId); if (row) row.totalAdjustments += note.totalAmount; }
+  for (const row of rows.values()) row.outstanding = row.openingBalance + row.totalSales - row.totalCollections - row.totalAdjustments;
+  return [...rows.values()].sort((a, b) => a.partyName.localeCompare(b.partyName));
 }
 
-export async function getPartyLedger(partyId: string): Promise<LedgerRow[]> {
-  const db = await getDb();
+export async function getPartyLedger(partyId: string, context = companyDatabaseContext()): Promise<LedgerRow[]> {
+  const db = await getDb(context);
 
   const parties = await db.select<{ opening_balance: number }[]>(
     `
@@ -2622,7 +2689,7 @@ export async function getPartyLedger(partyId: string): Promise<LedgerRow[]> {
       COALESCE(remarks, '') AS remarks,
       created_at AS createdAt
     FROM sales
-    WHERE party_id = $1
+    WHERE party_id = $1 AND COALESCE(lifecycle_status, 'POSTED') = 'POSTED'
 
     UNION ALL
 
@@ -2635,7 +2702,7 @@ export async function getPartyLedger(partyId: string): Promise<LedgerRow[]> {
       COALESCE(remarks, '') AS remarks,
       created_at AS createdAt
     FROM collections
-    WHERE party_id = $1
+    WHERE party_id = $1 AND COALESCE(lifecycle_status, 'POSTED') = 'POSTED'
 
     UNION ALL
 
@@ -2648,7 +2715,7 @@ export async function getPartyLedger(partyId: string): Promise<LedgerRow[]> {
       COALESCE(remarks, '') AS remarks,
       created_at AS createdAt
     FROM credit_notes
-    WHERE party_id = $1
+    WHERE party_id = $1 AND COALESCE(lifecycle_status, 'POSTED') = 'POSTED'
 
     `,
     [partyId]
@@ -2660,7 +2727,7 @@ export async function getPartyLedger(partyId: string): Promise<LedgerRow[]> {
     Collection: 2,
     Adjustment: 3,
   } as const;
-  const sortedTransactions = transactions
+  const sortedTransactions = filterByActiveBsFiscalYear(transactions, row => row.dateBs, context)
     .map((transaction) => ({
       ...transaction,
       dateBs: normalizeDateDisplay(transaction.dateBs || ""),
@@ -2713,4 +2780,40 @@ export async function getPartyLedger(partyId: string): Promise<LedgerRow[]> {
   }
 
   return rows;
+}
+
+async function atomicAccountsWrite<T>(context: CompanyDatabaseContext, work: (db: Database) => Promise<T>) {
+  const db = await getDb(context);
+  if (isTauriRuntime()) return stageSqlTransaction(db, sqliteFilenameFromUrl(context.accountsUrl), work);
+  return runDbTransaction(db, () => work(db), { queueKey: context.accountsUrl });
+}
+async function writeActivity(db: Database, action: string, detail: string) {
+  await db.execute("INSERT INTO activity_logs (id, action, detail, created_at) VALUES ($1,$2,$3,$4)", [crypto.randomUUID(), action, detail, new Date().toISOString()]);
+}
+export async function saveCollection(input: Omit<Collection, "id" | "createdAt">) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => saveCollectionImpl(input));
+}
+export async function updateCollection(input: Omit<Collection, "createdAt">) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => updateCollectionImpl(input));
+}
+export async function deleteCollection(id: string) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => deleteCollectionImpl(id));
+}
+export async function deleteSale(id: string, options: DeleteSaleOptions = {}) {
+  assertActiveCompanyWritable();
+  if (options.deleteLinkedStock) return recoverCompanyChange(getActiveCompanyId(), () => deleteSaleImpl(id, options));
+  return persistBusinessAction(getActiveCompanyId(), () => deleteSaleImpl(id, options));
+}
+export async function deleteCreditNote(id: string) {
+  assertActiveCompanyWritable();
+  return persistBusinessAction(getActiveCompanyId(), () => deleteCreditNoteImpl(id));
+}
+async function assertMutableAccountRecord(db: Database, table: 'sales' | 'collections' | 'credit_notes', id: string) {
+  const rows = await db.select<Record<string, unknown>[]>(`SELECT * FROM ${table} WHERE id=$1`, [id]);
+  if (!rows[0]) throw new Error('The transaction no longer exists. Reload before editing.');
+  assertOperationalCorrection(rows[0].lifecycle_status as TransactionLifecycleStatus | undefined, { status: 'OPEN' });
+  return rows[0];
 }

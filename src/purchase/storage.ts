@@ -12,11 +12,11 @@ import {
   type Payment,
   type PaymentAllocation,
 } from './domain'
-import { companyStorageKey, getActiveCompanyId, getActiveCompanyProfile } from '../companyContext'
+import { companyStorageKey, getActiveCompanyId, getCompanyProfile } from '../companyContext'
 import { findFiscalYearByBsDate, getOrCreateMigrationFiscalYear } from '../domain/fiscalYear'
 
 const storageKey = 'easysolution-import-purchase-app-v1'
-const activeStorageKey = () => companyStorageKey(storageKey)
+const activeStorageKey = (companyId = getActiveCompanyId()) => companyStorageKey(storageKey, companyId)
 
 const emptyData: AppData = {
   settings: defaultSettings,
@@ -39,22 +39,21 @@ export function createId() {
   return id()
 }
 
-export function activeFiscalYear(data: Pick<AppData, 'fiscalYears' | 'settings'>) {
-  const companyId = getActiveCompanyId() || 'default'
-  const code = getActiveCompanyProfile()?.fiscalYear || data.settings.fiscalYear || defaultSettings.fiscalYear
+export function activeFiscalYear(data: Pick<AppData, 'fiscalYears' | 'settings'>, companyId = getActiveCompanyId() || 'default') {
+  const code = getCompanyProfile(companyId)?.fiscalYear || data.settings.fiscalYear || defaultSettings.fiscalYear
   return getOrCreateMigrationFiscalYear(companyId, data.fiscalYears, code)
 }
 
 const fiscalYearForDate = (date: string, data: Pick<AppData, 'fiscalYears' | 'settings'>) =>
-  (date ? findFiscalYearByBsDate(date, data.fiscalYears) : undefined) ?? activeFiscalYear(data)
+  (date ? findFiscalYearByBsDate(date, data.fiscalYears) : undefined) ?? data.fiscalYears[0] ?? (() => { throw new Error("Explicit fiscal-year context is required.") })()
 
 const importPurchaseFiscalYearId = (
   purchase: Pick<ImportPurchase, 'debitNoteDate' | 'agentServiceBillDate'>,
   data: Pick<AppData, 'fiscalYears' | 'settings'>,
 ) => fiscalYearForDate(purchase.debitNoteDate || purchase.agentServiceBillDate, data).id
 
-export function normalizeAppData(data: AppData): AppData {
-  const fiscalYear = activeFiscalYear(data)
+export function normalizeAppData(data: AppData, companyId = getActiveCompanyId()): AppData {
+  const fiscalYear = activeFiscalYear(data, companyId)
   const fiscalYears = data.fiscalYears.some((item) => item.id === fiscalYear.id)
     ? data.fiscalYears
     : [fiscalYear, ...data.fiscalYears]
@@ -112,8 +111,8 @@ export function normalizeAppData(data: AppData): AppData {
   }
 }
 
-export function loadData(): AppData {
-    const saved = localStorage.getItem(activeStorageKey())
+export function loadData(companyId = getActiveCompanyId()): AppData {
+    const saved = localStorage.getItem(activeStorageKey(companyId))
 
   if (!saved) {
     return emptyData
@@ -141,14 +140,14 @@ export function loadData(): AppData {
         oldValue: log.oldValue ?? '',
         newValue: log.newValue ?? '',
       })),
-    } as AppData)
-  } catch {
-    return emptyData
+    } as AppData, companyId)
+  } catch (error) {
+    throw new Error('Saved purchase data could not be read. It has not been replaced.', { cause: error })
   }
 }
 
-export function saveData(data: AppData) {
-  localStorage.setItem(activeStorageKey(), JSON.stringify(data))
+export function saveData(data: AppData, companyId = getActiveCompanyId()) {
+  localStorage.setItem(activeStorageKey(companyId), JSON.stringify(data))
 }
 
 export function createActivity(

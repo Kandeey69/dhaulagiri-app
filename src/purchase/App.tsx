@@ -1,3 +1,5 @@
+import { assertOperationalCorrection } from "../domain/lifecycle"
+import { persistBusinessAction, hasPendingWrites } from '../application/persistence'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import './App.css'
@@ -942,6 +944,7 @@ const columns = [
 }
 
 type PurchaseAppProps = {
+  runRecoverableWrite?: (work: () => Promise<void>) => Promise<void>;
   initialUserRole?: UserRole;
   isReadOnly?: boolean;
   onOpenStockLineEntry?: (target: StockEntryTarget) => void;
@@ -950,6 +953,7 @@ type PurchaseAppProps = {
 };
 
 function App({
+  runRecoverableWrite,
   initialUserRole,
   isReadOnly = false,
   onOpenStockLineEntry,
@@ -1060,28 +1064,6 @@ function App({
       cancelled = true
     }
   }, [])
-
-  useEffect(() => {
-    if (!repository || !isStorageReady) {
-      return
-    }
-
-    const saveTimer = window.setTimeout(() => {
-      const nextSnapshot = JSON.stringify(data)
-      if (nextSnapshot === lastSavedSnapshotRef.current) {
-        return
-      }
-
-      repository.saveData(data).then(() => {
-        lastSavedSnapshotRef.current = nextSnapshot
-      }).catch((error) => {
-        console.error('Could not save app data.', error)
-        window.alert(`Could not save data: ${errorMessage(error)}`)
-      })
-    }, 600)
-
-    return () => window.clearTimeout(saveTimer)
-  }, [data, isStorageReady, repository])
 
   const activeParties = data.parties.filter((party) => party.isActive)
   const indianSuppliers = activeParties.filter(isIndianSupplierCategory)
@@ -1433,7 +1415,7 @@ function App({
     oldValue = '',
     newValue = '',
   ) => {
-    setData(buildDataWithLog(next, action, details, oldValue, newValue))
+    return persistDataWithLog(next, action, details, { oldValue, newValue })
   }
 
   const buildDataWithLog = (
@@ -1468,11 +1450,18 @@ function App({
       deletedLocalExpenseId?: string
     } = {},
   ) => {
-    if (!repository) {
+    if (hasPendingWrites()) { window.alert("A write is in progress. Please wait before saving another change."); return false }
+    if (!repository || !isStorageReady) {
       window.alert('Storage is still loading. Please try again.')
       return false
     }
 
+    try {
+      for (const key of ['purchases', 'payments', 'localExpenses'] as const) for (const old of data[key]) {
+        const updated = next[key].find(row => row.id === old.id);
+        if (JSON.stringify(updated) !== JSON.stringify(old)) assertOperationalCorrection(old.lifecycleStatus, activeFiscalYear);
+      }
+    } catch (error) { window.alert(errorMessage(error)); return false }
     const persisted = buildDataWithLog(next, action, details, options.oldValue ?? '', options.newValue ?? '')
     const importPurchaseId = options.importPurchaseId ?? options.deletedImportPurchaseId ?? ''
     const localExpenseId = options.localExpenseId ?? options.deletedLocalExpenseId ?? ''
@@ -1490,6 +1479,12 @@ function App({
         deletedLocalExpenseId: options.deletedLocalExpenseId,
       })
 
+      const removedPurchases = data.purchases.filter(row => !persisted.purchases.some(next => next.id === row.id));
+      const removedLocal = data.localExpenses.filter(row => !persisted.localExpenses.some(next => next.id === row.id));
+      const needsRecovery = removedPurchases.length > 0 || removedLocal.length > 0;
+      if (needsRecovery && !runRecoverableWrite) throw new Error("Company recovery coordinator is required before deleting source documents.");
+      const commit = needsRecovery ? runRecoverableWrite! : (work: () => Promise<void>) => persistBusinessAction(activeCompanyId, work);
+      await commit(async () => {
       if (canUseNativePurchaseWrite) {
         const { invoke } = await import('@tauri-apps/api/core')
         const purchaseFilename = sqliteFilenameFromUrl(getActivePurchaseDatabaseUrl())
@@ -1522,6 +1517,10 @@ function App({
         await repository.saveData(persisted)
       }
 
+      if (needsRecovery) {
+        for (const row of removedPurchases) await deleteStockPurchaseLinesForDocument(row.id, 'Import Purchase');
+        for (const row of removedLocal) await deleteStockPurchaseLinesForDocument(row.id, 'Local Purchase');
+      }
       const reloaded = await repository.loadData()
 
       if (options.importPurchaseId && !reloaded.purchases.some((item) => item.id === options.importPurchaseId)) {
@@ -1549,9 +1548,11 @@ function App({
         localExpenses: reloaded.localExpenses.length,
         ledgerEntries: reloaded.ledgerEntries.length,
       })
+      })
       return true
     } catch (error) {
       console.error('Purchase data persistence failed.', error)
+      try { setData(await repository.loadData()) } catch (reloadError) { console.error('Readback after failed save failed', reloadError) }
       window.alert(`Could not save purchase data: ${errorMessage(error)}`)
       return false
     }
@@ -2438,7 +2439,7 @@ function App({
     })
   }
 
-  const saveSettings = (event: FormEvent) => {
+  const saveSettings = async (event: FormEvent) => {
     event.preventDefault()
 
     const savedSettings = {
@@ -2447,11 +2448,11 @@ function App({
       supplierPurchaseCurrency: normalizeSupplierCurrency(settingsForm.supplierPurchaseCurrency),
     }
 
-    setDataWithLog(
+    if (!await setDataWithLog(
       { ...data, settings: savedSettings },
       'Updated settings',
       `${savedSettings.companyName} - FY ${savedSettings.fiscalYear}`,
-    )
+    )) return
     setSettingsForm(savedSettings)
 
     setPurchaseForm((current) => ({
@@ -2699,11 +2700,11 @@ function App({
       imported += 1
     })
 
-    setDataWithLog(
+    if (!await setDataWithLog(
       { ...data, parties: nextParties },
       'Imported parties',
       `${imported} party record${imported === 1 ? '' : 's'}`,
-    )
+    )) return
     setPartyImportFile(null)
     setPartyImportResults(importedDetails)
     setPurchaseImportResults([])
@@ -3032,7 +3033,7 @@ function App({
       return
     }
 
-    setDataWithLog(
+    if (!await setDataWithLog(
       {
         ...data,
         purchases: [...importedPurchases, ...data.purchases],
@@ -3040,7 +3041,7 @@ function App({
       },
       'Imported import purchases',
       `${importedPurchases.length} purchase record${importedPurchases.length === 1 ? '' : 's'}`,
-    )
+    )) return
     setPurchaseImportFile(null)
     setPurchaseImportResults(importedDetails)
     setImportMessage(
@@ -3199,7 +3200,7 @@ function App({
       return
     }
 
-    setDataWithLog(
+    if (!await setDataWithLog(
       {
         ...data,
         payments: [...importedPayments, ...data.payments],
@@ -3207,7 +3208,7 @@ function App({
       },
       'Imported Indian supplier payments',
       `${importedPayments.length} payment record${importedPayments.length === 1 ? '' : 's'}`,
-    )
+    )) return
     setIndianSupplierPaymentImportFile(null)
     setPaymentImportResults(importedDetails)
     setImportMessage(
@@ -3340,7 +3341,7 @@ function App({
       return
     }
 
-    setDataWithLog(
+    if (!await setDataWithLog(
       {
         ...data,
         payments: [...importedPayments, ...data.payments],
@@ -3348,7 +3349,7 @@ function App({
       },
       'Imported custom agent/local payments',
       `${importedPayments.length} payment record${importedPayments.length === 1 ? '' : 's'}`,
-    )
+    )) return
     setOtherPaymentImportFile(null)
     setPaymentImportResults(importedDetails)
     setImportMessage(
@@ -3361,7 +3362,7 @@ function App({
     )
   }
 
-  const saveParty = (event: FormEvent) => {
+  const saveParty = async (event: FormEvent) => {
     event.preventDefault()
 
     const partyNameValue = partyForm.name.trim()
@@ -3395,7 +3396,7 @@ function App({
         ...data,
         parties: data.parties.map((party) => (party.id === updated.id ? updated : party)),
       }
-      setDataWithLog(next, 'Updated party', updated.name, auditValue(previous), auditValue(updated))
+      if (!await setDataWithLog(next, 'Updated party', updated.name, auditValue(previous), auditValue(updated))) return
     } else {
       const created = withNewParty({
         name: partyForm.name.trim(),
@@ -3407,11 +3408,11 @@ function App({
         openingPayable: partyForm.openingPayable,
         isActive: partyForm.isActive,
       })
-      setDataWithLog(
+      if (!await setDataWithLog(
         { ...data, parties: [created, ...data.parties] },
         'Created party',
         created.name,
-      )
+      )) return
     }
 
     setPartyForm(emptyParty)
@@ -3444,7 +3445,6 @@ function App({
     }
 
     const linkedPurchaseIds = new Set(linkedPurchases.map((purchase) => purchase.id))
-    const linkedLocalExpenseIds = new Set(linkedLocalExpenses.map((localExpense) => localExpense.id))
     const linkedPaymentIds = new Set(linkedPayments.map((payment) => payment.id))
     const ledgerSources = [
       ...linkedPurchases.map((purchase) => ({ sourceType: 'PURCHASE' as const, sourceId: purchase.id })),
@@ -3471,7 +3471,7 @@ function App({
       ledgerEntries: removeLedgerEntriesForSources(data.ledgerEntries, ledgerSources),
     }
 
-    setDataWithLog(
+    if (!await setDataWithLog(
       next,
       'Hard deleted party',
       `${party.name} with ${linkedPurchases.length} import purchase(s), ${linkedLocalExpenses.length} local expense(s), ${linkedPayments.length} payment(s)`,
@@ -3482,7 +3482,7 @@ function App({
         linkedPayments,
       }),
       'Deleted',
-    )
+    )) return
 
     if (partyForm.id === party.id) {
       setPartyForm(emptyParty)
@@ -3504,15 +3504,7 @@ function App({
       setLedgerPartyId('')
     }
 
-    const stockCleanupTasks = [
-      ...Array.from(linkedPurchaseIds).map((id) =>
-        cleanupLinkedPurchaseStock(id, 'Import Purchase', `deleted party ${party.name}`),
-      ),
-      ...Array.from(linkedLocalExpenseIds).map((id) =>
-        cleanupLinkedPurchaseStock(id, 'Local Purchase', `deleted party ${party.name}`),
-      ),
-    ]
-    await Promise.all(stockCleanupTasks)
+    await refreshPurchaseStock()
   }
 
   const savePurchase = async (event: FormEvent) => {
@@ -3745,24 +3737,6 @@ function App({
   const isStockEntryReadOnly = (status?: ImportPurchase['lifecycleStatus']) =>
     isReadOnly || isClosedFiscalYear || ['VOID', 'REVERSED'].includes(status ?? 'POSTED')
 
-  const cleanupLinkedPurchaseStock = async (
-    documentId: string,
-    sourceType: 'Import Purchase' | 'Local Purchase',
-    label: string,
-  ) => {
-    if (!inventoryEnabled) {
-      return
-    }
-
-    try {
-      await deleteStockPurchaseLinesForDocument(documentId, sourceType)
-      await refreshPurchaseStock()
-    } catch (error) {
-      console.error('Could not delete linked inventory lines.', error)
-      setDashboardEntryMessage(`Deleted ${label}, but linked inventory lines could not be removed.`)
-    }
-  }
-
   const openStockEntryForPurchase = (purchase: ImportPurchase) => {
     if (!onOpenStockLineEntry || !activeCompanyProfile) {
       setDashboardEntryMessage('Inventory module is not available for this company.')
@@ -3851,14 +3825,13 @@ function App({
     if (!saved) {
       return
     }
-    await cleanupLinkedPurchaseStock(purchase.id, 'Import Purchase', `purchase bill ${purchase.vendorBillNumber}`)
   }
 
   const otherPaymentTypeForParty = (party: Party | undefined): Payment['paymentType'] => {
     return paymentTypeForNonSupplierParty(party)
   }
 
-  const savePayment = (event: FormEvent) => {
+  const savePayment = async (event: FormEvent) => {
     event.preventDefault()
 
     try {
@@ -3997,13 +3970,13 @@ function App({
         ),
         ledgerEntries: replaceLedgerEntriesForSource('SUPPLIER_PAYMENT', updated.id, ledgerEntries),
       }
-      setDataWithLog(
+      if (!await setDataWithLog(
         next,
         'Updated payment',
         `${partyName(updated.partyId)} - ${npr(updated.amountNPR)}`,
         auditValue(previous),
         auditValue(updated),
-      )
+      )) return
     } else {
       const created = withNewPayment({
         ...paymentToSave,
@@ -4021,7 +3994,7 @@ function App({
         amountNPR: created.amountNPR,
         reference: created.referenceNumber || created.id,
       }, postingContext(created.fiscalYearId))
-      setDataWithLog(
+      if (!await setDataWithLog(
         {
           ...data,
           payments: [created, ...data.payments],
@@ -4029,7 +4002,7 @@ function App({
         },
         'Created payment',
         `${partyName(created.partyId)} - ${npr(created.amountNPR)}`,
-      )
+      )) return
     }
 
     setPaymentForm(createEmptyPayment())
@@ -4049,7 +4022,7 @@ function App({
     navigateToView('Payment Entry')
   }
 
-  const deletePayment = (payment: Payment) => {
+  const deletePayment = async (payment: Payment) => {
     if (!window.confirm(`Delete payment ${payment.referenceNumber || payment.id}?`)) {
       return
     }
@@ -4062,13 +4035,13 @@ function App({
         { sourceType: 'SUPPLIER_PAYMENT', sourceId: payment.id },
       ]),
     }
-    setDataWithLog(
+    if (!await setDataWithLog(
       next,
       'Deleted payment',
       `${partyName(payment.partyId)} - ${npr(payment.amountNPR)}`,
       auditValue(payment),
       'Deleted',
-    )
+    )) return
   }
 
   const saveLocalExpense = async (event: FormEvent) => {
@@ -4179,7 +4152,7 @@ function App({
     setLocalExpenseForm(createEmptyLocalExpense())
   }
 
-  const createQuickLocalSupplier = (event: FormEvent) => {
+  const createQuickLocalSupplier = async (event: FormEvent) => {
     event.preventDefault()
 
     const name = quickLocalSupplierForm.name.trim()
@@ -4207,11 +4180,11 @@ function App({
       openingPayable: quickLocalSupplierForm.openingPayable,
       isActive: true,
     })
-    setDataWithLog(
+    if (!await setDataWithLog(
       { ...data, parties: [created, ...data.parties] },
       'Created local supplier',
       created.name,
-    )
+    )) return
     setLocalExpenseForm((current) => ({ ...current, partyId: created.id }))
     setQuickLocalSupplierForm(emptyQuickLocalSupplier)
   }
@@ -4246,7 +4219,6 @@ function App({
     if (!saved) {
       return
     }
-    await cleanupLinkedPurchaseStock(localExpense.id, 'Local Purchase', `local purchase/expense ${localExpense.billNumber}`)
   }
 
   const openGlobalSearchResult = (result: (typeof globalSearchResults)[number]) => {
