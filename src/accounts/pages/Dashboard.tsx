@@ -9,12 +9,12 @@ import {
 } from "../data/storage";
 import { companyStorageKey } from "../../companyContext";
 import { scrollToPageTop } from "../../scroll";
+import { notifyError } from "../../components/notificationService";
 
 type DashboardTarget = "sales" | "collections" | "creditNotes" | "reports";
 
 type DashboardProps = {
   isReadOnly?: boolean;
-  lockedMessage?: string;
   onNavigate: (page: DashboardTarget) => void;
 };
 
@@ -50,9 +50,7 @@ async function loadDashboardSection<T>(sectionName: string, load: () => Promise<
   throw new Error(`${sectionName}: could not load`);
 }
 
-export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNavigate }: DashboardProps) {
-  const [entryMessage, setEntryMessage] = useState("");
-  const [loadMessage, setLoadMessage] = useState("");
+export default function Dashboard({ isReadOnly = false, onNavigate }: DashboardProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
@@ -89,9 +87,8 @@ export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNa
         ? `Some dashboard totals could not be loaded: ${failures.join("; ")}. Registers still show saved entries.`
         : "";
       if (nextLoadMessage) {
-        window.alert(nextLoadMessage);
+        notifyError(nextLoadMessage, "Dashboard data unavailable");
       }
-      setLoadMessage(nextLoadMessage);
     }
 
     void load();
@@ -139,12 +136,6 @@ export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNa
     }))
   );
   const openEntry = (target: Exclude<DashboardTarget, "reports">) => {
-    if (isReadOnly) {
-      setEntryMessage(lockedMessage || "This company fiscal year is closed. Entries cannot be added.");
-      return;
-    }
-
-    setEntryMessage("");
     onNavigate(target);
   };
 
@@ -152,17 +143,15 @@ export default function Dashboard({ isReadOnly = false, lockedMessage = "", onNa
     <div className="stack">
       <div className="card">
         <h3>New Entry</h3>
-        {loadMessage && <p className="status-message">{loadMessage}</p>}
-        {entryMessage && <p className="status-message">{entryMessage}</p>}
         <div className="quick-actions">
           <button type="button" onClick={() => openEntry("sales")}>
-            New sale
+            {isReadOnly ? "View sales register" : "New sale"}
           </button>
           <button type="button" onClick={() => openEntry("collections")}>
-            New collection
+            {isReadOnly ? "View collection register" : "New collection"}
           </button>
           <button type="button" onClick={() => openEntry("creditNotes")}>
-            New credit note / adjustment
+            {isReadOnly ? "View adjustment register" : "New credit note / adjustment"}
           </button>
           <button type="button" className="ghost" onClick={() => onNavigate("reports")}>
             Open reports

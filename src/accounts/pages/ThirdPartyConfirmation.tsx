@@ -7,6 +7,7 @@ import {
   type ThirdPartyConfirmationData,
   type ThirdPartyConfirmationSummary,
 } from "../utils/thirdPartyConfirmationPdf";
+import { notifyError, notifyToast } from "../../components/notificationService";
 
 type ThirdPartyConfirmationProps = {
   outstandingRows: OutstandingRow[];
@@ -20,7 +21,6 @@ export default function ThirdPartyConfirmation({
   sales,
 }: ThirdPartyConfirmationProps) {
   const [selectedPartyId, setSelectedPartyId] = useState("");
-  const [message, setMessage] = useState("");
   const activeCompany = getActiveCompanyProfile();
   const letterhead = readLetterheadSettings();
   const selectedParty = parties.find((party) => party.id === selectedPartyId) ?? null;
@@ -51,19 +51,16 @@ export default function ThirdPartyConfirmation({
     : null;
 
   async function downloadPdf() {
-    setMessage("");
-
     if (!confirmationData) {
-      setMessage("Please select a party before downloading the confirmation PDF.");
       return;
     }
 
     try {
       await saveThirdPartyConfirmationPdf(confirmationData);
-      setMessage(`3rd Party Confirmation PDF generated for ${confirmationData.partyName}.`);
+      notifyToast(`3rd Party Confirmation PDF generated for ${confirmationData.partyName}.`);
     } catch (error) {
       console.error("third party confirmation pdf error:", error);
-      setMessage(error instanceof Error ? error.message : String(error || "Failed to generate confirmation PDF."));
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to generate confirmation PDF."), "Confirmation PDF could not be generated");
     }
   }
 
@@ -75,8 +72,6 @@ export default function ThirdPartyConfirmation({
           Download PDF
         </button>
       </div>
-
-      {message && <p className="status-message">{message}</p>}
 
       <div className="toolbar">
         <label>

@@ -10,6 +10,7 @@ import {
 } from "../data/storage";
 import { companyStorageKey } from "../../companyContext";
 import { scrollToPageTop } from "../../scroll";
+import { confirmAction, notifyError, notifyToast } from "../../components/notificationService";
 
 const bankSuggestions = [
   "Cash",
@@ -45,12 +46,13 @@ function normalizeBsDate(value: string) {
 type CollectionsProps = {
   canManage: boolean;
   canEdit?: boolean;
+  isReadOnly?: boolean;
 };
 
 type CollectionSortKey = "dateBs" | "party" | "bankName" | "receiptNo" | "amount" | "remarks";
 type SortDirection = "asc" | "desc";
 
-export default function Collections({ canManage, canEdit = canManage }: CollectionsProps) {
+export default function Collections({ canManage, canEdit = canManage, isReadOnly = false }: CollectionsProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [editingCollectionId, setEditingCollectionId] = useState("");
@@ -60,7 +62,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
   const [amount, setAmount] = useState("");
   const [receiptNo, setReceiptNo] = useState("");
   const [remarks, setRemarks] = useState("");
-  const [message, setMessage] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [registerSearch, setRegisterSearch] = useState("");
   const [collectionSort, setCollectionSort] = useState<{ key: CollectionSortKey | null; direction: SortDirection }>({
     key: null,
@@ -162,11 +164,10 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
 
   function handleEditCollection(collection: Collection) {
     if (!canEdit) {
-      setMessage("Edit access is required to edit collections.");
+      notifyError("Edit access is required to edit collections.", "Edit not allowed");
       return;
     }
 
-    setMessage("");
     setEditingCollectionId(collection.id);
     setDateBs(collection.dateBs);
     setPartyId(collection.partyId);
@@ -179,42 +180,47 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
 
   async function handleSave(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    setMessage("");
+    setFieldErrors({});
+
+    const rejectField = (field: string, messageText: string) => {
+      setFieldErrors({ [field]: messageText });
+      window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[name="${field}"]`)?.focus());
+    };
 
     if (!dateBs.trim()) {
-      setMessage("Date BS is required.");
+      rejectField("dateBs", "Date BS is required.");
       return;
     }
 
     if (!partyId) {
-      setMessage("Party is required.");
+      rejectField("partyId", "Party is required.");
       return;
     }
 
     if (!bankName.trim()) {
-      setMessage("Bank / Cash is required.");
+      rejectField("bankName", "Bank / Cash is required.");
       return;
     }
 
     if (!receiptNo.trim()) {
-      setMessage("Receipt number is required.");
+      rejectField("receiptNo", "Receipt number is required.");
       return;
     }
 
     if (!/^\d+$/.test(receiptNo)) {
-      setMessage("Receipt number must be a whole number only.");
+      rejectField("receiptNo", "Receipt number must be a whole number only.");
       return;
     }
 
     if (numericAmount <= 0) {
-      setMessage("Amount must be greater than zero.");
+      rejectField("amount", "Amount must be greater than zero.");
       return;
     }
 
     try {
       if (editingCollectionId) {
         if (!canEdit) {
-          setMessage("Edit access is required to update collections.");
+          notifyError("Edit access is required to update collections.", "Edit not allowed");
           return;
         }
 
@@ -227,7 +233,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
           receiptNo,
           remarks,
         });
-        setMessage("Collection updated successfully.");
+        notifyToast("Collection updated successfully.");
       } else {
         await saveCollection({
           dateBs,
@@ -237,29 +243,28 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
           receiptNo,
           remarks,
         });
-        setMessage("Collection saved successfully.");
+        notifyToast("Collection saved successfully.");
       }
 
       clearForm();
       await loadData();
     } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to save collection.")
-      );
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to save collection."), "Collection could not be saved");
     }
   }
 
   async function handleDeleteCollection(collection: Collection) {
     if (!canManage) {
-      setMessage("Master access is required to delete collections.");
+      notifyError("Master access is required to delete collections.", "Delete not allowed");
       return;
     }
 
-    const confirmed = window.confirm(
-      `Delete collection receipt no. ${collection.receiptNo}?\n\nThis cannot be undone.`
-    );
+    const confirmed = await confirmAction({
+      title: "Delete collection?",
+      message: `Receipt: ${collection.receiptNo}\nDate: ${collection.dateBs}\nParty: ${parties.find((item) => item.id === collection.partyId)?.name || "Unknown"}\nAmount: ${formatMoney(collection.amount)}\n\nThis cannot be undone.`,
+      confirmLabel: "Delete collection",
+      destructive: true,
+    });
 
     if (!confirmed) return;
 
@@ -271,21 +276,15 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
       }
 
       await loadData();
-      setMessage(`Collection receipt no. ${collection.receiptNo} deleted successfully.`);
+      notifyToast(`Collection receipt no. ${collection.receiptNo} deleted successfully.`);
     } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to delete collection.")
-      );
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to delete collection."), "Collection could not be deleted");
     }
   }
 
   return (
     <div className="stack">
-      {message && <p className="status-message">{message}</p>}
-
-      <form className="stack" onSubmit={handleSave}>
+      {!isReadOnly && <form className="stack" onSubmit={handleSave}>
         <div className="card">
           <h3>{editingCollectionId ? "Edit Collection Entry" : "New Collection Entry"}</h3>
 
@@ -293,16 +292,25 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
             <label>
               Date BS <span className="required">*</span>
               <input
+                name="dateBs"
                 placeholder="YYYY/MM/DD or YYYY-MM-DD"
                 value={dateBs}
-                onChange={(event) => setDateBs(event.target.value)}
+                aria-invalid={Boolean(fieldErrors.dateBs)}
+                onChange={(event) => {
+                  setDateBs(event.target.value);
+                  setFieldErrors((current) => ({ ...current, dateBs: "" }));
+                }}
                 onBlur={(event) => setDateBs(normalizeBsDate(event.target.value))}
               />
+              {fieldErrors.dateBs && <span className="field-error" role="alert">{fieldErrors.dateBs}</span>}
             </label>
 
             <label>
               Party <span className="required">*</span>
-              <select value={partyId} onChange={(event) => setPartyId(event.target.value)}>
+              <select name="partyId" value={partyId} aria-invalid={Boolean(fieldErrors.partyId)} onChange={(event) => {
+                setPartyId(event.target.value);
+                setFieldErrors((current) => ({ ...current, partyId: "" }));
+              }}>
                 <option value="">Select party</option>
                 {parties.map((party) => (
                   <option key={party.id} value={party.id}>
@@ -310,11 +318,15 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
                   </option>
                 ))}
               </select>
+              {fieldErrors.partyId && <span className="field-error" role="alert">{fieldErrors.partyId}</span>}
             </label>
 
             <label>
               Bank / Cash <span className="required">*</span>
-              <select value={bankName} onChange={(event) => setBankName(event.target.value)}>
+              <select name="bankName" value={bankName} aria-invalid={Boolean(fieldErrors.bankName)} onChange={(event) => {
+                setBankName(event.target.value);
+                setFieldErrors((current) => ({ ...current, bankName: "" }));
+              }}>
                 <option value="">Select bank / cash</option>
                 {bankSuggestions.map((bank) => (
                   <option key={bank} value={bank}>
@@ -322,27 +334,40 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
                   </option>
                 ))}
               </select>
+              {fieldErrors.bankName && <span className="field-error" role="alert">{fieldErrors.bankName}</span>}
             </label>
 
             <label>
               Receipt No. <span className="required">*</span>
               <input
+                name="receiptNo"
                 inputMode="numeric"
                 placeholder="Whole number only"
                 value={receiptNo}
-                onChange={(event) => setReceiptNo(normalizeWholeNumber(event.target.value))}
+                aria-invalid={Boolean(fieldErrors.receiptNo)}
+                onChange={(event) => {
+                  setReceiptNo(normalizeWholeNumber(event.target.value));
+                  setFieldErrors((current) => ({ ...current, receiptNo: "" }));
+                }}
               />
+              {fieldErrors.receiptNo && <span className="field-error" role="alert">{fieldErrors.receiptNo}</span>}
             </label>
 
             <label>
               Amount <span className="required">*</span>
               <input
+                name="amount"
                 min="0"
                 step="0.01"
                 type="number"
                 value={amount}
-                onChange={(event) => setAmount(event.target.value)}
+                aria-invalid={Boolean(fieldErrors.amount)}
+                onChange={(event) => {
+                  setAmount(event.target.value);
+                  setFieldErrors((current) => ({ ...current, amount: "" }));
+                }}
               />
+              {fieldErrors.amount && <span className="field-error" role="alert">{fieldErrors.amount}</span>}
             </label>
 
             <label className="full-width-field">
@@ -362,7 +387,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
             </button>
           )}
         </div>
-      </form>
+      </form>}
 
       <div className="metric-grid">
         <MetricCard label="Collections count" value={String(collections.length)} />
@@ -383,7 +408,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
           </label>
 
         </div>
-        {missingReceiptNumbers.length > 0 && (
+        {!isReadOnly && missingReceiptNumbers.length > 0 && (
           <div className="missing-number-list">
             <p className="muted">
               Missing receipt numbers in sequence: {missingReceiptNumbers.join(", ")}
@@ -406,7 +431,7 @@ export default function Collections({ canManage, canEdit = canManage }: Collecti
             </button>
           </div>
         )}
-        {cancelledReceiptNumbers.length > 0 && (
+        {!isReadOnly && cancelledReceiptNumbers.length > 0 && (
           <div className="missing-number-list">
             <p className="muted">Cancelled receipt numbers:</p>
             {cancelledReceiptNumbers.map((receiptNumber) => (

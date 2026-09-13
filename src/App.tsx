@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import AccountsApp from "./accounts/App";
@@ -78,6 +78,7 @@ import { validateRawAccounts, validatePurchaseBackup } from "./application/backu
 import { readRecoveryJournal, writeRecoveryJournal, runRecoverable, configureRecoveryCoordinator, setRecoveryBlocked } from "./application/recovery";
 import { flushPendingWrites, runProtectedOperation, acknowledgeRecoveredWrites } from "./application/persistence";
 import { scrollToPageTop } from "./scroll";
+import { confirmAction, notifyError, notifyToast } from "./components/notificationService";
 import "./App.css";
 
 configureRecoveryCoordinator((companyId, work) => {
@@ -1162,7 +1163,7 @@ async function importPortableCompanyBackupData(
   const companyId = options.preserveIdentity ? sourceCompany.id : createCompanyYearId(sourceCompany.name, sourceCompany.fiscalYear);
 
   const adjacentLink = options.linkAdjacent
-    ? resolveAdjacentFiscalYearLink(sourceCompany, companyId)
+    ? await resolveAdjacentFiscalYearLink(sourceCompany, companyId)
     : { accepted: false, companyGroupId: options.preserveIdentity ? sourceCompany.companyGroupId : companyId, nextCompanyId: "", previousCompanyId: "" };
   const companyGroupId = options.preserveIdentity
     ? sourceCompany.companyGroupId || companyId
@@ -1298,9 +1299,12 @@ async function importPortableCompanyGroupBackup(parsed: PortableCompanyGroupBack
   const existingIds = new Set(getCompanyProfiles().map((company) => company.id));
   const conflictingIds = backups.map((backup) => backup.company.id).filter((id) => existingIds.has(id));
 
-  if (conflictingIds.length > 0 && !window.confirm(
-    `This full company backup will replace ${conflictingIds.length} existing fiscal year(s) with the same identity.\n\nContinue?`
-  )) {
+  if (conflictingIds.length > 0 && !await confirmAction({
+    title: "Replace existing fiscal years?",
+    message: `This full company backup will replace ${conflictingIds.length} existing fiscal year(s) with the same identity.`,
+    confirmLabel: "Replace and import",
+    destructive: true,
+  })) {
     throw new Error("Full company import cancelled.");
   }
 
@@ -1395,7 +1399,7 @@ function getLinkedCompanyGroup(company: CompanyProfile) {
   return profiles.filter((profile) => linkedIds.has(profile.id));
 }
 
-function resolveAdjacentFiscalYearLink(sourceCompany: CompanyProfile, importCompanyId: string): AdjacentFiscalYearLink {
+async function resolveAdjacentFiscalYearLink(sourceCompany: CompanyProfile, importCompanyId: string): Promise<AdjacentFiscalYearLink> {
   const profiles = getCompanyProfiles().filter((profile) => profile.id !== importCompanyId);
   const previousFiscalYear = fiscalYearCodeOffset(sourceCompany.fiscalYear, -1);
   const nextFiscalYear = fiscalYearCodeOffset(sourceCompany.fiscalYear, 1);
@@ -1417,9 +1421,11 @@ function resolveAdjacentFiscalYearLink(sourceCompany: CompanyProfile, importComp
     previousCompany ? `previous FY ${previousCompany.fiscalYear}` : "",
     nextCompany ? `next FY ${nextCompany.fiscalYear}` : "",
   ].filter(Boolean).join(" and ");
-  const accepted = window.confirm(
-    `This backup looks adjacent to ${linkTargets} for ${sourceCompany.name}.\n\nLink the fiscal years after import?`
-  );
+  const accepted = await confirmAction({
+    title: "Link adjacent fiscal years?",
+    message: `This backup looks adjacent to ${linkTargets} for ${sourceCompany.name}.`,
+    confirmLabel: "Link fiscal years",
+  });
 
   if (!accepted) {
     return {
@@ -1556,7 +1562,7 @@ export default function App() {
   const [trackInventory, setTrackInventory] = useState(false);
   const [masterPassword, setMasterPassword] = useState("");
   const [loginError, setLoginError] = useState("");
-  const [exportMessage, setExportMessage] = useState("");
+  const masterPasswordInputRef = useRef<HTMLInputElement>(null);
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const suiteSettings = readSuiteSettings();
@@ -1585,7 +1591,7 @@ export default function App() {
   }, [activeCompanyIdState, isAddingCompany, selectedModule, userRole]);
 
   async function navigateToModule(nextModule: ModuleKey | null) {
-    try { await flushPendingWrites(); } catch (error) { window.alert(String(error)); return; }
+    try { await flushPendingWrites(); } catch (error) { notifyError(String(error)); return; }
     setSelectedModule(nextModule);
     scrollToPageTop();
   }
@@ -1638,7 +1644,7 @@ export default function App() {
   }
 
   async function activateCompany(companyId: string) {
-    try { await flushPendingWrites(); } catch (error) { window.alert(String(error)); return; }
+    try { await flushPendingWrites(); } catch (error) { notifyError(String(error)); return; }
     setActiveCompanyId(companyId);
     setActiveCompanyIdState(companyId);
     navigateToModule(null);
@@ -1649,13 +1655,12 @@ export default function App() {
   }
 
   async function openCompanySelection() {
-    try { await flushPendingWrites(); } catch (error) { window.alert(String(error)); return; }
+    try { await flushPendingWrites(); } catch (error) { notifyError(String(error)); return; }
     refreshCompanies();
     setActiveCompanyId("");
     setActiveCompanyIdState("");
     navigateToModule(null);
     setStockEntryTarget(null);
-    setExportMessage("");
     setIsAddingCompany(false);
   }
 
@@ -1665,14 +1670,13 @@ export default function App() {
     }
 
     setIsExporting(true);
-    setExportMessage("");
 
     try {
       await downloadCompanyWorkbook(activeCompany);
-      setExportMessage(`Exported workbook for ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}.`);
+      notifyToast(`Exported workbook for ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}.`);
     } catch (error) {
       console.error("Company export error:", error);
-      setExportMessage(error instanceof Error ? error.message : String(error || "Could not export workbook."));
+      notifyError(error instanceof Error ? error.message : String(error || "Could not export workbook."), "Workbook export failed");
     } finally {
       setIsExporting(false);
     }
@@ -1684,14 +1688,13 @@ export default function App() {
     }
 
     setIsBackingUp(true);
-    setExportMessage("");
 
     try {
       await downloadPortableCompanyBackup(activeCompany);
-      setExportMessage(`Backup file created for ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}.`);
+      notifyToast(`Backup file created for ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}.`);
     } catch (error) {
       console.error("Manual backup error:", error);
-      setExportMessage(error instanceof Error ? error.message : String(error || "Could not create backup."));
+      notifyError(error instanceof Error ? error.message : String(error || "Could not create backup."), "Backup failed");
     } finally {
       setIsBackingUp(false);
     }
@@ -1703,30 +1706,28 @@ export default function App() {
     }
 
     setIsBackingUp(true);
-    setExportMessage("");
 
     try {
       await downloadPortableCompanyGroupBackup(activeCompany);
-      setExportMessage(`Full company backup created for ${activeCompany.name}.`);
+      notifyToast(`Full company backup created for ${activeCompany.name}.`);
     } catch (error) {
       console.error("Full company backup error:", error);
-      setExportMessage(error instanceof Error ? error.message : String(error || "Could not create full company backup."));
+      notifyError(error instanceof Error ? error.message : String(error || "Could not create full company backup."), "Full backup failed");
     } finally {
       setIsBackingUp(false);
     }
   }
 
   async function importBackupFile(file: File) {
-    setExportMessage("");
 
     try {
       const profile = await importPortableBackupFile(file);
       refreshCompanies();
       activateCompany(profile.id);
-      setExportMessage(`Imported backup as ${profile.name}${profile.fiscalYear ? ` FY ${profile.fiscalYear}` : ""}.`);
+      notifyToast(`Imported backup as ${profile.name}${profile.fiscalYear ? ` FY ${profile.fiscalYear}` : ""}.`);
     } catch (error) {
       console.error("Portable backup import error:", error);
-      setExportMessage(error instanceof Error ? error.message : String(error || "Could not import backup."));
+      notifyError(error instanceof Error ? error.message : String(error || "Could not import backup."), "Backup import failed");
     }
   }
 
@@ -1744,7 +1745,7 @@ export default function App() {
     setTrackInventory(Boolean(nextActiveCompanyId) && isInventoryTrackingEnabled());
     setStockEntryTarget(null);
     navigateToModule(null);
-    setExportMessage(
+    notifyToast(
       scope === "company-group"
         ? `Deleted ${deletedCompanies.length} linked fiscal year(s) for ${activeCompany.name}.`
         : `Deleted ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}.`
@@ -1795,6 +1796,7 @@ export default function App() {
 
     if (masterPassword !== MASTER_PASSWORD) {
       setLoginError("Master password is incorrect.");
+      window.requestAnimationFrame(() => masterPasswordInputRef.current?.focus());
       return;
     }
 
@@ -1808,7 +1810,7 @@ export default function App() {
   }
 
   async function logout() {
-    try { await flushPendingWrites(); } catch (error) { window.alert(String(error)); return; }
+    try { await flushPendingWrites(); } catch (error) { notifyError(String(error)); return; }
     setUserRole(null);
     navigateToModule(null);
     setActiveCompanyId("");
@@ -1824,16 +1826,15 @@ export default function App() {
     }
 
     if (target.companyId && target.companyId !== activeCompany.id) {
-      setExportMessage("Inventory entry belongs to another company and was not opened.");
+      notifyError("Inventory entry belongs to another company and was not opened.", "Inventory entry unavailable");
       return;
     }
 
     if (target.fiscalYearId && target.fiscalYearId !== activeFiscalYear.id) {
-      setExportMessage("Inventory entry belongs to another fiscal year and was not opened.");
+      notifyError("Inventory entry belongs to another fiscal year and was not opened.", "Inventory entry unavailable");
       return;
     }
 
-    setExportMessage("");
     setStockEntryTarget({
       ...target,
       companyId: activeCompany.id,
@@ -1869,8 +1870,6 @@ export default function App() {
             edits, deletes, settings, and audit logs.
           </p>
 
-          {loginError && <p className="status-message">{loginError}</p>}
-
           <div className="login-actions">
             <button type="button" onClick={loginAsAccount}>
               Continue as Account
@@ -1880,10 +1879,17 @@ export default function App() {
               <label>
                 Master Password
                 <input
+                  ref={masterPasswordInputRef}
                   type="password"
                   value={masterPassword}
-                  onChange={(event) => setMasterPassword(event.target.value)}
+                  aria-invalid={Boolean(loginError)}
+                  aria-describedby={loginError ? "suite-master-password-error" : undefined}
+                  onChange={(event) => {
+                    setMasterPassword(event.target.value);
+                    setLoginError("");
+                  }}
                 />
+                {loginError && <span className="field-error" id="suite-master-password-error" role="alert">{loginError}</span>}
               </label>
               <button type="submit">Unlock Master</button>
             </form>
@@ -1907,7 +1913,6 @@ export default function App() {
     return (
       <CompanySelector
         companies={companies}
-        message={exportMessage}
         userRole={userRole}
         onAddCompany={() => setIsAddingCompany(true)}
         onImportBackup={importBackupFile}
@@ -2071,7 +2076,6 @@ export default function App() {
             </>
           )}
         </section>
-        {exportMessage && <p className="module-status-message">{exportMessage}</p>}
       </main>
     );
   }
@@ -2261,14 +2265,11 @@ function MaskebariGenerator({ onBack, onLogout }: MaskebariGeneratorProps) {
   const [creditNotes, setCreditNotes] = useState<CreditNote[]>([]);
   const [accountParties, setAccountParties] = useState<AccountParty[]>([]);
   const [purchaseData, setPurchaseData] = useState<AppData | null>(null);
-  const [message, setMessage] = useState("");
 
   useEffect(() => {
     let active = true;
 
     async function loadData() {
-      setMessage("");
-
       try {
         const [loadedSales, loadedCreditNotes, loadedAccountParties, repository] =
           await Promise.all([getSales(), getCreditNotes(), getParties(), createDataRepository()]);
@@ -2285,7 +2286,7 @@ function MaskebariGenerator({ onBack, onLogout }: MaskebariGeneratorProps) {
       } catch (error) {
         console.error("Maskebari load error:", error);
         if (active) {
-          setMessage("Could not load all VAT data. Please reopen the app and try again.");
+          notifyError("Could not load all VAT data. Please reopen the app and try again.", "VAT data unavailable");
         }
       }
     }
@@ -2364,8 +2365,6 @@ function MaskebariGenerator({ onBack, onLogout }: MaskebariGeneratorProps) {
           <div className="card-header">
             <h3>Maskebari Summary - {selectedMonthLabel}</h3>
           </div>
-          {message && <p className="status-message">{message}</p>}
-
           <div className="table-wrap">
             <table className="maskebari-table">
               <thead>
@@ -2893,14 +2892,13 @@ type CompanySetupProps = {
 
 type CompanySelectorProps = {
   companies: CompanyProfile[];
-  message: string;
   userRole: UserRole;
   onAddCompany: () => void;
   onImportBackup: (file: File) => Promise<void>;
   onSelectCompany: (companyId: string) => void;
 };
 
-function CompanySelector({ companies, message, onAddCompany, onImportBackup, onSelectCompany, userRole }: CompanySelectorProps) {
+function CompanySelector({ companies, onAddCompany, onImportBackup, onSelectCompany, userRole }: CompanySelectorProps) {
   const isMaster = userRole === "master";
   const [isImportingBackup, setIsImportingBackup] = useState(false);
 
@@ -2948,8 +2946,6 @@ function CompanySelector({ companies, message, onAddCompany, onImportBackup, onS
           )}
         </div>
       </header>
-      {message && <p className="module-status-message">{message}</p>}
-
       <section className="module-grid company-grid">
         {companies.map((company) => (
           <button
@@ -3003,14 +2999,23 @@ function YearEndManager({
   const [legacyOpeningPolicy, setLegacyOpeningPolicy] = useState<"" | "manual" | "derived">("");
   const [nextYear, setNextYear] = useState(() => nextFiscalYear(company.fiscalYear));
   const [lockPassword, setLockPassword] = useState("");
+  const [lockPasswordError, setLockPasswordError] = useState("");
   const [unlockMasterPassword, setUnlockMasterPassword] = useState("");
   const [unlockPassword, setUnlockPassword] = useState("");
-  const [message, setMessage] = useState("");
+  const [unlockMasterPasswordError, setUnlockMasterPasswordError] = useState("");
+  const [unlockPasswordError, setUnlockPasswordError] = useState("");
+  const lockPasswordRef = useRef<HTMLInputElement>(null);
+  const unlockMasterPasswordRef = useRef<HTMLInputElement>(null);
+  const unlockPasswordRef = useRef<HTMLInputElement>(null);
   const [isBusy, setIsBusy] = useState(false);
 
   async function lockCompany() {
-    setMessage("");
-    if (lockPassword !== YEAR_END_PASSWORD) { setMessage("Additional year-end password is incorrect."); return; }
+    setLockPasswordError("");
+    if (lockPassword !== YEAR_END_PASSWORD) {
+      setLockPasswordError("Additional year-end password is incorrect.");
+      window.requestAnimationFrame(() => lockPasswordRef.current?.focus());
+      return;
+    }
     setIsBusy(true);
     try {
       await flushPendingWrites();
@@ -3044,14 +3049,24 @@ function YearEndManager({
       });
       setLockPassword("");
       onCompaniesChanged(carryForward ? target?.id : undefined);
-      setMessage(result);
-    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+      notifyToast(result, "success", 6000);
+    } catch (error) { notifyError(error instanceof Error ? error.message : String(error), "Fiscal year could not be locked"); }
     finally { setIsBusy(false); }
   }
 
   async function unlockCompany() {
-    setMessage("");
-    if (unlockMasterPassword !== MASTER_PASSWORD || unlockPassword !== YEAR_END_PASSWORD) { setMessage("Master password or additional year-end password is incorrect."); return; }
+    setUnlockMasterPasswordError("");
+    setUnlockPasswordError("");
+    if (unlockMasterPassword !== MASTER_PASSWORD) {
+      setUnlockMasterPasswordError("Master password is incorrect.");
+      window.requestAnimationFrame(() => unlockMasterPasswordRef.current?.focus());
+      return;
+    }
+    if (unlockPassword !== YEAR_END_PASSWORD) {
+      setUnlockPasswordError("Additional year-end password is incorrect.");
+      window.requestAnimationFrame(() => unlockPasswordRef.current?.focus());
+      return;
+    }
     try {
       await flushPendingWrites();
       assertReopenDependencies(company.id, getCompanyProfiles());
@@ -3062,8 +3077,8 @@ function YearEndManager({
       setUnlockMasterPassword("");
       setUnlockPassword("");
       onCompaniesChanged();
-      setMessage("Fiscal year reopened. Successor openings require reconciliation: close this year again before closing any successor. Reopen dependent years from newest to oldest.");
-    } catch (error) { setMessage(String(error)); }
+      notifyToast("Fiscal year reopened. Reconcile successor openings before closing dependent years again.", "warning", 6000);
+    } catch (error) { notifyError(String(error), "Fiscal year could not be reopened"); }
   }
 
   return (
@@ -3088,8 +3103,6 @@ function YearEndManager({
       </header>
 
       <section className="suite-settings-panel">
-        {message && <p className="status-message">{message}</p>}
-
         <div className="suite-settings-grid">
           <label>
             Current Fiscal Year
@@ -3124,10 +3137,16 @@ function YearEndManager({
           <label>
             Additional Password
             <input
+              ref={lockPasswordRef}
               type="password"
               value={lockPassword}
-              onChange={(event) => setLockPassword(event.target.value)}
+              aria-invalid={Boolean(lockPasswordError)}
+              onChange={(event) => {
+                setLockPassword(event.target.value);
+                setLockPasswordError("");
+              }}
             />
+            {lockPasswordError && <span className="field-error" role="alert">{lockPasswordError}</span>}
           </label>
         </div>
 
@@ -3147,18 +3166,30 @@ function YearEndManager({
           <label>
             Master Password
             <input
+              ref={unlockMasterPasswordRef}
               type="password"
               value={unlockMasterPassword}
-              onChange={(event) => setUnlockMasterPassword(event.target.value)}
+              aria-invalid={Boolean(unlockMasterPasswordError)}
+              onChange={(event) => {
+                setUnlockMasterPassword(event.target.value);
+                setUnlockMasterPasswordError("");
+              }}
             />
+            {unlockMasterPasswordError && <span className="field-error" role="alert">{unlockMasterPasswordError}</span>}
           </label>
           <label>
             Additional Password
             <input
+              ref={unlockPasswordRef}
               type="password"
               value={unlockPassword}
-              onChange={(event) => setUnlockPassword(event.target.value)}
+              aria-invalid={Boolean(unlockPasswordError)}
+              onChange={(event) => {
+                setUnlockPassword(event.target.value);
+                setUnlockPasswordError("");
+              }}
             />
+            {unlockPasswordError && <span className="field-error" role="alert">{unlockPasswordError}</span>}
           </label>
         </div>
         <div className="suite-settings-actions">
@@ -3178,7 +3209,10 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
   }));
   const [trackInventory, setTrackInventory] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  const [companyNameError, setCompanyNameError] = useState("");
+  const [fiscalYearInputError, setFiscalYearInputError] = useState("");
+  const companyNameRef = useRef<HTMLInputElement>(null);
+  const fiscalYearRef = useRef<HTMLInputElement>(null);
 
   function updateTextField(
     field: "companyName" | "fiscalYear" | "panVatNo" | "address" | "phone",
@@ -3203,22 +3237,26 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
 
   async function saveInitialSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setMessage("");
+    setCompanyNameError("");
+    setFiscalYearInputError("");
 
     const companyName = settingsForm.companyName.trim();
 
     if (!companyName) {
-      setMessage("Company name is required.");
+      setCompanyNameError("Company name is required.");
+      window.requestAnimationFrame(() => companyNameRef.current?.focus());
       return;
     }
 
     const fiscalYear = settingsForm.fiscalYear.trim();
     try { parseFiscalYear(fiscalYear); } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      setFiscalYearInputError(error instanceof Error ? error.message : String(error));
+      window.requestAnimationFrame(() => fiscalYearRef.current?.focus());
       return;
     }
     if (existingCompanyNames.includes(`${companyName.toLowerCase()}|${fiscalYear}`)) {
-      setMessage("This company and fiscal year already exists. Choose that company or use a different fiscal year.");
+      setFiscalYearInputError("This company and fiscal year already exists. Choose that company or use a different fiscal year.");
+      window.requestAnimationFrame(() => fiscalYearRef.current?.focus());
       return;
     }
 
@@ -3246,7 +3284,7 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
       await onComplete(nextSettings, trackInventory);
     } catch (error) {
       console.error("Initial company setup save error:", error);
-      setMessage("Company was created locally, but storage could not be initialized. Reopen the app and try again.");
+      notifyError("Company was created locally, but storage could not be initialized. Reopen the app and try again.", "Company storage initialization failed");
     } finally {
       setIsSaving(false);
     }
@@ -3270,26 +3308,36 @@ function CompanySetup({ existingCompanyNames, onBack, onComplete }: CompanySetup
       </header>
 
       <form className="suite-settings-panel" onSubmit={saveInitialSettings}>
-        {message && <p className="status-message">{message}</p>}
-
         <section className="suite-settings-grid">
           <label>
             Company Name
             <input
               autoFocus
+              ref={companyNameRef}
               required
               value={settingsForm.companyName}
-              onChange={(event) => updateTextField("companyName", event.target.value)}
+              aria-invalid={Boolean(companyNameError)}
+              onChange={(event) => {
+                updateTextField("companyName", event.target.value);
+                setCompanyNameError("");
+              }}
             />
+            {companyNameError && <span className="field-error" role="alert">{companyNameError}</span>}
           </label>
 
           <label>
             Fiscal Year
             <input
+              ref={fiscalYearRef}
               value={settingsForm.fiscalYear}
-              onChange={(event) => updateTextField("fiscalYear", event.target.value)}
+              aria-invalid={Boolean(fiscalYearInputError)}
+              onChange={(event) => {
+                updateTextField("fiscalYear", event.target.value);
+                setFiscalYearInputError("");
+              }}
               placeholder="2082/83"
             />
+            {fiscalYearInputError && <span className="field-error" role="alert">{fiscalYearInputError}</span>}
           </label>
 
           <label>
@@ -3386,7 +3434,6 @@ function SuiteSettings({
   const [isSaving, setIsSaving] = useState(false);
   const [isDeletingCompany, setIsDeletingCompany] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
-  const [message, setMessage] = useState("");
   const linkedCompanyCount = useMemo(() => {
     const linkedIds = new Set(getLinkedCompanyGroup(activeCompany).map((company) => company.id));
     return companies.filter((company) => linkedIds.has(company.id)).length;
@@ -3397,7 +3444,6 @@ function SuiteSettings({
 
     async function loadSettings() {
       setIsLoading(true);
-      setMessage("");
 
       try {
         const repository = await createDataRepository();
@@ -3414,7 +3460,7 @@ function SuiteSettings({
       } catch (error) {
         console.error("Settings load error:", error);
         if (active) {
-          setMessage("Using local settings. Purchase settings will sync when storage is available.");
+          notifyToast("Using local settings. Purchase settings will sync when storage is available.", "warning", 6000);
         }
       } finally {
         if (active) {
@@ -3458,7 +3504,6 @@ function SuiteSettings({
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsSaving(true);
-    setMessage("");
 
     const nextSettings: AppSettings = {
       ...settingsForm,
@@ -3492,12 +3537,12 @@ function SuiteSettings({
       setPurchaseData(updatedData);
       setSettingsForm(savedSettings);
       onCompanySaved();
-      setMessage("Settings saved for Sales/Collection and Purchase/Payment modules.");
+      notifyToast("Settings saved for Sales/Collection and Purchase/Payment modules.");
     } catch (error) {
       console.error("Settings save error:", error);
       setSettingsForm(savedSettings);
       onCompanySaved();
-      setMessage("Settings saved locally. Purchase database settings could not be updated.");
+      notifyToast("Settings saved locally. Purchase database settings could not be updated.", "warning", 6000);
     } finally {
       setIsSaving(false);
     }
@@ -3505,28 +3550,29 @@ function SuiteSettings({
 
   async function deleteCompany(scope: CompanyDeleteScope) {
     if (deleteConfirmation.trim() !== "DELETE") {
-      setMessage("Type DELETE before deleting company data.");
       return;
     }
 
-    const confirmed = window.confirm(
-      scope === "company-group"
+    const confirmed = await confirmAction({
+      title: scope === "company-group" ? "Delete all linked fiscal years?" : "Delete fiscal year?",
+      message: scope === "company-group"
         ? `Delete all linked fiscal years for ${activeCompany.name}?\n\nThis clears account, purchase, and stock data for ${linkedCompanyCount} fiscal year(s).`
-        : `Delete ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}?\n\nThis clears account, purchase, and stock data for this fiscal year.`
-    );
+        : `Delete ${activeCompany.name}${activeCompany.fiscalYear ? ` FY ${activeCompany.fiscalYear}` : ""}?\n\nThis clears account, purchase, and stock data for this fiscal year.`,
+      confirmLabel: "Delete permanently",
+      destructive: true,
+    });
 
     if (!confirmed) {
       return;
     }
 
     setIsDeletingCompany(true);
-    setMessage("");
 
     try {
       await onDeleteCompany(scope);
     } catch (error) {
       console.error("Company delete error:", error);
-      setMessage(error instanceof Error ? error.message : String(error || "Could not delete company data."));
+      notifyError(error instanceof Error ? error.message : String(error || "Could not delete company data."), "Company data could not be deleted");
     } finally {
       setIsDeletingCompany(false);
     }
@@ -3551,7 +3597,6 @@ function SuiteSettings({
       </header>
 
       <form className="suite-settings-panel" onSubmit={saveSettings}>
-        {message && <p className="status-message">{message}</p>}
         {isLoading && <p className="muted">Loading current settings...</p>}
 
         <section className="suite-settings-grid">

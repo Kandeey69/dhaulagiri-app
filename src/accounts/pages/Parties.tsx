@@ -2,15 +2,17 @@ import { useEffect, useState } from "react";
 import type { Party } from "../data/types";
 import { deleteParty, getParties, saveParty, updateParty } from "../data/storage";
 import { scrollToPageTop } from "../../scroll";
+import { confirmAction, notifyError, notifyToast } from "../../components/notificationService";
 
 type PartiesProps = {
   canManage: boolean;
+  isReadOnly?: boolean;
 };
 
 type PartySortKey = "name" | "phone" | "panNo" | "openingBalance" | "address";
 type SortDirection = "asc" | "desc";
 
-export default function Parties({ canManage }: PartiesProps) {
+export default function Parties({ canManage, isReadOnly = false }: PartiesProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [editingPartyId, setEditingPartyId] = useState("");
   const [name, setName] = useState("");
@@ -19,7 +21,7 @@ export default function Parties({ canManage }: PartiesProps) {
   const [panNo, setPanNo] = useState("");
   const [openingBalance, setOpeningBalance] = useState("0");
   const [search, setSearch] = useState("");
-  const [message, setMessage] = useState("");
+  const [nameError, setNameError] = useState("");
   const [partySort, setPartySort] = useState<{ key: PartySortKey | null; direction: SortDirection }>({
     key: null,
     direction: "asc",
@@ -44,11 +46,10 @@ export default function Parties({ canManage }: PartiesProps) {
 
   function handleEditParty(party: Party) {
     if (!canManage) {
-      setMessage("Master access is required to edit party details.");
+      notifyError("Master access is required to edit party details.", "Edit not allowed");
       return;
     }
 
-    setMessage("");
     setEditingPartyId(party.id);
     setName(party.name);
     setAddress(party.address ?? "");
@@ -59,17 +60,18 @@ export default function Parties({ canManage }: PartiesProps) {
   }
 
   async function handleSave() {
-    setMessage("");
+    setNameError("");
 
     if (!name.trim()) {
-      setMessage("Party name is required.");
+      setNameError("Party name is required.");
+      window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[name="partyName"]')?.focus());
       return;
     }
 
     try {
       if (editingPartyId) {
         if (!canManage) {
-          setMessage("Master access is required to update party details.");
+          notifyError("Master access is required to update party details.", "Edit not allowed");
           return;
         }
 
@@ -82,7 +84,7 @@ export default function Parties({ canManage }: PartiesProps) {
           openingBalance: Number(openingBalance || 0),
           isActive: true,
         });
-        setMessage("Party updated successfully.");
+        notifyToast("Party updated successfully.");
       } else {
         await saveParty({
           name: name.trim(),
@@ -92,30 +94,29 @@ export default function Parties({ canManage }: PartiesProps) {
           openingBalance: Number(openingBalance || 0),
           isActive: true,
         });
-        setMessage("Party saved successfully.");
+        notifyToast("Party saved successfully.");
       }
 
       clearForm();
       await loadParties();
     } catch (error) {
       console.error("saveParty error:", error);
-      setMessage(
-        error instanceof Error
-        ? error.message
-        : String(error || "Failed to save party.")
-      );
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to save party."), "Party could not be saved");
     }
   }
 
   async function handleDeleteParty(party: Party) {
     if (!canManage) {
-      setMessage("Master access is required to delete party details.");
+      notifyError("Master access is required to delete party details.", "Delete not allowed");
       return;
     }
 
-    const confirmed = window.confirm(
-      `Delete party ${party.name}?\n\nThis cannot be undone.`
-    );
+    const confirmed = await confirmAction({
+      title: "Delete party?",
+      message: `Party: ${party.name}\nPAN: ${party.panNo || "-"}\nOpening balance: ${party.openingBalance.toLocaleString()}\n\nThis cannot be undone.`,
+      confirmLabel: "Delete party",
+      destructive: true,
+    });
 
     if (!confirmed) return;
 
@@ -127,14 +128,10 @@ export default function Parties({ canManage }: PartiesProps) {
       }
 
       await loadParties();
-      setMessage(`Party ${party.name} deleted successfully.`);
+      notifyToast(`Party ${party.name} deleted successfully.`);
     } catch (error) {
       console.error("deleteParty error:", error);
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to delete party.")
-      );
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to delete party."), "Party could not be deleted");
     }
   }
 
@@ -176,15 +173,17 @@ export default function Parties({ canManage }: PartiesProps) {
   return (
     <>
       <h1>Party Master</h1>
-      {message && <p className="status-message">{message}</p>}
-
-      <div className="card">
+      {!isReadOnly && <div className="card">
         <h3>{editingPartyId ? "Edit Party" : "Add Party"}</h3>
 
         <div className="form-grid">
           <label className="full-width-field">
             Party Name
-            <input value={name} onChange={(e) => setName(e.target.value)} />
+            <input name="partyName" value={name} aria-invalid={Boolean(nameError)} onChange={(e) => {
+              setName(e.target.value);
+              setNameError("");
+            }} />
+            {nameError && <span className="field-error" role="alert">{nameError}</span>}
           </label>
 
           <label>
@@ -224,7 +223,7 @@ export default function Parties({ canManage }: PartiesProps) {
             </button>
           )}
         </div>
-      </div>
+      </div>}
 
       <div className="card">
         <div className="card-header report-header">

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { notifyError, notifyToast } from "../../components/notificationService";
 import {
   getParties,
   logActivity,
@@ -66,6 +67,11 @@ export default function Imports({ canManage }: ImportsProps) {
 
   function handleImportComplete(title: string, result: ImportResult) {
     setImportResults(result.details);
+    notifyToast(
+      `${title}: imported ${result.importedCount}, skipped ${result.skippedRows.length}.`,
+      result.skippedRows.length ? "warning" : "success",
+      6000,
+    );
     setImportMessage(
       `${title}: imported ${result.importedCount}, skipped ${result.skippedRows.length}.`,
     );
@@ -199,11 +205,7 @@ function ImportPanel({
       onImportComplete(title, result);
     } catch (error) {
       console.error(`${title} error:`, error);
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to import CSV file."),
-      );
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to import CSV file."), `${title} failed`);
     } finally {
       setIsImporting(false);
     }
@@ -239,8 +241,13 @@ function ImportPanel({
             accept=".csv"
             disabled={!canManage}
             type="file"
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            aria-invalid={Boolean(message)}
+            onChange={(event) => {
+              setFile(event.target.files?.[0] ?? null);
+              setMessage("");
+            }}
           />
+          {message && <span className="field-error" role="alert">{message}</span>}
         </label>
 
         <div className="form-actions">
@@ -256,7 +263,6 @@ function ImportPanel({
       </div>
 
       {file && <p className="muted selected-file">Selected: {file.name}</p>}
-      {message && <p className="status-message import-message">{message}</p>}
     </div>
   );
 }

@@ -21,6 +21,7 @@ import {
   getStockSalesBills,
 } from "../../stock/storage";
 import type { StockDocumentStatus, StockEntryTarget, StockItem, StockSalesBill } from "../../stock/types";
+import { confirmAction, notifyError, notifyToast } from "../../components/notificationService";
 
 function normalizeWholeNumber(value: string) {
   const onlyDigits = value.replace(/\D/g, "");
@@ -77,7 +78,7 @@ export default function Sales({
   const [partyId, setPartyId] = useState("");
   const [salesAmount, setSalesAmount] = useState("");
   const [remarks, setRemarks] = useState("");
-  const [message, setMessage] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [deletingSaleId, setDeletingSaleId] = useState("");
   const [registerSearch, setRegisterSearch] = useState("");
   const [salesSort, setSalesSort] = useState<{ key: SalesSortKey | null; direction: SortDirection }>({
@@ -166,11 +167,10 @@ export default function Sales({
 
   function handleEditSale(sale: Sale) {
     if (!canEdit) {
-      setMessage("Edit access is required to edit sales.");
+      notifyError("Edit access is required to edit sales.", "Edit not allowed");
       return;
     }
 
-    setMessage("");
     setEditingSaleId(sale.id);
     setBillNo(sale.billNo);
     setDateBs(sale.dateBs);
@@ -182,37 +182,42 @@ export default function Sales({
 
   async function handleSave(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    setMessage("");
+    setFieldErrors({});
+
+    const rejectField = (field: string, messageText: string) => {
+      setFieldErrors({ [field]: messageText });
+      window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[name="${field}"]`)?.focus());
+    };
 
     if (!billNo.trim()) {
-      setMessage("Bill number is required.");
+      rejectField("billNo", "Bill number is required.");
       return;
     }
 
     if (!/^\d+$/.test(billNo)) {
-      setMessage("Bill number must be a whole number only.");
+      rejectField("billNo", "Bill number must be a whole number only.");
       return;
     }
 
     if (!dateBs.trim()) {
-      setMessage("Date BS is required.");
+      rejectField("dateBs", "Date BS is required.");
       return;
     }
 
     if (!partyId) {
-      setMessage("Party is required.");
+      rejectField("partyId", "Party is required.");
       return;
     }
 
     if (numericSalesAmount <= 0) {
-      setMessage("Sales amount must be greater than zero.");
+      rejectField("salesAmount", "Sales amount must be greater than zero.");
       return;
     }
 
     try {
       if (editingSaleId) {
         if (!canEdit) {
-          setMessage("Edit access is required to update sales.");
+          notifyError("Edit access is required to update sales.", "Edit not allowed");
           return;
         }
 
@@ -226,7 +231,7 @@ export default function Sales({
           totalAmount,
           remarks,
         });
-        setMessage("Sale updated successfully.");
+        notifyToast("Sale updated successfully.");
       } else {
         await saveSale({
           billNo,
@@ -237,7 +242,7 @@ export default function Sales({
           totalAmount,
           remarks,
         });
-        setMessage("Sale saved successfully.");
+        notifyToast("Sale saved successfully.");
       }
 
       clearForm();
@@ -249,18 +254,20 @@ export default function Sales({
 
   async function handleDeleteSale(sale: Sale) {
     if (!canManage) {
-      setMessage("Master access is required to delete sales.");
+      notifyError("Master access is required to delete sales.", "Delete not allowed");
       return;
     }
 
-    const confirmed = window.confirm(
-      `Delete sale bill no. ${sale.billNo}?\n\nThis cannot be undone.`
-    );
+    const confirmed = await confirmAction({
+      title: "Delete sale?",
+      message: `Bill: ${sale.billNo}\nDate: ${sale.dateBs}\nParty: ${parties.find((item) => item.id === sale.partyId)?.name || "Unknown"}\nAmount: ${formatMoney(sale.totalAmount)}\n\nThis cannot be undone.`,
+      confirmLabel: "Delete sale",
+      destructive: true,
+    });
 
     if (!confirmed) return;
 
     setDeletingSaleId(sale.id);
-    setMessage(`Deleting sale bill no. ${sale.billNo}...`);
 
     try {
       await deleteSale(sale.id, { deleteLinkedStock: inventoryEnabled });
@@ -280,7 +287,7 @@ export default function Sales({
         cleanupMessage += " Register refresh hit a temporary database lock; reopen Sales if totals look stale.";
       }
 
-      setMessage(`Sale bill no. ${sale.billNo} deleted successfully.${cleanupMessage}`);
+      notifyToast(`Sale bill no. ${sale.billNo} deleted successfully.${cleanupMessage}`, cleanupMessage ? "warning" : "success");
     } catch (error) {
       console.error("Failed to delete sale.", error);
       reportError(error, "Failed to delete sale.");
@@ -291,7 +298,7 @@ export default function Sales({
 
   function openStockEntryForSale(sale: Sale) {
     if (!onOpenStockLineEntry || !activeCompany || !activeFiscalYear) {
-      setMessage("Inventory module is not available for this company.");
+      notifyError("Inventory module is not available for this company.", "Inventory unavailable");
       return;
     }
 
@@ -362,8 +369,7 @@ export default function Sales({
 
   function reportError(error: unknown, fallback: string) {
     const messageText = errorMessage(error, fallback);
-    window.alert(messageText);
-    setMessage(messageText);
+    notifyError(messageText, "Sales operation failed");
   }
 
   function toggleSalesSort(key: SalesSortKey) {
@@ -414,9 +420,7 @@ export default function Sales({
           vatAmount={previewSale.vatAmount}
         />
       )}
-      {message && <p className="status-message">{message}</p>}
-
-      <form className="stack" onSubmit={handleSave}>
+      {!isReadOnly && <form className="stack" onSubmit={handleSave}>
         <div className="card">
           <h3>{editingSaleId ? "Edit Sale Entry" : "New Sale Entry"}</h3>
 
@@ -424,26 +428,41 @@ export default function Sales({
             <label>
               Bill No. <span className="required">*</span>
               <input
+                name="billNo"
                 inputMode="numeric"
                 placeholder="Whole number only"
                 value={billNo}
-                onChange={(event) => setBillNo(normalizeWholeNumber(event.target.value))}
+                aria-invalid={Boolean(fieldErrors.billNo)}
+                onChange={(event) => {
+                  setBillNo(normalizeWholeNumber(event.target.value));
+                  setFieldErrors((current) => ({ ...current, billNo: "" }));
+                }}
               />
+              {fieldErrors.billNo && <span className="field-error" role="alert">{fieldErrors.billNo}</span>}
             </label>
 
             <label>
               Date BS <span className="required">*</span>
               <input
+                name="dateBs"
                 placeholder="YYYY/MM/DD or YYYY-MM-DD"
                 value={dateBs}
-                onChange={(event) => setDateBs(event.target.value)}
+                aria-invalid={Boolean(fieldErrors.dateBs)}
+                onChange={(event) => {
+                  setDateBs(event.target.value);
+                  setFieldErrors((current) => ({ ...current, dateBs: "" }));
+                }}
                 onBlur={(event) => setDateBs(normalizeBsDate(event.target.value))}
               />
+              {fieldErrors.dateBs && <span className="field-error" role="alert">{fieldErrors.dateBs}</span>}
             </label>
 
             <label>
               Party <span className="required">*</span>
-              <select value={partyId} onChange={(event) => setPartyId(event.target.value)}>
+              <select name="partyId" value={partyId} aria-invalid={Boolean(fieldErrors.partyId)} onChange={(event) => {
+                setPartyId(event.target.value);
+                setFieldErrors((current) => ({ ...current, partyId: "" }));
+              }}>
                 <option value="">Select party</option>
                 {parties.map((party) => (
                   <option key={party.id} value={party.id}>
@@ -451,17 +470,24 @@ export default function Sales({
                   </option>
                 ))}
               </select>
+              {fieldErrors.partyId && <span className="field-error" role="alert">{fieldErrors.partyId}</span>}
             </label>
 
             <label>
               Sales Amount <span className="required">*</span>
               <input
+                name="salesAmount"
                 min="0"
                 step="0.01"
                 type="number"
                 value={salesAmount}
-                onChange={(event) => setSalesAmount(event.target.value)}
+                aria-invalid={Boolean(fieldErrors.salesAmount)}
+                onChange={(event) => {
+                  setSalesAmount(event.target.value);
+                  setFieldErrors((current) => ({ ...current, salesAmount: "" }));
+                }}
               />
+              {fieldErrors.salesAmount && <span className="field-error" role="alert">{fieldErrors.salesAmount}</span>}
             </label>
 
             <label>
@@ -491,7 +517,7 @@ export default function Sales({
             </button>
           )}
         </div>
-      </form>
+      </form>}
 
       <div className="metric-grid">
         <MetricCard label="Sales count" value={String(sales.length)} />
@@ -513,7 +539,7 @@ export default function Sales({
           </label>
 
         </div>
-        {missingBillNumbers.length > 0 && (
+        {!isReadOnly && missingBillNumbers.length > 0 && (
           <div className="missing-number-list">
             <p className="muted">
               Missing bill numbers in sequence: {missingBillNumbers.join(", ")}
@@ -536,7 +562,7 @@ export default function Sales({
             </button>
           </div>
         )}
-        {cancelledBillNumbers.length > 0 && (
+        {!isReadOnly && cancelledBillNumbers.length > 0 && (
           <div className="missing-number-list">
             <p className="muted">Cancelled bill numbers:</p>
             {cancelledBillNumbers.map((billNumber) => (

@@ -7,7 +7,7 @@ export function ValidationSummary({
   errors: FieldError[]
   warnings?: FieldError[]
 }) {
-  if (!errors.length && !warnings.length) {
+  if (errors.length + warnings.length < 2) {
     return null
   }
 
@@ -36,4 +36,3 @@ export function ValidationSummary({
     </div>
   )
 }
-

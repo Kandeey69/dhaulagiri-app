@@ -8,6 +8,7 @@ const stockUnitOptions = ["MT", "KG", "Number"];
 
 type ItemMasterPageProps = {
   canManage: boolean;
+  fieldErrors?: Record<string, string>;
   itemForm: StockItemForm;
   itemHasOpeningFigure: boolean;
   items: StockItem[];
@@ -22,6 +23,7 @@ type ItemMasterPageProps = {
 
 export default function ItemMasterPage({
   canManage,
+  fieldErrors = {},
   itemForm,
   itemHasOpeningFigure,
   items,
@@ -160,8 +162,8 @@ export default function ItemMasterPage({
           <p className="stock-validation-note">Item code and item name are required. Opening stock values are optional and saved only when the opening section is expanded.</p>
 
           <div className="stock-form-grid">
-            <label>Item Code<input disabled={readOnly} value={itemForm.code} onChange={(event) => onItemFormChange((current) => ({ ...current, code: event.target.value }))} /></label>
-            <label>Item Name<input disabled={readOnly} value={itemForm.name} onChange={(event) => onItemFormChange((current) => ({ ...current, name: event.target.value }))} /></label>
+            <label>Item Code<input name="stockItemCode" aria-invalid={Boolean(fieldErrors.code)} disabled={readOnly} value={itemForm.code} onChange={(event) => onItemFormChange((current) => ({ ...current, code: event.target.value }))} />{fieldErrors.code && <span className="field-error" role="alert">{fieldErrors.code}</span>}</label>
+            <label>Item Name<input name="stockItemName" aria-invalid={Boolean(fieldErrors.name)} disabled={readOnly} value={itemForm.name} onChange={(event) => onItemFormChange((current) => ({ ...current, name: event.target.value }))} />{fieldErrors.name && <span className="field-error" role="alert">{fieldErrors.name}</span>}</label>
             <label>
               Unit
               <select disabled={readOnly} value={itemForm.unit} onChange={(event) => onItemFormChange((current) => ({ ...current, unit: event.target.value }))}>

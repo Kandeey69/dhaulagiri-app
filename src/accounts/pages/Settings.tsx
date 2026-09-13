@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { MASTER_PASSWORD, type UserRole } from "../auth";
 import { getCompanySetting, setCompanySetting } from "../../companyContext";
 import { readLetterheadSettings, writeLetterheadSettings } from "../utils/letterheadSettings";
+import { notifyToast } from "../../components/notificationService";
 
 type SettingsProps = {
   onCompanySettingsChange: (companyName: string, fiscalYear: string) => void;
@@ -22,25 +23,27 @@ export default function Settings({
     () => getCompanySetting("accounts-fiscal-year", "")
   );
   const [letterheadSettings, setLetterheadSettings] = useState(readLetterheadSettings);
-  const [message, setMessage] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const passwordRef = useRef<HTMLInputElement>(null);
 
   function unlockMaster() {
-    setMessage("");
+    setPasswordError("");
 
     if (password !== MASTER_PASSWORD) {
-      setMessage("Incorrect master password.");
+      setPasswordError("Incorrect master password.");
+      window.requestAnimationFrame(() => passwordRef.current?.focus());
       return;
     }
 
     onUserRoleChange("master");
     setPassword("");
-    setMessage("Master access enabled.");
+    notifyToast("Master access enabled.");
   }
 
   function switchToAccount() {
     onUserRoleChange("account");
     setPassword("");
-    setMessage("Switched to Account mode.");
+    notifyToast("Switched to Account mode.");
   }
 
   function saveCompanySettings() {
@@ -49,12 +52,12 @@ export default function Settings({
     setCompanySetting("accounts-company-name", nextCompanyName);
     setCompanySetting("accounts-fiscal-year", nextFiscalYear);
     onCompanySettingsChange(nextCompanyName, nextFiscalYear);
-    setMessage("Settings saved.");
+    notifyToast("Settings saved.");
   }
 
   function saveLetterheadSettings() {
     writeLetterheadSettings(letterheadSettings);
-    setMessage("Letterhead settings saved.");
+    notifyToast("Letterhead settings saved.");
   }
 
   function updateLetterheadField(field: keyof typeof letterheadSettings, value: string) {
@@ -67,8 +70,6 @@ export default function Settings({
   return (
     <>
       <h1>Settings</h1>
-      {message && <p className="status-message">{message}</p>}
-
       <div className="settings-grid">
         <div className="card">
           <h3>User Access</h3>
@@ -90,11 +91,17 @@ export default function Settings({
             ) : (
               <div className="unlock-row">
                 <input
+                  ref={passwordRef}
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  aria-invalid={Boolean(passwordError)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setPasswordError("");
+                  }}
                   placeholder="Master password"
                 />
+                {passwordError && <span className="field-error" role="alert">{passwordError}</span>}
                 <button className="primary" onClick={unlockMaster}>
                   Unlock Master
                 </button>

@@ -27,6 +27,7 @@ import type {
   StockView,
 } from "./types";
 import { useDocumentAllocation } from "./hooks/useDocumentAllocation";
+import { confirmAction, notifyError, notifyToast } from "../components/notificationService";
 
 const emptyItem: StockItemForm = {
   id: "",
@@ -112,16 +113,16 @@ export default function StockApp({
     isLoading,
     hasLoaded,
     items,
-    message,
     purchaseBills,
     refreshStock,
     salesBills,
-    setMessage,
     sourceDocs,
   } = useStockData({ activeCompanyId, activeFiscalYearId });
   const [itemForm, setItemForm] = useState<StockItemForm>(emptyItem);
+  const [itemFieldErrors, setItemFieldErrors] = useState<Record<string, string>>({});
   const [itemHasOpeningFigure, setItemHasOpeningFigure] = useState(false);
   const [openingFile, setOpeningFile] = useState<File | null>(null);
+  const [openingFileError, setOpeningFileError] = useState("");
   const [fileInputKey, setFileInputKey] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("easysolution:stock-sidebar-collapsed") === "yes",
@@ -237,17 +238,31 @@ export default function StockApp({
   }, [refreshStock]);
   const resetItemForm = useCallback(() => {
     setItemForm(emptyItem);
+    setItemFieldErrors({});
     setItemHasOpeningFigure(false);
   }, []);
 
   const saveItem = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (isReadOnly) {
-      setMessage("Closed fiscal year: stock items cannot be changed.");
+      notifyError("Closed fiscal year: stock items cannot be changed.", "Read-only fiscal year");
+      return;
+    }
+    const nextItemErrors: Record<string, string> = {};
+    if (!itemForm.code.trim()) nextItemErrors.code = "Item code is required.";
+    if (!itemForm.name.trim()) nextItemErrors.name = "Item name is required.";
+    if (Object.keys(nextItemErrors).length) {
+      setItemFieldErrors(nextItemErrors);
+      const firstField = nextItemErrors.code ? "stockItemCode" : "stockItemName";
+      window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>(`[name="${firstField}"]`)?.focus());
       return;
     }
     const actionText = itemForm.id ? "update" : "save";
-    if (!window.confirm(`Do you want to ${actionText} this stock item?`)) return;
+    if (!await confirmAction({
+      title: itemForm.id ? "Update stock item?" : "Create stock item?",
+      message: `Do you want to ${actionText} this stock item?`,
+      confirmLabel: itemForm.id ? "Update item" : "Create item",
+    })) return;
     const input = {
       ...itemForm,
       openingQty: itemHasOpeningFigure ? itemForm.openingQty : 0,
@@ -258,57 +273,67 @@ export default function StockApp({
       else await saveStockItem(input);
       resetItemForm();
       await refreshStock("", false);
-      window.alert("Stock item saved.");
+      notifyToast("Stock item saved.");
     } catch (error) {
-      setMessage(errorMessage(error, "Failed to save stock item."));
+      notifyError(errorMessage(error, "Failed to save stock item."), "Stock item could not be saved");
     }
-  }, [isReadOnly, itemForm, itemHasOpeningFigure, refreshStock, resetItemForm, setMessage]);
+  }, [isReadOnly, itemForm, itemHasOpeningFigure, refreshStock, resetItemForm]);
 
   const removeItem = useCallback(async (item: StockItem) => {
     if (!canManage) {
-      setMessage("Master access is required to delete stock items.");
+      notifyError("Master access is required to delete stock items.", "Delete not allowed");
       return;
     }
     if (isReadOnly) {
-      setMessage("Closed fiscal year: stock items cannot be changed.");
+      notifyError("Closed fiscal year: stock items cannot be changed.", "Read-only fiscal year");
       return;
     }
-    if (!window.confirm(`Delete stock item ${item.name}?`)) return;
+    if (!await confirmAction({
+      title: "Delete stock item?",
+      message: `Delete stock item ${item.name}? This cannot be undone.`,
+      confirmLabel: "Delete item",
+      destructive: true,
+    })) return;
     try {
       await deleteStockItem(item.id);
       await refreshStock("", false);
-      window.alert("Stock item deleted.");
+      notifyToast("Stock item deleted.");
     } catch (error) {
-      setMessage(errorMessage(error, "Failed to delete stock item."));
+      notifyError(errorMessage(error, "Failed to delete stock item."), "Stock item could not be deleted");
     }
-  }, [canManage, isReadOnly, refreshStock, setMessage]);
+  }, [canManage, isReadOnly, refreshStock]);
 
   const importOpening = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (isReadOnly) {
-      setMessage("Closed fiscal year: opening stock cannot be imported.");
+      notifyError("Closed fiscal year: opening stock cannot be imported.", "Read-only fiscal year");
       return;
     }
     if (!openingFile) {
-      setMessage("Choose an opening stock CSV file first.");
+      setOpeningFileError("Choose an opening stock CSV file first.");
       return;
     }
     const rows = parseOpeningRows(await openingFile.text());
     if (!rows.length) {
-      setMessage("No opening stock rows were found in the CSV file.");
+      setOpeningFileError("No opening stock rows were found in the CSV file.");
       return;
     }
-    if (!window.confirm(`Import ${rows.length} opening stock item(s) from this CSV file?`)) return;
+    if (!await confirmAction({
+      title: "Import opening stock?",
+      message: `Import ${rows.length} opening stock item(s) from this CSV file?`,
+      confirmLabel: "Import stock",
+    })) return;
     try {
       for (const row of rows) await upsertOpeningStockItem(row);
       setOpeningFile(null);
+      setOpeningFileError("");
       setFileInputKey((current) => current + 1);
       await refreshStock("", false);
-      window.alert(`Imported ${rows.length} opening stock item(s).`);
+      notifyToast(`Imported ${rows.length} opening stock item(s).`);
     } catch (error) {
-      setMessage(errorMessage(error, "Failed to import opening stock."));
+      notifyError(errorMessage(error, "Failed to import opening stock."), "Opening stock could not be imported");
     }
-  }, [isReadOnly, openingFile, refreshStock, setMessage]);
+  }, [isReadOnly, openingFile, refreshStock]);
 
   const downloadOpeningTemplate = useCallback(() => {
     const csv = [
@@ -360,7 +385,6 @@ export default function StockApp({
             <button type="button" onClick={refreshStockNow}>Refresh Stock</button>
           </div>
         </header>
-        {message && <p className="stock-status">{message}</p>}
         {isReadOnly && <p className="stock-status">Closed fiscal year: inventory can be viewed but not changed.</p>}
         {view === "Dashboard" && showInitialLoading && <p className="stock-muted">Loading stock data...</p>}
         {view === "Dashboard" && (
@@ -449,10 +473,14 @@ export default function StockApp({
           <ItemMasterPage
             canManage={canManage}
             itemForm={itemForm}
+            fieldErrors={itemFieldErrors}
             itemHasOpeningFigure={itemHasOpeningFigure}
             items={items}
             onEditItem={editItem}
-            onItemFormChange={setItemForm}
+            onItemFormChange={(updater) => {
+              setItemForm(updater);
+              setItemFieldErrors({});
+            }}
             onItemHasOpeningFigureChange={setItemHasOpeningFigure}
             onRemoveItem={removeItem}
             onSaveItem={saveItem}
@@ -463,10 +491,14 @@ export default function StockApp({
         {canManage && view === "Data Importation" && (
           <ImportPage
             fileInputKey={fileInputKey}
+            fileError={openingFileError}
             isReadOnly={isReadOnly}
             onDownloadOpeningTemplate={downloadOpeningTemplate}
             onImportOpening={importOpening}
-            onOpeningFileChange={setOpeningFile}
+            onOpeningFileChange={(file) => {
+              setOpeningFile(file);
+              setOpeningFileError("");
+            }}
           />
         )}
       </main>

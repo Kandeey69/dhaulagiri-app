@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import Dashboard from "./pages/Dashboard";
 import Parties from "./pages/Parties";
@@ -49,6 +49,12 @@ const pageShortLabels: Record<Page, string> = {
   reports: "RP",
   settings: "ST",
   activityLogs: "AL",
+};
+
+const readOnlyPageLabels: Partial<Record<Page, string>> = {
+  sales: "Sales Register",
+  collections: "Collection Register",
+  creditNotes: "Adjustment Register",
 };
 
 const masterPages: Page[] = [
@@ -125,6 +131,7 @@ export default function App({
   const [userRole, setUserRole] = useState<UserRole | null>(() => initialUserRole ?? null);
   const [loginPassword, setLoginPassword] = useState("");
   const [loginMessage, setLoginMessage] = useState("");
+  const masterPasswordInputRef = useRef<HTMLInputElement>(null);
   const [netReceivable, setNetReceivable] = useState(0);
   const [companyName, setCompanyName] = useState(
     () => getCompanySetting("accounts-company-name", getActiveCompanyProfile()?.name || "Company")
@@ -140,8 +147,8 @@ export default function App({
     () => {
       if (isReadOnly) {
         return userRole === "master"
-          ? (["dashboard", "reports", "parties", "activityLogs"] as Page[])
-          : (["dashboard", "reports", "parties"] as Page[]);
+          ? (["dashboard", "sales", "collections", "creditNotes", "reports", "parties", "activityLogs"] as Page[])
+          : (["dashboard", "sales", "collections", "creditNotes", "reports", "parties"] as Page[]);
       }
 
       return userRole === "master" ? masterPages : accountPages;
@@ -199,6 +206,7 @@ export default function App({
 
     if (loginPassword !== MASTER_PASSWORD) {
       setLoginMessage("Incorrect master password.");
+      window.requestAnimationFrame(() => masterPasswordInputRef.current?.focus());
       return;
     }
 
@@ -226,12 +234,11 @@ export default function App({
       return (
         <Dashboard
           isReadOnly={isReadOnly}
-          lockedMessage={`${companyName} ${fiscalYear ? `FY ${fiscalYear}` : ""} is closed. Entries cannot be added in a closed fiscal year.`}
           onNavigate={navigateToPage}
         />
       );
     }
-    if (currentPage === "parties") return <Parties canManage={canManage} />;
+    if (currentPage === "parties") return <Parties canManage={canManage} isReadOnly={isReadOnly} />;
     if (currentPage === "sales") {
       return (
         <Sales
@@ -242,8 +249,8 @@ export default function App({
         />
       );
     }
-    if (currentPage === "collections") return <Collections canManage={canManage} canEdit={!isReadOnly} />;
-    if (currentPage === "creditNotes") return <CreditNotes canManage={canManage} />;
+    if (currentPage === "collections") return <Collections canManage={canManage} canEdit={!isReadOnly} isReadOnly={isReadOnly} />;
+    if (currentPage === "creditNotes") return <CreditNotes canManage={canManage} isReadOnly={isReadOnly} />;
     if (currentPage === "imports") return <Imports canManage={canManage} />;
     if (currentPage === "reports") return <Reports />;
     if (currentPage === "activityLogs") return <ActivityLogs />;
@@ -274,8 +281,6 @@ export default function App({
           <h2>Select user</h2>
           <p className="login-note">Choose Account mode for daily entries, or unlock Master for edit, delete, settings, and import access.</p>
 
-          {loginMessage && <p className="status-message">{loginMessage}</p>}
-
           <div className="login-actions">
             <button type="button" onClick={loginAsAccount}>
               Continue as Account
@@ -291,10 +296,17 @@ export default function App({
               <label>
                 Master Password
                 <input
+                  ref={masterPasswordInputRef}
                   type="password"
                   value={loginPassword}
-                  onChange={(event) => setLoginPassword(event.target.value)}
+                  aria-invalid={Boolean(loginMessage)}
+                  aria-describedby={loginMessage ? "accounts-master-password-error" : undefined}
+                  onChange={(event) => {
+                    setLoginPassword(event.target.value);
+                    setLoginMessage("");
+                  }}
                 />
+                {loginMessage && <span className="field-error" id="accounts-master-password-error" role="alert">{loginMessage}</span>}
               </label>
               <button type="submit">
                 Unlock Master
@@ -333,10 +345,10 @@ export default function App({
               type="button"
               className={currentPage === item ? "active" : ""}
               onClick={() => navigateToPage(item)}
-              title={pageLabels[item]}
+              title={isReadOnly ? readOnlyPageLabels[item] ?? pageLabels[item] : pageLabels[item]}
             >
               <span className="nav-icon" aria-hidden="true">{pageShortLabels[item]}</span>
-              <span className="nav-label">{pageLabels[item]}</span>
+              <span className="nav-label">{isReadOnly ? readOnlyPageLabels[item] ?? pageLabels[item] : pageLabels[item]}</span>
             </button>
           ))}
           {onBackToModules && (
@@ -358,7 +370,7 @@ export default function App({
             <p className="company-name-display compact">
               {companyName} {fiscalYear ? `- FY ${fiscalYear}` : ""}
             </p>
-            <h2>{pageLabels[currentPage]}</h2>
+            <h2>{isReadOnly ? readOnlyPageLabels[currentPage] ?? pageLabels[currentPage] : pageLabels[currentPage]}</h2>
           </div>
           <div className="quick-total">
             <span>Net receivable</span>

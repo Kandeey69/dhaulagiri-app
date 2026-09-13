@@ -1,6 +1,6 @@
 [package]
 name = "easysolution"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local desktop app for sales, receivables, purchase and payable workflow"
 authors = ["Easysolution"]
 edition = "2021"

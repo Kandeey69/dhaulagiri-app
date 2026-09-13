@@ -9,6 +9,7 @@ import {
 } from "../data/storage";
 import { scrollToPageTop } from "../../scroll";
 import { calculateVatAmount, getSuiteVatRatePercent } from "../utils/settings";
+import { confirmAction, notifyError, notifyToast } from "../../components/notificationService";
 
 function normalizeWholeNumber(value: string) {
   const onlyDigits = value.replace(/\D/g, "");
@@ -36,12 +37,13 @@ function normalizeBsDate(value: string) {
 
 type CreditNotesProps = {
   canManage: boolean;
+  isReadOnly?: boolean;
 };
 
 type CreditNoteSortKey = "creditNoteNo" | "dateBs" | "party" | "amount" | "vatAmount" | "totalAmount" | "remarks";
 type SortDirection = "asc" | "desc";
 
-export default function CreditNotes({ canManage }: CreditNotesProps) {
+export default function CreditNotes({ canManage, isReadOnly = false }: CreditNotesProps) {
   const [parties, setParties] = useState<Party[]>([]);
   const [creditNotes, setCreditNotes] = useState<CreditNote[]>([]);
   const [editingCreditNoteId, setEditingCreditNoteId] = useState("");
@@ -50,7 +52,7 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
   const [partyId, setPartyId] = useState("");
   const [amount, setAmount] = useState("");
   const [remarks, setRemarks] = useState("");
-  const [message, setMessage] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [creditNoteSort, setCreditNoteSort] = useState<{ key: CreditNoteSortKey | null; direction: SortDirection }>({
     key: null,
     direction: "asc",
@@ -81,11 +83,10 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
 
   function handleEditCreditNote(creditNote: CreditNote) {
     if (!canManage) {
-      setMessage("Master access is required to edit credit notes.");
+      notifyError("Master access is required to edit credit notes.", "Edit not allowed");
       return;
     }
 
-    setMessage("");
     setEditingCreditNoteId(creditNote.id);
     setCreditNoteNo(creditNote.creditNoteNo);
     setDateBs(creditNote.dateBs);
@@ -96,37 +97,42 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
   }
 
   async function handleSave() {
-    setMessage("");
+    setFieldErrors({});
+
+    const rejectField = (field: string, messageText: string) => {
+      setFieldErrors({ [field]: messageText });
+      window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[name="${field}"]`)?.focus());
+    };
 
     if (!creditNoteNo.trim()) {
-      setMessage("Credit note number is required.");
+      rejectField("creditNoteNo", "Credit note number is required.");
       return;
     }
 
     if (!dateBs.trim()) {
-      setMessage("Date BS is required.");
+      rejectField("dateBs", "Date BS is required.");
       return;
     }
 
     if (!partyId) {
-      setMessage("Party is required.");
+      rejectField("partyId", "Party is required.");
       return;
     }
 
     if (numericAmount <= 0) {
-      setMessage("Amount must be greater than zero.");
+      rejectField("amount", "Amount must be greater than zero.");
       return;
     }
 
     if (numericVatAmount < 0) {
-      setMessage("VAT must not be negative.");
+      rejectField("amount", "VAT must not be negative.");
       return;
     }
 
     try {
       if (editingCreditNoteId) {
         if (!canManage) {
-          setMessage("Master access is required to update credit notes.");
+          notifyError("Master access is required to update credit notes.", "Edit not allowed");
           return;
         }
 
@@ -140,7 +146,7 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
           totalAmount,
           remarks,
         });
-        setMessage("Credit note adjustment updated successfully.");
+        notifyToast("Credit note adjustment updated successfully.");
       } else {
         await saveCreditNote({
           creditNoteNo,
@@ -151,29 +157,28 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
           totalAmount,
           remarks,
         });
-        setMessage("Credit note adjustment saved successfully.");
+        notifyToast("Credit note adjustment saved successfully.");
       }
 
       clearForm();
       await loadData();
     } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to save credit note.")
-      );
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to save credit note."), "Adjustment could not be saved");
     }
   }
 
   async function handleDeleteCreditNote(creditNote: CreditNote) {
     if (!canManage) {
-      setMessage("Master access is required to delete credit notes.");
+      notifyError("Master access is required to delete credit notes.", "Delete not allowed");
       return;
     }
 
-    const confirmed = window.confirm(
-      `Delete credit note no. ${creditNote.creditNoteNo}?\n\nThis cannot be undone.`
-    );
+    const confirmed = await confirmAction({
+      title: "Delete adjustment?",
+      message: `Credit note: ${creditNote.creditNoteNo}\nDate: ${creditNote.dateBs}\nParty: ${parties.find((item) => item.id === creditNote.partyId)?.name || "Unknown"}\nAmount: ${formatMoney(creditNote.totalAmount)}\n\nThis cannot be undone.`,
+      confirmLabel: "Delete adjustment",
+      destructive: true,
+    });
 
     if (!confirmed) return;
 
@@ -185,13 +190,9 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
       }
 
       await loadData();
-      setMessage(`Credit note no. ${creditNote.creditNoteNo} deleted successfully.`);
+      notifyToast(`Credit note no. ${creditNote.creditNoteNo} deleted successfully.`);
     } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to delete credit note.")
-      );
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to delete credit note."), "Adjustment could not be deleted");
     }
   }
 
@@ -233,34 +234,47 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
     <>
       <h1>Credit Note Adjustments</h1>
 
-      <div className="card">
+      {!isReadOnly && <div className="card">
         <h3>{editingCreditNoteId ? "Edit Credit Note" : "Add Credit Note"}</h3>
-
-        {message && <p className="status-message">{message}</p>}
 
         <div className="form-grid">
             <label>
               Credit Note No. <span className="required">*</span>
               <input
+                name="creditNoteNo"
                 inputMode="numeric"
                 value={creditNoteNo}
-                onChange={(e) => setCreditNoteNo(normalizeWholeNumber(e.target.value))}
+                aria-invalid={Boolean(fieldErrors.creditNoteNo)}
+                onChange={(e) => {
+                  setCreditNoteNo(normalizeWholeNumber(e.target.value));
+                  setFieldErrors((current) => ({ ...current, creditNoteNo: "" }));
+                }}
               />
+              {fieldErrors.creditNoteNo && <span className="field-error" role="alert">{fieldErrors.creditNoteNo}</span>}
             </label>
 
             <label>
               Date BS <span className="required">*</span>
               <input
+                name="dateBs"
                 placeholder="YYYY/MM/DD or YYYY-MM-DD"
                 value={dateBs}
-                onChange={(e) => setDateBs(e.target.value)}
+                aria-invalid={Boolean(fieldErrors.dateBs)}
+                onChange={(e) => {
+                  setDateBs(e.target.value);
+                  setFieldErrors((current) => ({ ...current, dateBs: "" }));
+                }}
                 onBlur={(e) => setDateBs(normalizeBsDate(e.target.value))}
               />
+              {fieldErrors.dateBs && <span className="field-error" role="alert">{fieldErrors.dateBs}</span>}
             </label>
 
             <label>
               Party <span className="required">*</span>
-              <select value={partyId} onChange={(e) => setPartyId(e.target.value)}>
+              <select name="partyId" value={partyId} aria-invalid={Boolean(fieldErrors.partyId)} onChange={(e) => {
+                setPartyId(e.target.value);
+                setFieldErrors((current) => ({ ...current, partyId: "" }));
+              }}>
                 <option value="">Select Party</option>
                 {parties.map((party) => (
                   <option key={party.id} value={party.id}>
@@ -268,17 +282,24 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
                   </option>
                 ))}
               </select>
+              {fieldErrors.partyId && <span className="field-error" role="alert">{fieldErrors.partyId}</span>}
             </label>
 
             <label>
               Amount <span className="required">*</span>
               <input
+                name="amount"
                 min="0"
                 step="0.01"
                 type="number"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                aria-invalid={Boolean(fieldErrors.amount)}
+                onChange={(e) => {
+                  setAmount(e.target.value);
+                  setFieldErrors((current) => ({ ...current, amount: "" }));
+                }}
               />
+              {fieldErrors.amount && <span className="field-error" role="alert">{fieldErrors.amount}</span>}
             </label>
 
             <label>
@@ -309,7 +330,7 @@ export default function CreditNotes({ canManage }: CreditNotesProps) {
             </button>
           )}
         </div>
-      </div>
+      </div>}
 
 
       <div className="metric-grid">

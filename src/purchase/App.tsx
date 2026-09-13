@@ -31,6 +31,7 @@ import { validatePurchaseFormForUi, validationMessagesByField } from '../applica
 import { availableTransactionActions } from '../application/transactionActions'
 import { TransactionStatusBadge } from '../components/StatusBadge'
 import { ValidationSummary } from '../components/ValidationSummary'
+import { confirmAction, notifyError, notifyToast } from '../components/notificationService'
 import { FreightTreatmentExplanation } from '../features/purchases/FreightTreatmentExplanation'
 import { PurchaseCalculationSummary } from '../features/purchases/PurchaseCalculationSummary'
 import { useDraftAutosave } from '../hooks/useDraftAutosave'
@@ -158,6 +159,14 @@ type PaymentImportResult = {
   paymentMethod: string
   referenceNumber: string
   remarks: string
+}
+
+type GlobalSearchResult = {
+  id: string
+  type: 'Party' | 'Purchase' | 'Payment'
+  primary: string
+  secondary: string
+  amount: string
 }
 
 type QuickLocalSupplierForm = {
@@ -308,6 +317,12 @@ const viewShortLabels: Record<View, string> = {
   Reports: 'RP',
   Settings: 'ST',
   'Activity Logs': 'AL',
+}
+
+const readOnlyViewLabels: Partial<Record<View, string>> = {
+  'Import Purchase Entry': 'Purchase Register',
+  'Payment Entry': 'Payment Register',
+  'Local Purchase / Expense': 'Local Purchase / Expense Register',
 }
 
 const accountViewItems: View[] = [
@@ -966,10 +981,11 @@ function App({
   const [userRole, setUserRole] = useState<UserRole | null>(() => initialUserRole ?? null)
   const [masterPassword, setMasterPassword] = useState('')
   const [loginError, setLoginError] = useState('')
+  const masterPasswordInputRef = useRef<HTMLInputElement>(null)
   const [view, setView] = useState<View>('Dashboard')
   const [reportView, setReportView] = useState<ReportView>('Party Ledger')
   const [globalSearch, setGlobalSearch] = useState('')
-  const [dashboardEntryMessage, setDashboardEntryMessage] = useState('')
+  const [globalSearchPreview, setGlobalSearchPreview] = useState<GlobalSearchResult | null>(null)
   const [stockItems, setStockItems] = useState<StockItem[]>([])
   const [stockPurchaseBills, setStockPurchaseBills] = useState<StockPurchaseBill[]>([])
   const [partySort, setPartySort] = useState<SortState<PurchasePartySortKey>>({ key: null, direction: 'asc' })
@@ -984,6 +1000,7 @@ function App({
     sourceType: 'Import Purchase' | 'Local Purchase'
   } | null>(null)
   const [partyForm, setPartyForm] = useState<PartyForm>(emptyParty)
+  const [partyNameError, setPartyNameError] = useState('')
   const [partySearch, setPartySearch] = useState('')
   const [partyCategoryFilter, setPartyCategoryFilter] = useState<'All' | PartyCategory>('All')
   const [purchaseForm, setPurchaseForm] = useState<ImportPurchase>(() => createEmptyPurchase())
@@ -997,12 +1014,15 @@ function App({
   const [supplierPaymentExchangeRate, setSupplierPaymentExchangeRate] = useState(defaultSettings.defaultExchangeRate)
   const [bankOutflowNPR, setBankOutflowNPR] = useState(0)
   const [localExpenseForm, setLocalExpenseForm] = useState<LocalPurchaseExpense>(() => createEmptyLocalExpense())
+  const [localExpenseValidationErrors, setLocalExpenseValidationErrors] = useState<FieldError[]>([])
   const [quickLocalSupplierForm, setQuickLocalSupplierForm] = useState<QuickLocalSupplierForm>(emptyQuickLocalSupplier)
+  const [quickLocalSupplierNameError, setQuickLocalSupplierNameError] = useState('')
   const [settingsForm, setSettingsForm] = useState<AppSettings>(defaultSettings)
   const [partyImportFile, setPartyImportFile] = useState<File | null>(null)
   const [purchaseImportFile, setPurchaseImportFile] = useState<File | null>(null)
   const [indianSupplierPaymentImportFile, setIndianSupplierPaymentImportFile] = useState<File | null>(null)
   const [otherPaymentImportFile, setOtherPaymentImportFile] = useState<File | null>(null)
+  const [importFileErrors, setImportFileErrors] = useState<Record<string, string>>({})
   const [importMessage, setImportMessage] = useState('')
   const [partyImportResults, setPartyImportResults] = useState<PartyImportResult[]>([])
   const [purchaseImportResults, setPurchaseImportResults] = useState<PurchaseImportResult[]>([])
@@ -1133,6 +1153,7 @@ function App({
   const purchaseErrorMessages = validationMessagesByField(purchaseValidationErrors)
   const purchaseWarningMessages = validationMessagesByField(purchaseValidationWarnings)
   const paymentErrorMessages = validationMessagesByField(paymentValidationErrors)
+  const localExpenseErrorMessages = validationMessagesByField(localExpenseValidationErrors)
   const purchaseDraftKey = createDraftKey([
     'purchase-entry',
     activeCompanyId,
@@ -1147,7 +1168,7 @@ function App({
   })
 
   useKeyboardShortcuts({
-    onSaveDraft: () => setDashboardEntryMessage('Draft saved automatically.'),
+    onSaveDraft: () => notifyToast('Draft saved automatically.', 'info', 4000),
     onReviewOrPost: () => document.querySelector<HTMLButtonElement>('[data-primary-submit="true"]')?.click(),
     onEscape: () => setGlobalSearch(''),
   })
@@ -1318,7 +1339,7 @@ function App({
       setStockPurchaseBills(loadedBills)
     } catch (error) {
       console.error('Could not load purchase stock lines.', error)
-      setDashboardEntryMessage('Inventory lines could not be loaded. Purchase data is still available.')
+      notifyToast('Inventory lines could not be loaded. Purchase data is still available.', 'warning', 6000)
     }
   }, [inventoryEnabled])
 
@@ -1338,13 +1359,7 @@ function App({
       return []
     }
 
-    const results: Array<{
-      id: string
-      type: 'Party' | 'Purchase' | 'Payment'
-      primary: string
-      secondary: string
-      amount: string
-    }> = []
+    const results: GlobalSearchResult[] = []
 
     data.parties.forEach((party) => {
       const haystack = [party.name, party.panVatNo, party.phone, party.category, party.country]
@@ -1450,9 +1465,9 @@ function App({
       deletedLocalExpenseId?: string
     } = {},
   ) => {
-    if (hasPendingWrites()) { window.alert("A write is in progress. Please wait before saving another change."); return false }
+    if (hasPendingWrites()) { notifyError("A write is in progress. Please wait before saving another change."); return false }
     if (!repository || !isStorageReady) {
-      window.alert('Storage is still loading. Please try again.')
+      notifyError('Storage is still loading. Please try again.')
       return false
     }
 
@@ -1461,7 +1476,7 @@ function App({
         const updated = next[key].find(row => row.id === old.id);
         if (JSON.stringify(updated) !== JSON.stringify(old)) assertOperationalCorrection(old.lifecycleStatus, activeFiscalYear);
       }
-    } catch (error) { window.alert(errorMessage(error)); return false }
+    } catch (error) { notifyError(errorMessage(error)); return false }
     const persisted = buildDataWithLog(next, action, details, options.oldValue ?? '', options.newValue ?? '')
     const importPurchaseId = options.importPurchaseId ?? options.deletedImportPurchaseId ?? ''
     const localExpenseId = options.localExpenseId ?? options.deletedLocalExpenseId ?? ''
@@ -1553,7 +1568,7 @@ function App({
     } catch (error) {
       console.error('Purchase data persistence failed.', error)
       try { setData(await repository.loadData()) } catch (reloadError) { console.error('Readback after failed save failed', reloadError) }
-      window.alert(`Could not save purchase data: ${errorMessage(error)}`)
+      notifyError(`Could not save purchase data: ${errorMessage(error)}`, 'Purchase data could not be saved')
       return false
     }
   }
@@ -1653,6 +1668,7 @@ function App({
 
     if (masterPassword !== 'KANCHAN') {
       setLoginError('Master password is incorrect.')
+      window.requestAnimationFrame(() => masterPasswordInputRef.current?.focus())
       return
     }
 
@@ -1676,22 +1692,20 @@ function App({
 
   const openNewPurchaseEntry = () => {
     if (isClosedFiscalYear) {
-      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} FY ${activeFiscalYear.code} is closed. Entries cannot be added in a closed fiscal year.`)
+      navigateToView('Import Purchase Entry')
       return
     }
 
-    setDashboardEntryMessage('')
     setPurchaseForm(createEmptyPurchase(data.settings))
     navigateToView('Import Purchase Entry')
   }
 
   const openNewPaymentEntry = () => {
     if (isClosedFiscalYear) {
-      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} FY ${activeFiscalYear.code} is closed. Entries cannot be added in a closed fiscal year.`)
+      navigateToView('Payment Entry')
       return
     }
 
-    setDashboardEntryMessage('')
     setPaymentForm(createEmptyPayment())
     setPaymentMode('Indian Supplier')
     setPaymentBillYear('Current')
@@ -1702,11 +1716,10 @@ function App({
 
   const openNewLocalExpenseEntry = () => {
     if (isClosedFiscalYear) {
-      setDashboardEntryMessage(`${data.settings.companyName || 'This company'} FY ${activeFiscalYear.code} is closed. Entries cannot be added in a closed fiscal year.`)
+      navigateToView('Local Purchase / Expense')
       return
     }
 
-    setDashboardEntryMessage('')
     setLocalExpenseForm(createEmptyLocalExpense())
     navigateToView('Local Purchase / Expense')
   }
@@ -2471,6 +2484,7 @@ function App({
         ? current
         : { ...current, exchangeRate: savedSettings.defaultExchangeRate },
     )
+    notifyToast('Purchase settings saved successfully.')
   }
 
   const downloadPartyTemplate = async () => {
@@ -2628,7 +2642,7 @@ function App({
 
   const importParties = async () => {
     if (!partyImportFile) {
-      window.alert('Select a party master CSV file first.')
+      setImportFileErrors((current) => ({ ...current, party: 'Select a party master CSV file first.' }))
       return
     }
 
@@ -2709,12 +2723,13 @@ function App({
     setPartyImportResults(importedDetails)
     setPurchaseImportResults([])
     setPaymentImportResults([])
+    notifyToast(`Imported/updated ${imported} party record${imported === 1 ? '' : 's'}.`)
     setImportMessage(`Imported/updated ${imported} party record${imported === 1 ? '' : 's'}.`)
   }
 
   const importPurchases = async () => {
     if (!purchaseImportFile) {
-      window.alert('Select an import purchase CSV file first.')
+      setImportFileErrors((current) => ({ ...current, purchase: 'Select an import purchase CSV file first.' }))
       return
     }
 
@@ -3044,6 +3059,7 @@ function App({
     )) return
     setPurchaseImportFile(null)
     setPurchaseImportResults(importedDetails)
+    notifyToast(`Imported ${importedPurchases.length} purchase record${importedPurchases.length === 1 ? '' : 's'}.`, errors.length ? 'warning' : 'success')
     setImportMessage(
       [
         `Imported ${importedPurchases.length} purchase record${importedPurchases.length === 1 ? '' : 's'}.`,
@@ -3056,7 +3072,7 @@ function App({
 
   const importIndianSupplierPayments = async () => {
     if (!indianSupplierPaymentImportFile) {
-      window.alert('Select an Indian supplier payment CSV file first.')
+      setImportFileErrors((current) => ({ ...current, indianPayment: 'Select an Indian supplier payment CSV file first.' }))
       return
     }
 
@@ -3211,6 +3227,7 @@ function App({
     )) return
     setIndianSupplierPaymentImportFile(null)
     setPaymentImportResults(importedDetails)
+    notifyToast(`Imported ${importedPayments.length} Indian supplier payment record${importedPayments.length === 1 ? '' : 's'}.`, errors.length ? 'warning' : 'success')
     setImportMessage(
       [
         `Imported ${importedPayments.length} Indian supplier payment record${importedPayments.length === 1 ? '' : 's'}.`,
@@ -3223,7 +3240,7 @@ function App({
 
   const importOtherPayments = async () => {
     if (!otherPaymentImportFile) {
-      window.alert('Select a custom agent/local payment CSV file first.')
+      setImportFileErrors((current) => ({ ...current, otherPayment: 'Select a custom agent/local payment CSV file first.' }))
       return
     }
 
@@ -3352,6 +3369,7 @@ function App({
     )) return
     setOtherPaymentImportFile(null)
     setPaymentImportResults(importedDetails)
+    notifyToast(`Imported ${importedPayments.length} custom agent/local payment record${importedPayments.length === 1 ? '' : 's'}.`, errors.length ? 'warning' : 'success')
     setImportMessage(
       [
         `Imported ${importedPayments.length} custom agent/local payment record${importedPayments.length === 1 ? '' : 's'}.`,
@@ -3364,11 +3382,13 @@ function App({
 
   const saveParty = async (event: FormEvent) => {
     event.preventDefault()
+    setPartyNameError('')
 
     const partyNameValue = partyForm.name.trim()
 
     if (!partyNameValue) {
-      window.alert('Party name is required.')
+      setPartyNameError('Party name is required.')
+      window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[name="purchasePartyName"]')?.focus())
       return
     }
 
@@ -3376,12 +3396,13 @@ function App({
       (party) => party.id !== partyForm.id && normalizeKey(party.name) === normalizeKey(partyNameValue),
     )
     if (duplicateParty) {
-      window.alert(`Party name already exists: ${duplicateParty.name}.`)
+      setPartyNameError(`Party name already exists: ${duplicateParty.name}.`)
+      window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[name="purchasePartyName"]')?.focus())
       return
     }
 
     if (partyForm.id && !canEditOrDelete) {
-      window.alert('Account user cannot edit existing parties.')
+      notifyError('Account user cannot edit existing parties.', 'Edit not allowed')
       return
     }
 
@@ -3415,6 +3436,7 @@ function App({
       )) return
     }
 
+    notifyToast(partyForm.id ? 'Party updated successfully.' : 'Party created successfully.')
     setPartyForm(emptyParty)
   }
 
@@ -3440,7 +3462,12 @@ function App({
       `${linkedPurchases.length} import purchase record(s), ${linkedLocalExpenses.length} local purchase/expense record(s), and ${linkedPayments.length} payment record(s) will also be deleted.`,
     ].join('\n')
 
-    if (!window.confirm(message)) {
+    if (!await confirmAction({
+      title: 'Delete party and linked records?',
+      message,
+      confirmLabel: 'Delete permanently',
+      destructive: true,
+    })) {
       return
     }
 
@@ -3642,7 +3669,11 @@ function App({
       'Save this purchase?',
     ].join('\n')
 
-    if (!window.confirm(purchaseReview)) {
+    if (!await confirmAction({
+      title: purchaseForm.id ? 'Review purchase update' : 'Review purchase',
+      message: purchaseReview,
+      confirmLabel: purchaseForm.id ? 'Update purchase' : 'Save purchase',
+    })) {
       return
     }
 
@@ -3726,6 +3757,7 @@ function App({
     setPurchaseValidationErrors([])
     setPurchaseValidationWarnings([])
     purchaseAutosave.clearDraft()
+    notifyToast(purchaseForm.id ? 'Purchase updated successfully.' : 'Purchase saved successfully.')
     setPurchaseForm(createEmptyPurchase(data.settings))
   }
 
@@ -3739,7 +3771,7 @@ function App({
 
   const openStockEntryForPurchase = (purchase: ImportPurchase) => {
     if (!onOpenStockLineEntry || !activeCompanyProfile) {
-      setDashboardEntryMessage('Inventory module is not available for this company.')
+      notifyError('Inventory module is not available for this company.', 'Inventory unavailable')
       return
     }
 
@@ -3771,12 +3803,12 @@ function App({
 
   const openStockEntryForLocalExpense = (localExpense: LocalPurchaseExpense) => {
     if (!isLocalPurchaseStock(localExpense)) {
-      setDashboardEntryMessage('Only local purchase entries with Stock heading can use inventory line entry.')
+      notifyError('Only local purchase entries with Stock heading can use inventory line entry.', 'Inventory entry unavailable')
       return
     }
 
     if (!onOpenStockLineEntry || !activeCompanyProfile) {
-      setDashboardEntryMessage('Inventory module is not available for this company.')
+      notifyError('Inventory module is not available for this company.', 'Inventory unavailable')
       return
     }
 
@@ -3805,7 +3837,12 @@ function App({
   }
 
   const deletePurchase = async (purchase: ImportPurchase) => {
-    if (!window.confirm(`Delete purchase bill ${purchase.vendorBillNumber}?`)) {
+    if (!await confirmAction({
+      title: 'Delete purchase?',
+      message: `Bill: ${purchase.vendorBillNumber}\nVendor: ${partyName(purchase.vendorPartyId)}\nDate: ${dateText(importPurchaseSortDate(purchase))}\nLanded cost: ${npr(purchase.landedCostNPR)}\n\nThis cannot be undone.`,
+      confirmLabel: 'Delete purchase',
+      destructive: true,
+    })) {
       return
     }
 
@@ -3825,6 +3862,7 @@ function App({
     if (!saved) {
       return
     }
+    notifyToast(`Purchase bill ${purchase.vendorBillNumber} deleted successfully.`)
   }
 
   const otherPaymentTypeForParty = (party: Party | undefined): Payment['paymentType'] => {
@@ -3945,7 +3983,11 @@ function App({
       'Save this payment?',
     ].join('\n')
 
-    if (!window.confirm(paymentReview)) {
+    if (!await confirmAction({
+      title: paymentForm.id ? 'Review payment update' : 'Review payment',
+      message: paymentReview,
+      confirmLabel: paymentForm.id ? 'Update payment' : 'Save payment',
+    })) {
       return
     }
 
@@ -4010,6 +4052,7 @@ function App({
     setPaymentBillYear('Current')
     resetSupplierPaymentCurrency()
     setBankOutflowNPR(0)
+    notifyToast(paymentForm.id ? 'Payment updated successfully.' : 'Payment saved successfully.')
   }
 
   const editPayment = (payment: Payment) => {
@@ -4023,7 +4066,12 @@ function App({
   }
 
   const deletePayment = async (payment: Payment) => {
-    if (!window.confirm(`Delete payment ${payment.referenceNumber || payment.id}?`)) {
+    if (!await confirmAction({
+      title: 'Delete payment?',
+      message: `Reference: ${payment.referenceNumber || payment.id}\nParty: ${partyName(payment.partyId)}\nDate: ${dateText(payment.paymentDate)}\nAmount: ${npr(payment.amountNPR)}\n\nThis cannot be undone.`,
+      confirmLabel: 'Delete payment',
+      destructive: true,
+    })) {
       return
     }
 
@@ -4042,31 +4090,40 @@ function App({
       auditValue(payment),
       'Deleted',
     )) return
+    notifyToast(`Payment ${payment.referenceNumber || payment.id} deleted successfully.`)
   }
 
   const saveLocalExpense = async (event: FormEvent) => {
     event.preventDefault()
+    setLocalExpenseValidationErrors([])
 
     try {
       ensureFiscalYearEditable(activeFiscalYear)
     } catch (error) {
-      window.alert(errorMessage(error))
+      notifyError(errorMessage(error), 'Local purchase cannot be saved')
       return
     }
 
     if (!localExpenseForm.partyId || !localExpenseForm.billNumber.trim() || !localExpenseForm.billDate) {
-      window.alert('Local supplier, bill number, and bill date are required.')
+      const errors: FieldError[] = []
+      if (!localExpenseForm.partyId) errors.push({ field: 'localExpensePartyId', message: 'Local supplier is required.' })
+      if (!localExpenseForm.billNumber.trim()) errors.push({ field: 'localExpenseBillNumber', message: 'Bill number is required.' })
+      if (!localExpenseForm.billDate) errors.push({ field: 'localExpenseBillDate', message: 'Bill date is required.' })
+      setLocalExpenseValidationErrors(errors)
+      focusFirstInvalidField(errors)
       return
     }
 
     if (localExpenseForm.id && !canEditOrDelete) {
-      window.alert('Account user cannot edit existing local purchase/expense entries.')
+      notifyError('Account user cannot edit existing local purchase/expense entries.', 'Edit not allowed')
       return
     }
 
     const dateValidation = validateDateInFiscalYear(localExpenseForm.billDate, activeFiscalYear, 'Bill date')
     if (!dateValidation.valid) {
-      window.alert(dateValidation.error ?? 'Bill date is outside the fiscal year.')
+      const errors = [{ field: 'localExpenseBillDate', message: dateValidation.error ?? 'Bill date is outside the fiscal year.' }]
+      setLocalExpenseValidationErrors(errors)
+      focusFirstInvalidField(errors)
       return
     }
 
@@ -4087,7 +4144,7 @@ function App({
       try {
         ledgerEntries = buildLocalExpenseLedgerEntries(updated)
       } catch (error) {
-        window.alert(errorMessage(error))
+        notifyError(errorMessage(error), 'Local purchase cannot be posted')
         return
       }
 
@@ -4134,7 +4191,7 @@ function App({
           reference: created.billNumber,
         }, postingContext(created.fiscalYearId))
       } catch (error) {
-        window.alert(errorMessage(error))
+        notifyError(errorMessage(error), 'Local purchase cannot be posted')
         return
       }
 
@@ -4149,15 +4206,18 @@ function App({
       }
     }
 
+    notifyToast(localExpenseForm.id ? 'Local purchase / expense updated successfully.' : 'Local purchase / expense saved successfully.')
     setLocalExpenseForm(createEmptyLocalExpense())
   }
 
   const createQuickLocalSupplier = async (event: FormEvent) => {
     event.preventDefault()
+    setQuickLocalSupplierNameError('')
 
     const name = quickLocalSupplierForm.name.trim()
     if (!name) {
-      window.alert('Party name is required.')
+      setQuickLocalSupplierNameError('Party name is required.')
+      window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[name="quickLocalSupplierName"]')?.focus())
       return
     }
 
@@ -4187,6 +4247,7 @@ function App({
     )) return
     setLocalExpenseForm((current) => ({ ...current, partyId: created.id }))
     setQuickLocalSupplierForm(emptyQuickLocalSupplier)
+    notifyToast(`Local supplier ${created.name} created successfully.`)
   }
 
   const editLocalExpense = (localExpense: LocalPurchaseExpense) => {
@@ -4195,7 +4256,12 @@ function App({
   }
 
   const deleteLocalExpense = async (localExpense: LocalPurchaseExpense) => {
-    if (!window.confirm(`Delete local purchase/expense ${localExpense.billNumber}?`)) {
+    if (!await confirmAction({
+      title: 'Delete local purchase or expense?',
+      message: `Bill: ${localExpense.billNumber}\nSupplier: ${partyName(localExpense.partyId)}\nDate: ${dateText(localExpense.billDate)}\nAmount: ${npr(localExpense.totalAmountNPR)}\n\nThis cannot be undone.`,
+      confirmLabel: 'Delete entry',
+      destructive: true,
+    })) {
       return
     }
 
@@ -4219,9 +4285,15 @@ function App({
     if (!saved) {
       return
     }
+    notifyToast(`Local purchase / expense ${localExpense.billNumber} deleted successfully.`)
   }
 
   const openGlobalSearchResult = (result: (typeof globalSearchResults)[number]) => {
+    if (isReadOnly || isClosedFiscalYear) {
+      setGlobalSearchPreview(result)
+      return
+    }
+
     if (result.type === 'Party') {
       const party = data.parties.find((item) => item.id === result.id)
       if (party) {
@@ -4246,7 +4318,7 @@ function App({
 
   const exportPartyLedgerPdf = async () => {
     if (!selectedLedgerParty) {
-      window.alert('Select a party first.')
+      notifyError('Select a party first.', 'Party required')
       return
     }
 
@@ -4379,16 +4451,15 @@ function App({
   const renderDashboard = () => (
     <div className="stack">
       <Panel title="New Entry">
-        {dashboardEntryMessage && <p className="status-message">{dashboardEntryMessage}</p>}
         <div className="quick-actions">
           <button type="button" onClick={openNewPurchaseEntry}>
-            New import purchase
+            {isClosedFiscalYear ? 'View purchase register' : 'New import purchase'}
           </button>
           <button type="button" onClick={openNewPaymentEntry}>
-            New payment
+            {isClosedFiscalYear ? 'View payment register' : 'New payment'}
           </button>
           <button type="button" onClick={openNewLocalExpenseEntry}>
-            New local purchase / expense
+            {isClosedFiscalYear ? 'View local purchase / expense register' : 'New local purchase / expense'}
           </button>
           <button
             type="button"
@@ -4493,10 +4564,19 @@ function App({
 
   const renderPartyMaster = () => (
     <div className="stack">
-      <Panel title={partyForm.id ? 'Edit Party' : 'Add Party'}>
+      {!isReadOnly && <Panel title={partyForm.id ? 'Edit Party' : 'Add Party'}>
         <form className="form-grid" onSubmit={saveParty}>
           <Field label="Name">
-            <input value={partyForm.name} onChange={(event) => updatePartyField('name', event.target.value)} />
+            <input
+              name="purchasePartyName"
+              value={partyForm.name}
+              aria-invalid={Boolean(partyNameError)}
+              onChange={(event) => {
+                updatePartyField('name', event.target.value)
+                setPartyNameError('')
+              }}
+            />
+            {partyNameError && <span className="field-error" role="alert">{partyNameError}</span>}
           </Field>
           <Field label="Category">
             <select
@@ -4547,7 +4627,7 @@ function App({
             </button>
           </div>
         </form>
-      </Panel>
+      </Panel>}
 
       <Panel title="Parties">
         <div className="toolbar">
@@ -4616,7 +4696,7 @@ function App({
 
   const renderPurchaseEntry = () => (
     <div className="stack">
-      <form onSubmit={savePurchase} className="stack">
+      {!isReadOnly && <form onSubmit={savePurchase} className="stack">
         <ValidationSummary errors={purchaseValidationErrors} warnings={purchaseValidationWarnings} />
         <Panel title="Section A: Supplier Invoice">
           <div className="form-grid">
@@ -4805,7 +4885,7 @@ function App({
             </button>
           </div>
         </Panel>
-      </form>
+      </form>}
 
       <Panel title="Saved Purchases">
         <div className="table-wrap">
@@ -4820,7 +4900,7 @@ function App({
                 <th>{renderSortableHeader(importPurchaseSort, 'landedCost', 'Landed Cost', toggleImportPurchaseSort)}</th>
                 <th>{renderSortableHeader(importPurchaseSort, 'status', 'Status', toggleImportPurchaseSort)}</th>
                 {inventoryEnabled && <th>{renderSortableHeader(importPurchaseSort, 'inventory', 'Inventory', toggleImportPurchaseSort)}</th>}
-                <th>Actions</th>
+                {!isReadOnly && <th>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -4868,7 +4948,7 @@ function App({
                         />
                       </td>
                     )}
-                    <td className="row-actions">
+                    {!isReadOnly && <td className="row-actions">
                       {showEditPurchase && (
                         <button type="button" className="small" onClick={() => editPurchase(purchase)}>
                           Edit
@@ -4880,11 +4960,11 @@ function App({
                         </button>
                       )}
                       {!showEditPurchase && !showDeletePurchase && '-'}
-                    </td>
+                    </td>}
                   </tr>
                 )
               })}
-              {!displayedPurchases.length && <EmptyRow columns={inventoryEnabled ? 9 : 8} />}
+              {!displayedPurchases.length && <EmptyRow columns={(inventoryEnabled ? 8 : 7) + (isReadOnly ? 0 : 1)} />}
             </tbody>
           </table>
         </div>
@@ -4923,7 +5003,7 @@ function App({
         </button>
       </div>
 
-      <Panel title={paymentMode === 'Indian Supplier' ? 'Indian Supplier Payment' : 'Custom Agent / Local Payment'}>
+      {!isReadOnly && <Panel title={paymentMode === 'Indian Supplier' ? 'Indian Supplier Payment' : 'Custom Agent / Local Payment'}>
         <form className="stack" onSubmit={savePayment}>
           <ValidationSummary errors={paymentValidationErrors} />
           <div className="form-grid">
@@ -5053,7 +5133,7 @@ function App({
             </button>
           </div>
         </form>
-      </Panel>
+      </Panel>}
 
       <Panel title={paymentMode === 'Indian Supplier' ? 'Saved Indian Supplier Payments' : 'Saved Custom Agent / Local Payments'}>
         <div className="table-wrap">
@@ -5068,7 +5148,7 @@ function App({
                 <th>{renderSortableHeader(paymentSort, 'bank', 'Bank', togglePaymentSort)}</th>
                 <th>{renderSortableHeader(paymentSort, 'reference', 'Bill / Reference', togglePaymentSort)}</th>
                 <th>{renderSortableHeader(paymentSort, 'status', 'Status', togglePaymentSort)}</th>
-                <th>Actions</th>
+                {!isReadOnly && <th>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -5084,7 +5164,7 @@ function App({
                   <td>
                     <TransactionStatusBadge status={payment.lifecycleStatus} fiscalYearStatus={activeFiscalYear.status} />
                   </td>
-                  <td className="row-actions">
+                  {!isReadOnly && <td className="row-actions">
                     {canEditOrDelete ? (
                       <>
                         <button type="button" className="small" onClick={() => editPayment(payment)}>
@@ -5097,10 +5177,10 @@ function App({
                     ) : (
                       '-'
                     )}
-                  </td>
+                  </td>}
                 </tr>
               ))}
-              {!displayedPayments.length && <EmptyRow columns={9} />}
+              {!displayedPayments.length && <EmptyRow columns={isReadOnly ? 8 : 9} />}
             </tbody>
           </table>
         </div>
@@ -5110,12 +5190,17 @@ function App({
 
   const renderLocalExpenseEntry = () => (
     <div className="stack">
-      <Panel title="Create Local Supplier">
+      {!isReadOnly && <Panel title="Create Local Supplier">
         <form className="form-grid" onSubmit={createQuickLocalSupplier}>
           <TextField
+            name="quickLocalSupplierName"
+            errorMessages={quickLocalSupplierNameError ? [quickLocalSupplierNameError] : []}
             label="Party name"
             value={quickLocalSupplierForm.name}
-            onChange={(value) => updateQuickLocalSupplierField('name', value)}
+            onChange={(value) => {
+              updateQuickLocalSupplierField('name', value)
+              setQuickLocalSupplierNameError('')
+            }}
           />
           <TextField
             label="Phone number"
@@ -5136,14 +5221,19 @@ function App({
             <button type="submit">Add party</button>
           </div>
         </form>
-      </Panel>
+      </Panel>}
 
-      <Panel title={localExpenseForm.id ? 'Edit Local Purchase / Expense' : 'Local Purchase / Expense Entry'}>
+      {!isReadOnly && <Panel title={localExpenseForm.id ? 'Edit Local Purchase / Expense' : 'Local Purchase / Expense Entry'}>
         <form className="form-grid" onSubmit={saveLocalExpense}>
           <Field label="Local supplier">
             <select
+              name="localExpensePartyId"
               value={localExpenseForm.partyId}
-              onChange={(event) => updateLocalExpenseField('partyId', event.target.value)}
+              aria-invalid={Boolean(localExpenseErrorMessages.localExpensePartyId?.length)}
+              onChange={(event) => {
+                updateLocalExpenseField('partyId', event.target.value)
+                setLocalExpenseValidationErrors((current) => current.filter((error) => error.field !== 'localExpensePartyId'))
+              }}
             >
               <option value="">Select local supplier</option>
               {localSupplierOptions.map((party) => (
@@ -5152,16 +5242,27 @@ function App({
                 </option>
               ))}
             </select>
+            <InlineMessages errors={localExpenseErrorMessages.localExpensePartyId} />
           </Field>
           <TextField
+            name="localExpenseBillNumber"
+            errorMessages={localExpenseErrorMessages.localExpenseBillNumber}
             label="Bill number"
             value={localExpenseForm.billNumber}
-            onChange={(value) => updateLocalExpenseField('billNumber', value)}
+            onChange={(value) => {
+              updateLocalExpenseField('billNumber', value)
+              setLocalExpenseValidationErrors((current) => current.filter((error) => error.field !== 'localExpenseBillNumber'))
+            }}
           />
           <DateField
+            name="localExpenseBillDate"
+            errorMessages={localExpenseErrorMessages.localExpenseBillDate}
             label="Bill date"
             value={localExpenseForm.billDate}
-            onChange={(value) => updateLocalExpenseField('billDate', value)}
+            onChange={(value) => {
+              updateLocalExpenseField('billDate', value)
+              setLocalExpenseValidationErrors((current) => current.filter((error) => error.field !== 'localExpenseBillDate'))
+            }}
           />
           <Field label="Heading">
             <select
@@ -5206,7 +5307,7 @@ function App({
             </button>
           </div>
         </form>
-      </Panel>
+      </Panel>}
 
       <Panel title="Saved Local Purchase / Expense">
         <div className="table-wrap">
@@ -5222,7 +5323,7 @@ function App({
                 <th>{renderSortableHeader(localExpenseSort, 'vat', 'VAT', toggleLocalExpenseSort)}</th>
                 <th>{renderSortableHeader(localExpenseSort, 'total', 'Total', toggleLocalExpenseSort)}</th>
                 {inventoryEnabled && <th>{renderSortableHeader(localExpenseSort, 'inventory', 'Inventory', toggleLocalExpenseSort)}</th>}
-                <th>Actions</th>
+                {!isReadOnly && <th>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -5257,7 +5358,7 @@ function App({
                         )}
                       </td>
                     )}
-                    <td className="row-actions">
+                    {!isReadOnly && <td className="row-actions">
                       {canEditOrDelete ? (
                         <>
                           <button type="button" className="small" onClick={() => editLocalExpense(localExpense)}>
@@ -5270,11 +5371,11 @@ function App({
                       ) : (
                         '-'
                       )}
-                    </td>
+                    </td>}
                   </tr>
                 )
               })}
-              {!displayedLocalExpenses.length && <EmptyRow columns={inventoryEnabled ? 10 : 9} />}
+              {!displayedLocalExpenses.length && <EmptyRow columns={(inventoryEnabled ? 9 : 8) + (isReadOnly ? 0 : 1)} />}
             </tbody>
           </table>
         </div>
@@ -5296,8 +5397,13 @@ function App({
             <input
               type="file"
               accept=".csv,.txt"
-              onChange={(event) => setPartyImportFile(event.target.files?.[0] ?? null)}
+              aria-invalid={Boolean(importFileErrors.party)}
+              onChange={(event) => {
+                setPartyImportFile(event.target.files?.[0] ?? null)
+                setImportFileErrors((current) => ({ ...current, party: '' }))
+              }}
             />
+            {importFileErrors.party && <span className="field-error" role="alert">{importFileErrors.party}</span>}
           </Field>
           <div className="form-actions">
             <button type="button" onClick={importParties}>
@@ -5319,8 +5425,13 @@ function App({
             <input
               type="file"
               accept=".csv,.txt"
-              onChange={(event) => setPurchaseImportFile(event.target.files?.[0] ?? null)}
+              aria-invalid={Boolean(importFileErrors.purchase)}
+              onChange={(event) => {
+                setPurchaseImportFile(event.target.files?.[0] ?? null)
+                setImportFileErrors((current) => ({ ...current, purchase: '' }))
+              }}
             />
+            {importFileErrors.purchase && <span className="field-error" role="alert">{importFileErrors.purchase}</span>}
           </Field>
           <div className="form-actions">
             <button type="button" onClick={importPurchases}>
@@ -5342,8 +5453,13 @@ function App({
             <input
               type="file"
               accept=".csv,.txt"
-              onChange={(event) => setIndianSupplierPaymentImportFile(event.target.files?.[0] ?? null)}
+              aria-invalid={Boolean(importFileErrors.indianPayment)}
+              onChange={(event) => {
+                setIndianSupplierPaymentImportFile(event.target.files?.[0] ?? null)
+                setImportFileErrors((current) => ({ ...current, indianPayment: '' }))
+              }}
             />
+            {importFileErrors.indianPayment && <span className="field-error" role="alert">{importFileErrors.indianPayment}</span>}
           </Field>
           <div className="form-actions">
             <button type="button" onClick={importIndianSupplierPayments}>
@@ -5365,8 +5481,13 @@ function App({
             <input
               type="file"
               accept=".csv,.txt"
-              onChange={(event) => setOtherPaymentImportFile(event.target.files?.[0] ?? null)}
+              aria-invalid={Boolean(importFileErrors.otherPayment)}
+              onChange={(event) => {
+                setOtherPaymentImportFile(event.target.files?.[0] ?? null)
+                setImportFileErrors((current) => ({ ...current, otherPayment: '' }))
+              }}
             />
+            {importFileErrors.otherPayment && <span className="field-error" role="alert">{importFileErrors.otherPayment}</span>}
           </Field>
           <div className="form-actions">
             <button type="button" onClick={importOtherPayments}>
@@ -5796,13 +5917,19 @@ function App({
         <form className="login-form" onSubmit={loginAsMaster}>
           <Field label="Master password">
             <input
+              ref={masterPasswordInputRef}
               type="password"
               value={masterPassword}
-              onChange={(event) => setMasterPassword(event.target.value)}
+              aria-invalid={Boolean(loginError)}
+              aria-describedby={loginError ? 'purchase-master-password-error' : undefined}
+              onChange={(event) => {
+                setMasterPassword(event.target.value)
+                setLoginError('')
+              }}
             />
+            {loginError && <span className="field-error" id="purchase-master-password-error" role="alert">{loginError}</span>}
           </Field>
           <button type="submit">Unlock Master</button>
-          {loginError && <p className="form-error">{loginError}</p>}
         </form>
       </section>
     </main>
@@ -5814,12 +5941,62 @@ function App({
 
   const allowedViewItems = isReadOnly
     ? userRole === 'Master'
-      ? (['Dashboard', 'Reports', 'Party Master', 'Activity Logs'] as View[])
-      : (['Dashboard', 'Reports', 'Party Master'] as View[])
+      ? (['Dashboard', 'Import Purchase Entry', 'Payment Entry', 'Local Purchase / Expense', 'Reports', 'Party Master', 'Activity Logs'] as View[])
+      : (['Dashboard', 'Import Purchase Entry', 'Payment Entry', 'Local Purchase / Expense', 'Reports', 'Party Master'] as View[])
     : userRole === 'Master'
       ? viewItems
       : accountViewItems
   const currentView = allowedViewItems.includes(view) ? view : 'Dashboard'
+  const globalSearchPreviewFields: Array<[string, string]> = globalSearchPreview
+    ? (() => {
+      if (globalSearchPreview.type === 'Party') {
+        const party = data.parties.find((item) => item.id === globalSearchPreview.id)
+        return party
+          ? [
+            ['Name', party.name],
+            ['Category', party.category],
+            ['Address', party.address || '-'],
+            ['Phone', party.phone || '-'],
+            ['PAN/VAT', party.panVatNo || '-'],
+            ['Opening payable', npr(party.openingPayable)],
+            ['Status', party.isActive ? 'Active' : 'Inactive'],
+          ]
+          : []
+      }
+
+      if (globalSearchPreview.type === 'Purchase') {
+        const purchase = data.purchases.find((item) => item.id === globalSearchPreview.id)
+        return purchase
+          ? [
+            ['Vendor', partyName(purchase.vendorPartyId)],
+            ['Bill number', purchase.vendorBillNumber || '-'],
+            ['Date', dateText(importPurchaseSortDate(purchase))],
+            ['Supplier amount', supplierMoney(purchase.amountIC, purchase.supplierCurrency)],
+            ['Input VAT', npr(purchase.totalInputVatNPR)],
+            ['Landed cost', npr(purchase.landedCostNPR)],
+            ['Status', purchase.lifecycleStatus || 'POSTED'],
+            ['Remarks', purchase.remarks || '-'],
+          ]
+          : []
+      }
+
+      const payment = data.payments.find((item) => item.id === globalSearchPreview.id)
+      return payment
+        ? [
+          ['Party', partyName(payment.partyId)],
+          ['Date', dateText(payment.paymentDate)],
+          ['Payment type', payment.paymentType],
+          ['Currency', payment.currency],
+          ['Amount', payment.currency === 'NPR' ? npr(payment.amount) : `${payment.currency} ${fmt(payment.amount)}`],
+          ['Amount NPR', npr(payment.amountNPR)],
+          ['Bank', payment.paymentMethod],
+          ['Reference', payment.referenceNumber || '-'],
+          ['Status', payment.lifecycleStatus || 'POSTED'],
+          ['Remarks', payment.remarks || '-'],
+        ]
+        : []
+    })()
+    : []
   const previewStockBill = previewStockPurchase
     ? stockPurchaseBillByKey.get(stockPurchaseKey(previewStockPurchase.documentId, previewStockPurchase.sourceType))
     : null
@@ -5847,6 +6024,32 @@ function App({
 
   return (
     <div className={sidebarCollapsed ? 'app-shell sidebar-collapsed' : 'app-shell'} onKeyDown={moveEnterToNextField}>
+      {globalSearchPreview && (
+        <div className="app-dialog-backdrop" role="presentation">
+          <section
+            aria-labelledby="search-preview-title"
+            aria-modal="true"
+            className="app-dialog search-preview-dialog"
+            role="dialog"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') setGlobalSearchPreview(null)
+            }}
+          >
+            <h2 id="search-preview-title">{globalSearchPreview.type} details</h2>
+            <dl className="search-preview-fields">
+              {globalSearchPreviewFields.map(([label, value]) => (
+                <div key={label}>
+                  <dt>{label}</dt>
+                  <dd>{value}</dd>
+                </div>
+              ))}
+            </dl>
+            <div className="app-dialog-actions">
+              <button type="button" autoFocus onClick={() => setGlobalSearchPreview(null)}>Close</button>
+            </div>
+          </section>
+        </div>
+      )}
       {previewStockBill && (
         <LineItemPreviewModal
           billAmount={previewPurchaseBillAmount}
@@ -5891,10 +6094,10 @@ function App({
               key={item}
               className={currentView === item ? 'active' : ''}
               onClick={() => navigateToView(item)}
-              title={item}
+              title={isReadOnly ? readOnlyViewLabels[item] ?? item : item}
             >
               <span className="nav-icon" aria-hidden="true">{viewShortLabels[item]}</span>
-              <span className="nav-label">{item}</span>
+              <span className="nav-label">{isReadOnly ? readOnlyViewLabels[item] ?? item : item}</span>
             </button>
           ))}
           {onBackToModules && (
@@ -5916,7 +6119,7 @@ function App({
             <p className="company-name-display compact">
               {data.settings.companyName} {activeFiscalYear.code ? `- FY ${activeFiscalYear.code}` : ''}
             </p>
-            <h2>{currentView}</h2>
+            <h2>{isReadOnly ? readOnlyViewLabels[currentView] ?? currentView : currentView}</h2>
           </div>
           <div className="quick-total">
             <span>Net payable</span>
@@ -6135,7 +6338,7 @@ function InlineMessages({
   }
 
   return (
-    <span className="field-messages">
+    <span className="field-messages" role={errors.length ? 'alert' : 'status'}>
       {errors.map((message) => (
         <em key={message} className="field-error">
           {message}

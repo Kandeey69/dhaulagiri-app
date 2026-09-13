@@ -14,6 +14,7 @@ import type {
   StockPurchaseBill,
   StockSalesBill,
 } from "../types";
+import { notifyError, notifyToast } from "../../components/notificationService";
 
 type UseStockDataInput = {
   activeCompanyId?: string;
@@ -29,7 +30,6 @@ export function useStockData({
   const [salesBills, setSalesBills] = useState<StockSalesBill[]>([]);
   const [sourceDocs, setSourceDocs] = useState<StockDocumentReference[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
-  const [message, setMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const isMountedRef = useRef(true);
   const loadRequestIdRef = useRef(0);
@@ -76,15 +76,14 @@ export function useStockData({
     text = "Stock refreshed from saved bills and line items.",
     showMessage = true,
   ) => {
-    setMessage("");
     try {
       await loadData();
-      if (isMountedRef.current && showMessage) setMessage(text);
+      if (isMountedRef.current && showMessage) notifyToast(text);
     } catch (error) {
       if (isMountedRef.current) {
         setHasLoaded(true);
         setIsLoading(false);
-        setMessage(errorMessage(error, "Failed to refresh stock."));
+        notifyError(errorMessage(error, "Failed to refresh stock."), "Stock refresh failed");
       }
     }
   }, [loadData]);
@@ -101,7 +100,7 @@ export function useStockData({
       console.error("Stock load failed:", error);
       if (!isMountedRef.current) return;
       setHasLoaded(true);
-      setMessage("Could not load stock data. Please reopen the app and try again.");
+      notifyError("Could not load stock data. Please reopen the app and try again.", "Stock data unavailable");
       setIsLoading(false);
     });
   }, [loadData]);
@@ -111,11 +110,9 @@ export function useStockData({
     hasLoaded,
     items,
     loadData,
-    message,
     purchaseBills,
     refreshStock,
     salesBills,
-    setMessage,
     sourceDocs,
   };
 }

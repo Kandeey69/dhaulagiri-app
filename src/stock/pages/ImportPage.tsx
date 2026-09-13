@@ -1,6 +1,7 @@
 import type { FormEvent } from "react";
 
 type ImportPageProps = {
+  fileError?: string;
   fileInputKey: number;
   isReadOnly?: boolean;
   onDownloadOpeningTemplate: () => void;
@@ -9,6 +10,7 @@ type ImportPageProps = {
 };
 
 export default function ImportPage({
+  fileError = "",
   fileInputKey,
   isReadOnly = false,
   onDownloadOpeningTemplate,
@@ -22,7 +24,7 @@ export default function ImportPage({
       {isReadOnly && <p className="stock-muted">Closed fiscal year: opening stock import is disabled.</p>}
       <form className="stock-stack" onSubmit={onImportOpening}>
         <div className="stock-form-grid">
-          <label>Opening Stock CSV File<input key={fileInputKey} accept=".csv,text/csv" disabled={isReadOnly} type="file" onChange={(event) => onOpeningFileChange(event.target.files?.[0] ?? null)} /></label>
+          <label>Opening Stock CSV File<input key={fileInputKey} accept=".csv,text/csv" aria-invalid={Boolean(fileError)} disabled={isReadOnly} type="file" onChange={(event) => onOpeningFileChange(event.target.files?.[0] ?? null)} />{fileError && <span className="field-error" role="alert">{fileError}</span>}</label>
           <div className="stock-import-example"><strong>Format</strong><span>code,name,unit,openingQty,openingRate,reorderLevel</span><span>IRON-01,Iron Rod,MT,10,85000,2</span><span>CEMENT-01,Cement,KG,500,18,100</span></div>
         </div>
         <div className="stock-actions">

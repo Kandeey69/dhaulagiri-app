@@ -5,6 +5,7 @@ import { saveLedgerPdf } from "../utils/pdf";
 import OutputVatReport from "./Maskebari";
 import { companyStorageKey } from "../../companyContext";
 import ThirdPartyConfirmation from "./ThirdPartyConfirmation";
+import { notifyError, notifyToast } from "../../components/notificationService";
 
 type ReportView = "Party Ledger" | "Outstanding Balance" | "Output VAT" | "3rd Party Confirmation";
 
@@ -27,7 +28,6 @@ export default function Reports() {
     () => localStorage.getItem(companyStorageKey("accounts-output-vat-month")) || "1"
   );
   const [reportSearch, setReportSearch] = useState("");
-  const [message, setMessage] = useState("");
 
   const loadLedger = useCallback(async (partyId: string) => {
     setSelectedPartyId(partyId);
@@ -99,31 +99,22 @@ export default function Reports() {
     : rows;
 
   async function handleDownloadLedgerPdf() {
-    setMessage("");
-
     if (!selectedParty) {
-      setMessage("Please select a party before downloading the ledger PDF.");
       return;
     }
 
     try {
       await saveLedgerPdf(selectedParty, ledgerRows);
-      setMessage(`Ledger PDF generated for ${selectedParty.name}.`);
+      notifyToast(`Ledger PDF generated for ${selectedParty.name}.`);
     } catch (error) {
       console.error("ledger pdf error:", error);
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : String(error || "Failed to generate ledger PDF.")
-      );
+      notifyError(error instanceof Error ? error.message : String(error || "Failed to generate ledger PDF."), "Ledger PDF could not be generated");
     }
   }
 
   return (
     <>
       <h1>Reports</h1>
-      {message && <p className="status-message">{message}</p>}
-
       <div className="tabs">
         {(["Party Ledger", "Outstanding Balance", "Output VAT", "3rd Party Confirmation"] as ReportView[]).map((item) => (
           <button
