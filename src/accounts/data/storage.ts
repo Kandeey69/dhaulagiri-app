@@ -924,6 +924,17 @@ async function replaceLedgerPosting(db: Database, sourceType: string, sourceId: 
   await insertLedgerEntries(db, entries);
 }
 
+export function toNativeReceiptAllocationPayload(allocation: ReceiptAllocation) {
+  return {
+    id: allocation.id,
+    receiptId: allocation.receiptId,
+    saleId: allocation.saleId,
+    amountNpr: allocation.amountNPR,
+    createdAt: allocation.createdAt,
+    updatedAt: allocation.updatedAt,
+  };
+}
+
 async function writeCollectionTransactionWithTauri(input: {
   mode: "create" | "update" | "delete";
   collectionId: string;
@@ -941,10 +952,7 @@ async function writeCollectionTransactionWithTauri(input: {
     mode: input.mode,
     collectionId: input.collectionId,
     collection: input.collection ?? null,
-    allocations: (input.allocations ?? []).map((allocation) => ({
-      ...allocation,
-      amountNpr: allocation.amountNPR,
-    })),
+    allocations: (input.allocations ?? []).map(toNativeReceiptAllocationPayload),
     ledgerEntries: (input.ledgerEntries ?? []).map((entry) => ({
       ...entry,
       partyId: entry.partyId ?? "",

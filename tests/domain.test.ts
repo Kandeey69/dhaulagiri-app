@@ -93,6 +93,7 @@ import {
   runDbTransaction,
   saveCollection,
   saveSale,
+  toNativeReceiptAllocationPayload,
   updateCollection,
   updateSale,
 } from '../src/accounts/data/storage.ts'
@@ -960,8 +961,26 @@ test('native collection payload keeps receipt allocation amount casing compatibl
   const frontend = readFileSync('src/accounts/data/storage.ts', 'utf8')
   const backend = readFileSync('src-tauri/src/lib.rs', 'utf8')
 
+  const payload = toNativeReceiptAllocationPayload({
+    id: 'allocation-1',
+    receiptId: 'receipt-1',
+    saleId: 'sale-1',
+    amountNPR: 1250,
+    createdAt: '2026-09-13T00:00:00.000Z',
+    updatedAt: '2026-09-13T00:00:00.000Z',
+  })
+
   assert.match(frontend, /amountNpr: allocation\.amountNPR/)
   assert.match(backend, /#\[serde\(alias = "amountNPR", alias = "amount_npr"\)\]/)
+  assert.deepEqual(payload, {
+    id: 'allocation-1',
+    receiptId: 'receipt-1',
+    saleId: 'sale-1',
+    amountNpr: 1250,
+    createdAt: '2026-09-13T00:00:00.000Z',
+    updatedAt: '2026-09-13T00:00:00.000Z',
+  })
+  assert.equal('amountNPR' in payload, false)
 })
 
 test('native import purchase update preserves existing payment allocations', () => {
